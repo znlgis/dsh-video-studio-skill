@@ -70,11 +70,18 @@ assert abs(float(f["duration"]) - frames / FPS) < 0.5
 # 响度
 lo = K.loudness(film)
 assert -17.5 <= lo["I"] <= -14.5, lo
-assert lo.get("TP", 0) <= -0.5, lo
+# ⚠ 不要写 lo.get("TP", 0)：缺键时 0 会被当成"合格"，门禁静默失效
+assert "TP" in lo, "真峰没测到（ebur128 需要 peak=true）: %s" % lo
+assert lo["TP"] <= -1.0, lo
 
 # 锐度比（编码损失）——比码率下限可靠
-q = K.encode_quality(film, ref_png, at_sec=dur*0.3)
+# ⚠ ref 必须是场景函数在 t=dur*0.3 重新渲染的原图；用成片自己抽帧会让 ratio 恒 ≈ 1.0
+ref = draw_frame(scene_at(dur * 0.3), ...)          # 或 render.py 的 st_qa 传 ref_img=
+q = K.encode_quality(film, None, at_sec=dur * 0.3, ref_img=ref)
 assert q["ratio"] >= 0.85, q
+
+# 字幕条数 = 剧本句数（查"静默丢字幕"）
+assert K.write_srt(tl["scenes"], tmp_srt) == len(script["lines"])
 
 # 黑帧（首尾之外）
 assert K.detect_black(film) == 0

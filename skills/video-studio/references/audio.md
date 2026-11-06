@@ -120,6 +120,9 @@ def loop_noise(dur=8.0, sr=48000, lo=180, hi=900, seed=5):
 
 ```python
 # edge-tts 每条尾部约 0.95 s 静音，55 条累计 61.5 s
+# v0.2 起 filmkit.tts(trim=True) 默认裁掉首尾静音，并把裁剪后的 wav 作为 decode 源：
+#   meta.path -> xxx.trim.wav, meta.dur = 裁剪后实测时长；原 mp3 保留在 meta.mp3
+# 缓存 key = sha1(text|voice|rate|pitch)；改台词会自动重新合成（v0.1 只判文件存在）
 pcm = K.decode_pcm(mp3)
 trimmed = trim_tail(pcm, threshold=0.002, keep=0.12)
 

@@ -8,3 +8,7 @@ Thumbs.db
 myfilm/
 out/
 work/
+
+# Python
+__pycache__/
+*.pyc

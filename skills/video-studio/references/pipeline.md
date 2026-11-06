@@ -95,7 +95,9 @@ K.wav_write("work/audio.wav", bus.mix())
 
 ```bash
 # 只渲 3 帧看风格
-python render.py ... --stage frames   # 或用 filmkit.snap 抽点
+python render.py ... --stage frames --jobs 4          # 分块并行渲染
+python render.py ... --stage frames --jobs 4 --resume   # 只补缺块（按绝对帧号）
+python render.py ... --stage qa                          # 只读质检，不重渲不重编
 ```
 看三件事：构图有没有重心、配色是否统一、字重和字号是否舒服。**定了再渲全片**。
 
@@ -104,7 +106,8 @@ python render.py ... --stage frames   # 或用 filmkit.snap 抽点
 ```python
 sink = K.FrameSink("work/silent.mp4", crf=18, preset="medium")   # rawvideo 直通
 ...
-K.mux("work/silent.mp4", "work/audio.wav", "out/film.mp4", crf=18)  # 含两遍 loudnorm
+# 视频流默认 -c:v copy（不再二次编码）；需要改分辨率时 reencode_video=True
+K.mux("work/silent.mp4", "work/audio.wav", "out/film.mp4")
 ```
 
 编码参数：

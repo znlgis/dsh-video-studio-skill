@@ -28,28 +28,47 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .            # 剧本模板（改文字即可）
 cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
-cp <SKILL_DIR>/scripts/{filmkit.py,render.py} .
+cp <SKILL_DIR>/scripts/{filmkit.py,render.py,selfcheck.py} .
 
-# 2) 改 film.json 的 lines[].text / sub / big / items
+# 2) 先跑一次自检：14 条回归护栏，10 秒内出结论（不联网）
+python selfcheck.py
+
+# 3) 改 film.json 的 lines[].text / sub / big / items
 #    text = 朗读文本（自然口语）；sub = 上屏字幕（短，一行优先）
 
-# 3) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
+# 4) 母版预览（P6）：先只渲几张关键帧看构图/配色，别一上来渲全片
+python render.py --script film.json --scenes scenes.py --work work --stage stills \
+       --stills "l01:3,l02:5,l03:2.5"
+
+# 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 
-# 4) 亲眼看质检抽出的帧
+# 6) 亲眼看质检抽出的帧
 #    work/qa/sheet.png      联系表（全片调性）
 #    work/qa/snap_*.png     全分辨率静帧
 ```
 
-分阶段跑（改一处不用全跑）：
+分阶段跑（**v0.2 起每个 stage 只做自己的事**，不会再顺手重渲全片）：
 
 ```bash
-python render.py ... --stage tts      # 只合成旁白 + 量时长
-python render.py ... --stage layout   # 只排时间轴（不渲染）
-python render.py ... --stage frames   # 只渲染帧
-python render.py ... --stage audio    # 只混音
-python render.py ... --stage mux      # 只合成 + 质检
+python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
+python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass
+python render.py ... --stage audio    # 只混音 -> audio.wav
+python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--jobs N 分块并行）
+python render.py ... --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
+python render.py ... --stage qa       # 只质检（读成片，零写入）
+python render.py ... --stage stills   # 只渲母版静帧 + 联系表
 ```
+
+长片渲染（分块并行 + 断点续跑）：
+
+```bash
+python render.py ... --stage frames --jobs 4        # 4 进程按绝对帧号分块
+python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
+```
+
+> 分块按 `seg_<起始帧>_<结束帧>.mp4` 命名；拼接前会**显式检测缺口**，缺块直接报错，
+> 不允许"少一段也能出片"。默认 chunk 约 4 秒，可用 `film.json` 的 `chunk_frames` 覆盖。
 
 ## 2. 标准八阶段（P0–P7）
 
@@ -88,19 +107,30 @@ python render.py ... --stage mux      # 只合成 + 质检
 ## 5. 质检门禁（交付前必过）
 
 ```bash
-python render.py ... --stage mux     # 内置 qa_report：分辨率/音轨/时长/响度/锐度比/黑帧
+python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数
+python selfcheck.py                 # 技能自身回归（14 条曾真的坏过的点）
 ```
 
 | 判据 | 阈值 | 失败怎么办 |
 |---|---|---|
-| 分辨率/帧率 | 严格等于设定值 | 检查 FrameSink 参数 |
-| 音轨存在 | 必须有 | mux 参数漏了 `-i audio.wav` |
-| 时长 | 与 `frames/FPS` 差 < 0.5 s | 断点续渲漏帧 |
+| 分辨率/帧率 | 严格等于设定值 | 检查 FrameSink 参数；`strict=True` 会直接报错而不是静默缩放 |
+| 音轨存在 / 48 kHz | 必须有 | mux 参数漏了 `-i audio.wav` |
+| 时长 | 与 `frames/FPS` 差 < 0.5 s | 断点续渲漏帧；分块模式检查缺口检测 |
 | 响度 | -16 ± 1 LUFS | 用 `filmkit.loudnorm_two_pass` |
-| 真峰 | ≤ -1 dBTP | 前瞻限幅 |
-| **编码锐度比** | **≥ 0.85**（原始帧 vs 解码帧 Laplacian 方差） | 降 CRF 或提 preset |
+| **真峰** | **≤ -1 dBTP** | 混流前目标设 -1.5（AAC 会把真峰抬高 ~0.9 dB） |
+| **编码锐度比** | **≥ 0.85** | 降 CRF 或提 preset |
 | 长黑帧 | 首尾以外 0 段 | 检查素材/淡入淡出 |
-| 字幕安全区 | `qa_text_safe` 无警告 | 缩短字幕或调 SUB_BAND |
+| 字幕安全区 | `qa_text_safe` 无警告（≤2 行、不越界、不触底） | 缩短字幕或调 SUB_BAND |
+| **字幕条数** | **= 剧本句数** | 少一条就是静默丢字幕，查 `sub_window` 与 `write_srt` |
+| 缺字形 | `check_glyphs` 无警告 | 改文字或用矢量线条画（msyhbd 缺 ✓ × ↵ 等） |
+
+**三个 v0.2 才修对的坑（v0.1 的"门禁"其实是摆设）：**
+
+1. **锐度比的参考帧不能是成片自己抽的帧。** 那样 `sharp_ref` 与 `sharp_dec` 几乎相同，
+   ratio 恒 ≈ 1.0。必须用**场景函数重新渲染**同一时刻的原图（`st_qa` 已这么做）。
+2. **真峰必须显式开 `ebur128=peak=true`。** 默认参数下解析不到 `Peak:`，
+   "真峰 ≤ -1 dBTP" 这条永远不触发。
+3. **码率不是质量指标。** 暗底大字内容 0.5–1 Mbps 是正常的；把它当"下限"会天天误报。
 
 **"不能有"和"必须有"两类都要查**：闪烁/重叠/出画/削波是"不能有"；图名框/淡入/字幕/每段至少一个动态元素是"必须有"——后者最容易静默失效。
 
@@ -124,7 +154,15 @@ python render.py ... --stage mux     # 内置 qa_report：分辨率/音轨/时�
 | 烧录字幕字号小得看不清 | SRT 交 libass 按 `PlayResY=288` 排版 | `FontSize/MarginV` 要 ×3.75，或直接用 ASS 指定 PlayRes |
 | ASS 字幕位置全乱 | Format 行漏了 `MarginL/MarginR/MarginV` 字段 | ASS 头 Format 行字段顺序必须与 Dialogue 完全对应 |
 | 渲染出上一部片的内容 | `sys.path` 顺序导致 import 到旧模块 | 用绝对路径 + 每次全新进程；子进程别继承父进程模块缓存 |
-| 画面里 ✓ × ↵ 显示成方框 | msyhbd 缺这些字形 | 用矢量画（ImageDraw 线条），不要用符号字符 |
+| 画面里 ✓ × ↵ 显示成方框 | msyhbd 缺这些字形 | 用矢量画（ImageDraw 线条），不要用符号字符；或先跑 `K.check_glyphs` |
+| **改了台词但配音没变** | TTS 缓存只判断"文件存在" | v0.2 已把 text/voice/rate/pitch 哈希写进 `*.mp3.json`；旧缓存需 `--force-tts` 一次 |
+| **长句字幕读到一半消失** | `sub_window` 把 t1 钳在 `voice_start+5.2` | v0.2 默认覆盖整句；要钳短显式传 `max_hold` |
+| **--stage qa 也重渲全片** | stage 分发写成 `in ("all","frames","mux","qa")` | v0.2 每个 stage 独立；qa 只读成片 |
+| **concatenation 打不开分块** | concat.txt 里写相对路径，ffmpeg 按自己 cwd 解析 | 写**绝对路径**（v0.2 已修） |
+| 成片比 silent.mp4 慢一倍 | mux 对已编码视频又编一遍 | `-c:v copy`（v0.2 默认）；只在要改分辨率时 `reencode_video=True` |
+| 每帧渲染慢 2–3 倍 | 每帧重新 `wrap_cn`（中文逐字测宽） | 用 `K.wrap_cn_cached` / `K.text_w_cached` |
+| 混音偶发爆表 | 归一化分支没执行 / 叠加峰值 >1 | `AudioBus.mix()` 会打印叠加峰值并软限幅，峰值 >0.97 报警 |
+| **成片音轨变成 96kHz** | mux 没指定 `-ar`，loudnorm 内部升到 192kHz 后 AAC 取了 96k | mux 显式 `-ar 48000`（v0.2 已内置，selfcheck 第 12 条守着） |
 
 ## 7. 参考资料（按需加载）
 
@@ -138,19 +176,37 @@ python render.py ... --stage mux     # 内置 qa_report：分辨率/音轨/时�
 
 | 文件 | 作用 |
 |---|---|
-| `scripts/filmkit.py` | 生产内核：字体/文本换行/字幕安全区/缓动/确定性随机/音频总线/TTS/时间轴/FrameSink/混音/质检 |
-| `scripts/render.py` | 编排器：`--stage` 分阶段，产物落盘可续跑 |
-| `assets/scenes.py` | 场景模板（3 种示范：开场/正文卡片/收尾），复制改成自己的 |
-| `assets/film.json` | 剧本模板 |
+| `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/TTS/时间轴/FrameSink/合成/质检 |
+| `scripts/render.py` | 编排器：7 个独立 stage、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
+| `scripts/selfcheck.py` | 回归自检：14 条"曾真的坏过"的断言，不联网 10 秒出结论 |
+| `assets/scenes.py` | 场景模板（3 种示范：开场/正文卡片/收尾），含缓存排版与预烘焙背景的正确写法 |
+| `assets/film.json` | 剧本模板（含 `trim_silence`/`tts_workers`/`sub_max_hold`/`chunk_frames` 等新字段） |
+
+### 关键内置能力（v0.2）
+
+| API | 用途 |
+|---|---|
+| `K.tts(...)` | 逐句合成；缓存 key = text+voice+rate+pitch 哈希；网络重试 4 次；可选尾静音裁剪 |
+| `K.loudnorm_two_pass(...)` | 两遍响度标准化，返回可给 `-af` 的滤镜串 |
+| `K.loudness(path)` | 返回 `{I, LRA, TP}`（真峰已开 `ebur128=peak=true`） |
+| `K.AudioBus.music_bed(...)` | 连续配乐床（和弦交叉淡化，无接缝爆点） |
+| `K.AudioBus.mix()` | 归一化 + 软限幅，打印叠加峰值，>0.97 报警 |
+| `K.wrap_cn_cached / text_w_cached` | 场景每帧排版必用（实测单帧 12ms → 4.6ms） |
+| `K.glyph_missing_chars / check_glyphs` | 缺字形自查（✓ × ↵ 会画成方块） |
+| `K.write_ass(...)` | 直接输出 ASS，头里声明 PlayResX/Y=1920/1080 |
+| `K.encode_quality(film, ref_img=...)` | 锐度比；参考帧必须来自场景函数，不能是成片抽帧 |
 
 ## 9. 验收话术（不要自我宣称"做好了"）
 
 交付时必须能贴出：
 1. `ffprobe` 的时长/分辨率/码率
-2. `ebur128` 的积分响度与真峰
-3. 编码锐度比（≥0.85）
-4. 联系表路径 + "已用 read_image 亲眼确认"的具体观察
+2. `ebur128` 的积分响度与**真峰**（两个数都要，只有响度不算）
+3. 编码锐度比（≥0.85）**并说明参考帧来自场景函数重新渲染**
+4. 联系表路径 + "已用 read_image 亲眼确认"的**具体观察**（不是"看起来不错"）
 5. 字幕条目数 = 剧本句数（无静默丢失）
+6. `python selfcheck.py` 的 PASS 计数
+
+> 自查口令：如果一条门禁从来没失败过，先确认它是不是根本测不到。
 
 ## 10. 作者机器已验证的环境事实（2026-11-06 实测）
 
@@ -192,3 +248,42 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 1. **`-shortest` 会按较短一路截断**：音频比视频短 1.2 s 时，请求 524 帧只出 488 帧，且不报错。**永远显式 `-t` 并校验两路时长差 < 0.05 s**（`filmkit.mux` 已内置此检查）。
 2. **`-stream_loop -1` 让 `-shortest` 失效**：会产生 13 小时的怪物文件。循环输入必须配显式 `-t`。
 3. **`amix` 默认 `normalize=1`**：按输入数均分，2 路输入直接掉 6 dB。要么 `normalize=0`，要么走 numpy 总线（推荐）。
+
+## 11. v0.2 升级须知（从 v0.1 迁移要动的地方）
+
+v0.2 修的全是"v0.1 的承诺没有兑现"的地方，因此有不兼容变更：
+
+| 变更 | v0.1 | v0.2 | 迁移动作 |
+|---|---|---|---|
+| 阶段语义 | `--stage mux/qa/frames` 都会重渲全片 | 每个 stage 只做自己的事 | 脚本里连续跑多阶段时去掉重复的 `--stage all` |
+| TTS 缓存 | 只判断 mp3 存在 | text/voice/rate/pitch 哈希必须匹配 | 首次升级加 `--force-tts` 跑一次 |
+| 字幕窗口 | 硬钳在 `voice_start+5.2` | 默认覆盖整句（`end-0.06` 封顶） | 确实要短字幕就传 `sub_max_hold` |
+| 视频合成 | 对 silent.mp4 再编一遍 libx264 | `-c:v copy`（不重编码） | 要改分辨率时显式 `"reencode_video": true` |
+| 帧尺寸 | 不符时静默 resize | `strict=True` 直接报错 | 场景函数必须返回 1920×1080 |
+| 码率门禁 | `min_bitrate=3Mbps` 算错误 | 默认不当门禁，只做参考 | 需要就显式传 `min_bitrate` |
+| 真峰门禁 | 解析不到 Peak → 永不触发 | `ebur128=peak=true`，真测 | 无（自动生效） |
+| 锐度比 | 参考帧用成片抽帧 → 恒 ≈1.0 | 参考帧由场景函数重新渲染 | 无（`st_qa` 已改） |
+| TTS 音频 | 保留 edge-tts 尾部 ~0.95s 静音 | 默认裁掉首尾静音 | 想保留：`"trim_silence": false` |
+
+**新增文件**：`scripts/selfcheck.py`（14 条回归）、`work/sub.ass`（ASS 字幕，PlayRes 正确）。
+
+## 12. 换机 60 秒自检（比读文档快）
+
+```bash
+cd <SKILL_DIR>/scripts
+python selfcheck.py          # 14 条断言；FAIL 就照提示修环境
+```
+
+selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依赖任何成片**。
+每条 FAIL 都对应一个具体环境缺口（缺字体 / ffmpeg 无 libx264 / 无 numpy），
+报错信息直接写该改哪里。
+
+### v0.2 在本机实测（2026-11-07，同一台机器）
+
+| 项 | 数据 |
+|---|---|
+| 场景渲染（缓存排版 + 预烘焙背景） | **单帧 12.3ms → 4.6ms**；885 帧整片约 8s（103 fps） |
+| 分块并行（--jobs 3，4 段） | 885 帧 **7s** 完成分段，拼接后时长误差 0 |
+| mux（视频流 copy） | 两遍 loudnorm 后 −16.5 LUFS / 真峰 −1.5 dBTP，不二次编码 |
+| 11 分钟真实片 | 帧渲染 69–80 fps |
+| selfcheck | 14/14 PASS（含真峰、ASS PlayRes、尾静音裁剪、mux 48kHz） |

@@ -8,7 +8,9 @@
 零素材、可复现、可断点续跑、可脚本化验收；装成插件后，整片生产流程随技能一起进入每个会话。
 
 > 源自 `dsh-v` 资产包的 `02-技能包-video-studio`（817 个 DSH 会话的考古分析 + 5 套现存工程逆向 + 本机实测）。
-> 技能正文、参考文档、脚本、模板均逐字节保留，未做二次改写。
+> **v0.2.0 起技能正文有实质修订**：用这套技能真的做出一部 11 分钟成片后，发现 10 处
+> "文档承诺了、代码没做到"的地方（门禁失效、缓存不校验、stage 假独立、mux 二次编码等），
+> 全部修掉并补了 14 条回归断言。详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §11。
 
 ## 安装
 
@@ -47,14 +49,18 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .                       # 剧本模板
 cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
-cp <SKILL_DIR>/scripts/{filmkit.py,render.py} .
+cp <SKILL_DIR>/scripts/{filmkit.py,render.py,selfcheck.py} .
 
+python selfcheck.py                                     # 14 条环境/回归断言（10 秒，不联网）
+python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览：先看构图
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 ```
 
 `<SKILL_DIR>` 是 `skill` 工具加载时回报的 resourceBase 目录（`.../skills/video-studio/`）。
 
-分阶段（改一处不用重渲全片）：`--stage tts | layout | frames | audio | mux`。
+分阶段（v0.2 起**每个 stage 只做自己的事**）：`--stage tts | layout | audio | frames | mux | qa | stills`。
+
+长片：`--stage frames --jobs 4`（按绝对帧号分块并行）+ `--resume`（中断只补缺块）。
 
 ## 这个技能解决什么
 
@@ -73,10 +79,11 @@ index.js                     插件入口：把 skills/ 挂成 bundled 技能根
 cordis.patch.yml             组合包 patch（insert: video-studio）
 icon.svg / locale/*.json     插件页展示元数据
 skills/video-studio/
-  SKILL.md                   主线：铁律 / 五步上手 / 八阶段 / 引擎选型 / 画质清单 / 故障速查
+  SKILL.md                   主线：上手 / 八阶段 / 引擎选型 / 画质清单 / 质检门禁 / 故障速查 / 升级须知
   references/                pipeline · scene-authoring · audio · quality-gates · pitfalls
-  scripts/filmkit.py         生产内核（字体/换行/字幕安全区/缓动/确定性随机/音频总线/TTS/时间轴/编码/质检）
-  scripts/render.py          编排器（--stage 分阶段，产物落盘可续跑）
+  scripts/filmkit.py         生产内核（字体/字形自查/缓存排版/字幕安全区/音频总线/TTS/时间轴/编码/质检）
+  scripts/render.py          编排器（7 个独立 stage、分块并行、断点续跑、母版预览）
+  scripts/selfcheck.py       回归自检（14 条"曾真的坏过"的断言）
   assets/film.json           剧本模板
   assets/scenes.py           场景模板（开场 / 正文卡片 / 收尾）
 ```

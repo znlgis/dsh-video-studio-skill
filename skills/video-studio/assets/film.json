@@ -1,107 +1,74 @@
 {
-  "title": "测试片 demo",
-  "end_text": "完",
-  "voice": "zh-CN-YunyangNeural",
-  "rate": "+6%",
-  "lead": 0.55,
-  "tail": 0.85,
-  "min_dur": 3,
-  "crf": 18,
-  "preset": "medium",
-  "music": {
-    "enabled": true,
-    "seg": 4,
-    "amp": 0.05,
-    "gain": 0.9,
-    "chords": [
-      [
-        220,
-        261.63,
-        329.63
-      ],
-      [
-        174.61,
-        220,
-        261.63
-      ],
-      [
-        196,
-        246.94,
-        293.66
-      ]
-    ]
+ "title": "测试片 demo",
+ "end_text": "完",
+ "voice": "zh-CN-YunxiNeural",
+ "rate": "+6%",
+ "lead": 0.62,
+ "tail": 0.92,
+ "min_dur": 3.2,
+ "sub_max_hold": null,
+ "trim_silence": true,
+ "tts_workers": 4,
+ "chunk_frames": 0,
+ "crf": 17,
+ "preset": "medium",
+ "music": {
+  "enabled": true,
+  "seg": 4.0,
+  "amp": 0.05,
+  "gain": 0.9,
+  "xfade": 1.2,
+  "chords": [[220, 261.63, 329.63], [174.61, 220, 261.63], [196, 246.94, 293.66]]
+ },
+ "whoosh": true,
+ "whoosh_amp": 0.055,
+ "lines": [
+  {
+   "id": "l01",
+   "kind": "hook",
+   "chapter": "01 · 开场",
+   "text": "这是用 DeepSeek 4.1 Flash 在 DeepSeek Harness 里，从零生成的画面与声音。",
+   "sub": "零素材，全代码生成",
+   "big": "零素材，全代码生成"
   },
-  "whoosh": true,
-  "lines": [
-    {
-      "id": "l01",
-      "kind": "hook",
-      "text": "这是用 DeepSeek 4.1 Flash 在 DeepSeek Harness 里，从零生成的画面与声音。",
-      "big": "零素材，全代码生成"
-    },
-    {
-      "id": "l02",
-      "kind": "body",
-      "chapter": "02 · 怎么做到的",
-      "kicker": "PIPELINE",
-      "text": "整条管线只有五步：写剧本、生成旁白、排时间轴、逐帧渲染、混音合成。",
-      "big": "五步成片",
-      "sub": "每一步的产物都落盘，可续跑、可回滚。",
-      "items": [
-        {
-          "text": "剧本 film.json",
-          "ok": true
-        },
-        {
-          "text": "旁白 edge-tts 实测时长",
-          "ok": true
-        },
-        {
-          "text": "时间轴 timeline.json",
-          "ok": true
-        },
-        {
-          "text": "逐帧 PIL 渲染",
-          "ok": true
-        },
-        {
-          "text": "numpy 采样级混音",
-          "ok": true
-        }
-      ]
-    },
-    {
-      "id": "l03",
-      "kind": "body",
-      "chapter": "03 · 画质关键",
-      "kicker": "QUALITY",
-      "text": "画质的关键不是特效，而是：原始帧直通编码、字幕安全区、响度标准化。",
-      "big": "画质三件事",
-      "sub": "rawvideo 直送 libx264，比中间文件快两倍且无损。",
-      "items": [
-        {
-          "text": "rawvideo -> libx264 CRF18",
-          "ok": true
-        },
-        {
-          "text": "字幕不越出安全区",
-          "ok": true
-        },
-        {
-          "text": "-16 LUFS / -1 dBTP",
-          "ok": true
-        },
-        {
-          "text": "每帧确定性可复现",
-          "ok": true
-        }
-      ]
-    },
-    {
-      "id": "l04",
-      "kind": "outro",
-      "text": "先定脚本，再定声音，最后才是画面。顺序对了，返工就少。",
-      "big": "顺序比努力重要"
-    }
-  ]
+  {
+   "id": "l02",
+   "kind": "body",
+   "chapter": "02 · 怎么做到的",
+   "kicker": "PIPELINE",
+   "text": "整条管线只有五步：写剧本、生成旁白、排时间轴、逐帧渲染、混音合成。",
+   "sub": "五步成片，每步落盘",
+   "big": "五步成片",
+   "items": [
+    {"text": "剧本 film.json", "ok": true},
+    {"text": "旁白 edge-tts 实测时长", "ok": true},
+    {"text": "时间轴 timeline.json", "ok": true},
+    {"text": "逐帧 PIL 渲染", "ok": true},
+    {"text": "numpy 采样级混音", "ok": true}
+   ]
+  },
+  {
+   "id": "l03",
+   "kind": "body",
+   "chapter": "03 · 画质关键",
+   "kicker": "QUALITY",
+   "text": "画质的关键不是特效，而是原始帧直通编码、字幕安全区、响度标准化。",
+   "sub": "直通编码 / 安全区 / 响度",
+   "big": "画质三件事",
+   "items": [
+    {"text": "rawvideo -> libx264 CRF17", "ok": true},
+    {"text": "字幕不越出安全区", "ok": true},
+    {"text": "-16 LUFS / -1.5 dBTP", "ok": true},
+    {"text": "每帧确定性可复现", "ok": true}
+   ]
+  },
+  {
+   "id": "l04",
+   "kind": "outro",
+   "chapter": "99 · 收尾",
+   "text": "先定脚本，再定声音，最后才是画面。顺序对了，返工就少。",
+   "sub": "顺序比努力重要",
+   "big": "顺序比努力重要"
+  }
+ ]
 }

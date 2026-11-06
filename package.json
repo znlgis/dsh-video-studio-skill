@@ -1,6 +1,6 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and QA gates.",
   "type": "module",
   "main": "index.js",
