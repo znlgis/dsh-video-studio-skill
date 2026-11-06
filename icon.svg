@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Video studio">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#13233a"/>
+      <stop offset="1" stop-color="#0a1420"/>
+    </linearGradient>
+    <linearGradient id="play" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5ee7ff"/>
+      <stop offset="1" stop-color="#2f9dff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <g fill="none" stroke="#9fb4cc" stroke-width="2" stroke-linecap="round">
+    <rect x="12" y="14" width="40" height="36" rx="5"/>
+    <path d="M12 24h40M12 40h40M24 14v36M40 14v36"/>
+  </g>
+  <path d="M27 27.5v13l11-6.5z" fill="url(#play)"/>
+  <circle cx="49" cy="18" r="4.5" fill="#ff5c72"/>
+</svg>

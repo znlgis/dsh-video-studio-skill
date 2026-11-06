@@ -1,0 +1,51 @@
+{
+  "name": "@dsh-gis/dsh-video-studio-skill",
+  "version": "0.1.0",
+  "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and QA gates.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "skills"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "skill",
+    "video",
+    "ffmpeg",
+    "edge-tts",
+    "字幕",
+    "视频",
+    "配音"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/znlgis/dsh-video-studio-skill.git"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.0-rc.6 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-skill-filesystem": {
+      "optional": true
+    }
+  },
+  "license": "MIT"
+}

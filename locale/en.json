@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Video studio",
+    "description": "Code-generated Chinese videos: script, edge-tts narration, measured timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and automated QA. Covers promos, report-to-video, narration with subtitles, and A/V sync fixes."
+  }
+}

@@ -1,0 +1,5 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack so the
+# filesystem skill provider mounts the bundled skills/ tree (see index.js).
+- insert:
+    - id: video-studio
+      name: '@dsh-gis/dsh-video-studio-skill'

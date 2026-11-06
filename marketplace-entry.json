@@ -1,0 +1,24 @@
+{
+  "name": "@dsh-gis/dsh-video-studio-skill",
+  "owner": "znlgis",
+  "url": "https://github.com/znlgis/dsh-video-studio-skill",
+  "category": ["media", "video", "tools"],
+  "keywords": [
+    "video",
+    "ffmpeg",
+    "edge-tts",
+    "rendering",
+    "subtitles",
+    "Chinese narration",
+    "视频",
+    "字幕",
+    "配音",
+    "宣传片"
+  ],
+  "description": {
+    "en": "Code-generated Chinese video skill plugin: script, edge-tts narration, measured timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and automated QA gates.",
+    "zh": "中文视频生成技能插件：写剧本 → edge-tts 旁白 → 实测时长排轴 → 逐帧渲染 → ffmpeg 编码 → 采样级混音 → 自动质检，可做宣传片、报告转视频、配音配字幕。"
+  },
+  "install": "dsh plugin --profile desktop add @dsh-gis/dsh-video-studio-skill",
+  "added": "2026-11-06"
+}
