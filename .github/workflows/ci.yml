@@ -63,11 +63,30 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python selfcheck.py
-      - name: 可选模块自检（缺依赖会失败，所以单独一步，失败信息更清楚）
+      # 可选模块的 selftest 拆成独立 step：一个 step 里串三条 `set -e`，
+      # 只看得出"这一坨失败了"，看不出是哪条——第一次跑 CI 就吃了这个亏。
+      - name: 'selftest: sfxkit（24 配方 + 音质指标）'
         working-directory: skills/video-studio/scripts
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -e
-          python scorekit.py --selftest
-          python qa_frames.py --selftest
+        run: python sfxkit.py --selftest
+
+      - name: 'selftest: scorekit（配乐）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scorekit.py --selftest
+
+      - name: 'selftest: qa_frames（帧级深检）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python qa_frames.py --selftest
+
+      # 兜底路径也要测：用户没装 scipy 时所有 IIR 走"分块 FFT 卷积"，
+      # 那才是他们真正跑的代码。屏蔽 scipy 再跑一遍，断言按路径自适应
+      # （见 scorekit case 8 / sfxkit PERF_BUDGET_*）。
+      - name: 'selftest: 无 scipy 兜底路径（用户常见配置）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/selftest_noscipy.py sfxkit scorekit

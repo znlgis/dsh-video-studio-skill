@@ -170,9 +170,9 @@ peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 D
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 10 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
+python tools/ci_check.py -v     # 11 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
                                 #         npm pack 打包卫生 / 文档路径引用 / Python 3.9 语法 /
-                                #         Markdown 围栏平衡 / 单文件体积
+                                #         Markdown 围栏平衡 / CI workflow 语法 / 单文件体积
 ```
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。

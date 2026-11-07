@@ -504,7 +504,7 @@ v0.4 给了两条真正能用的路：
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 24 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 10 / FAIL 0
+> 自检：selfcheck PASS 24 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 11 / FAIL 0
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```

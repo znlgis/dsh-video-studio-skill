@@ -15,7 +15,8 @@
   6  文档引用：SKILL.md / references 里引用的 scripts/xxx.py、assets/xxx 必须真的存在
   7  Python 3.9 语法兼容（THIRD_PARTY_NOTICES 写的是 3.9+；这里只验语法，运行期 API 仍要真机实测）
   8  Markdown 围栏成对（不平衡会让整篇渲染成代码块）
-  9  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
+  9  GitHub Actions workflow 里 step 名的裸冒号（会让整份 workflow 静默不跑）
+  10  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
 
 退出码：0 全过；1 有 FAIL。每一项都打印证据，不打"可能有问题"。
 """
@@ -238,6 +239,33 @@ def t_md_fences():
     return "%d 篇 Markdown 围栏都成对" % len([p for p in files if p.is_file()])
 
 
+# ---------------------------------------------------------------- 10 CI workflow 基本语法
+def t_ci_workflow():
+    """GitHub Actions workflow 的「裸冒号」陷阱。
+
+    「- name: selftest: xxx」里第二个冒号会让整份 YAML 解析失败，而 GitHub 上的表现是
+    「workflow 根本没跑」——没有任何报错提示，最容易被忽略（本项目真踩过）。
+    不引第三方 YAML 库（CI 里不一定装了 pyyaml），只查这一类高频错误。
+    """
+    wf = ROOT / ".github" / "workflows"
+    if not wf.is_dir():
+        return "跳过（没有 .github/workflows）"
+    bad = []
+    files = sorted(wf.glob("*.yml")) + sorted(wf.glob("*.yaml"))
+    for f in files:
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            m = re.match(r"^(\s*)-\s+name:\s*(.+)$", line)
+            if not m:
+                continue
+            val = m.group(2).strip()
+            if val[:1] in ("'", '"'):
+                continue
+            if ": " in val:
+                bad.append("%s:%d 的 step 名含未加引号的冒号（YAML 会解析失败，整份 workflow 不跑）"
+                           % (f.name, i))
+    assert not bad, "；".join(bad[:4])
+    return "%d 个 workflow 的 step 名没有裸冒号" % len(files)
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印每一节的详细证据")
@@ -257,7 +285,8 @@ def main(argv=None) -> int:
         ("7  文档路径引用", t_doc_refs),
         ("8  Python 3.9 语法兼容", t_py39),
         ("9  Markdown 围栏平衡", t_md_fences),
-        ("10 单文件体积", t_size),
+        ("10 CI workflow 语法", t_ci_workflow),
+        ("11 单文件体积", t_size),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)
