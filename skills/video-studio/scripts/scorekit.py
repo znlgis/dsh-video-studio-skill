@@ -686,9 +686,13 @@ class Score:
     """
 
     def __init__(self, duration, bpm: float = 120.0, key: str = "Dm", seed: int = 7, sr: int = SR):
-        _require(isinstance(duration, (int, float)) and float(duration) > 0.0,
-                 f"duration 必须是正数，收到 {duration!r}")
-        _require(float(bpm) > 0.0, f"bpm 必须是正数，收到 {bpm!r}")
+        # inf 能过 "> 0" 的检查、但之后会在 _snap_bar 里除零，所以这里要显式挡掉非有限值
+        _require(isinstance(duration, (int, float)) and math.isfinite(float(duration))
+                 and float(duration) > 0.0,
+                 f"duration 必须是有限正数，收到 {duration!r}")
+        _require(isinstance(bpm, (int, float)) and math.isfinite(float(bpm))
+                 and float(bpm) > 0.0,
+                 f"bpm 必须是有限正数，收到 {bpm!r}")
         _require(key in KEYS, f"未知调性 {key!r}；可选：{'/'.join(KEYS)}")
         self.duration = float(duration)
         self.bpm = float(bpm)
@@ -1368,6 +1372,9 @@ def _merge_sections(anchors, sections, duration: float) -> list:
     blocks: list[dict] = []
     if anchors:
         for idx, a in enumerate(anchors):
+            _require(isinstance(a, dict), f"anchors[{idx}] 必须是对象")
+            for fld in ("start", "end"):
+                _require(fld in a, f"anchors[{idx}] 缺少 {fld} 字段")
             kind = str(a.get("kind", "") or "")
             blocks.append({
                 "name": str(a.get("id") or kind or f"段{idx + 1}"),
@@ -1410,7 +1417,8 @@ def _merge_sections(anchors, sections, duration: float) -> list:
     for i, e in enumerate(extra):
         if e["end"] is not None:
             continue
-        later = [x["start"] for x in extra[i + 1:] if x["start"] > e["start"]] +                 [b["start"] for b in blocks if b["start"] > e["start"]]
+        later = ([x["start"] for x in extra[i + 1:] if x["start"] > e["start"]]
+                 + [b["start"] for b in blocks if b["start"] > e["start"]])
         e["end"] = min(later) if later else float(duration)
     blocks.extend(extra)
     blocks.sort(key=lambda d: d["start"])
@@ -1420,40 +1428,6 @@ def _merge_sections(anchors, sections, duration: float) -> list:
     if not blocks:
         blocks = [{"name": "全片", "start": 0.0, "end": float(duration), "energy": 0.5}]
     return blocks
-    if not sections:
-        return []
-    has_at = any(isinstance(s, dict) and "at" in s for s in sections)
-    amap = {}
-    if has_at:
-        _require(bool(anchors), "sections 用了 at 引用，但没有提供 anchors")
-        for a in anchors:
-            amap[str(a.get("id", ""))] = a
-    out: list[dict] = []
-    order = sorted(range(len(sections)), key=lambda i: (
-        amap.get(str(sections[i].get("at", "")), {}).get("start", sections[i].get("start", 0.0)))
-        if has_at else sections[i].get("start", 0.0))
-    for idx in order:
-        s = sections[idx]
-        _require(isinstance(s, dict), "sections 里的每一项都必须是对象")
-        energy = s.get("energy", 0.5)
-        if "at" in s:
-            key = str(s["at"])
-            _require(key in amap, f"sections 里的 at={key!r} 在 anchors 里找不到")
-            ans = amap[key]
-            start = float(ans["start"])
-            pos = order.index(idx)
-            if pos + 1 < len(order):
-                nxt = sections[order[pos + 1]]
-                end = float(amap[str(nxt["at"])]["start"]) if "at" in nxt else float(nxt["start"])
-            else:
-                end = float(ans.get("end", duration))
-            out.append({"name": str(s.get("name") or key), "start": start, "end": end, "energy": energy})
-        else:
-            _require("start" in s and "end" in s, "sections 项要么给 start/end，要么给 at")
-            out.append({"name": str(s.get("name") or f"段{idx + 1}"),
-                        "start": float(s["start"]), "end": float(s["end"]), "energy": energy})
-    out.sort(key=lambda d: d["start"])
-    return out
 
 
 def render(duration, bpm: float = 120.0, key: str = "Dm", anchors=None, sections=None,
@@ -1735,7 +1709,7 @@ def selftest() -> int:
     sc_perf = Score(60.0, bpm=120.0, key="Dm", seed=7)
     sc_perf.section("安静", 0.0, 16.0, 0.3).section("律动", 16.0, 44.0, 0.8).section("收尾", 44.0, 60.0, 0.35)
     t0 = time.perf_counter()
-    x_perf = sc_perf.render()
+    sc_perf.render()
     dt60 = time.perf_counter() - t0
     proj = dt60 / 60.0 * 389.0
     check("14. 性能：60 s 实测外推 389 s ≤ 60 s", proj <= 60.0,

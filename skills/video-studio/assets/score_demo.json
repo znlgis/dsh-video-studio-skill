@@ -33,7 +33,7 @@
   ]
  },
  "meas": {
-  "wav": "tmp_scratch_score-writer/score_demo.wav",
+  "wav": "work/score_demo.wav   # 用 reproduce 里的命令自己生成",
   "peak_dbfs": -1.5,
   "lufs_approx": -19.8,
   "true_peak_dbtp": -1.4,
@@ -45,7 +45,8 @@
   "lra_389s_lu": 4.9,
   "render_s": 5.115,
   "render_389s_s": 8.18,
-  "note": "389 s 实测：渲染 8.18 s（含并行负载；空载 6.7 s）、峰值 -1.5 dBFS、ffmpeg loudnorm -18.52 LUFS / -1.44 dBTP；48 s demo 实测 -18.45 LUFS。"
+  "note": "389 s 实测：渲染 8.18 s（含并行负载；空载 6.7 s）、峰值 -1.5 dBFS、ffmpeg loudnorm -18.52 LUFS / -1.44 dBTP；48 s demo 实测 -18.45 LUFS。",
+  "render_s_note": "本机实测值，随机器/负载浮动；不是承诺"
  },
  "bpm": 120.0,
  "key": "Dm",

@@ -54,7 +54,7 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 2. **数字滚动**（4–8s）：0 → 1920，走 out5 缓动，同步一条进度条。
 3. **粒子 / 发光**（8–12s）：150 个粒子位置 = hash(seed,i,k) + 时间，中心双层辉光 + 冲击环。
 4. **HUD 标注**（贯穿）：左上品牌/章节、右上时间码（每帧都变，天然保证"不同帧不同图"）、顶部进度线。
-5. **cue / event 登记**：9 个 cue、2 个视觉事件，经 window.getCues()/getEvents() 导出。
+5. **cue / event 登记**：9 个 cue、12 个视觉事件，经 window.getCues()/getEvents() 导出。
 
 改画面只需要改 film.js：把 S.update 里"帧号 → 画面"的表达式写清楚即可，不要读上一帧状态。
 
@@ -121,7 +121,7 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 |---|---|
 | 1920x1080 PNG 截图 + 页面绘制 | 约 70–120 ms/帧（2 workers 时 70–85 ms/帧均摊） |
 | 12 秒 / 360 帧 / 2 workers / chunk 3s | 28.0 s 出片（约 78 ms/帧均摊） |
-| 自检（17 项 + 一次真实浏览器） | 3.4 s |
+| 自检（24 项 + 一次真实浏览器，含跨会话确定性验证） | 约 15 s |
 
 调参顺序：先降 workers（1–2 个足够，多了内存涨），再降 chunk_s（块小重渲代价低），
 最后才动 crf/preset（crf 17 / preset slow 是质量档；预览可用 crf 20 / preset veryfast）。
@@ -151,7 +151,7 @@ PNG 截图比 JPEG q94 慢但无压缩伪影，本模块按契约固定 PNG。
   页面 cue 的 type 用 sfxkit 配方名（ui_blip / whoosh / impact / data_chirp ...）。
 - **音画同步质检**：页面 S.event 登记的视觉事件进 work/cues.json 的 events，qa_frames.sync_check 用。
 - **合成成片**：webengine 只出无声画面；配音/配乐/混音由 filmkit 音频总线和 render.py 的 mux 阶段负责。
-- **PIL 路线**：同一部片可以混用两条路线（某些段 PIL、某些段 web），只要 fps/分辨率/时长一致，
+- **PIL 路线**：**本仓库不支持按段切引擎**（`--engine` 是全局单选项）。真要混用，得手工分别渲染两段，再用 `filmkit.concat_segments` 拼接，只要 fps/分辨率/时长一致，
   都用 filmkit.concat_segments 拼。
 
 ## 11. 故障排查
@@ -165,7 +165,7 @@ PNG 截图比 JPEG q94 慢但无压缩伪影，本模块按契约固定 PNG。
 | 拼接报「分块缺口」 | 块没渲完 / 块目录被手动删 | 重跑 --resume 补齐；或删块目录重渲 |
 | 拼接报「块时长异常」 | 旧参数残留 / 块损坏 | 删对应块重渲（或 --no-resume 全重渲） |
 | 成片比页面短 | 渲染区间 to_s 截断 | 检查 --from/--to；duration 与页面 DURATION 是否一致 |
-| 中文变成方块 | 系统缺中文字体 | 改用系统已有字体（Windows 用 Microsoft YaHei）或放本地字体到 assets/web/fonts/ |
+| 中文变成方块 | 系统缺中文字体 | 改用系统已有字体（Windows 用 Microsoft YaHei）；要自带字体就放到**你自己项目**的 `web/fonts/` 并在页面里用 `@font-face` 引用（`assets/web/` 是只读模板，别往里放东西） |
 | 渲染速度慢 | workers 太多/截图慢 | 2 个 worker 通常最优；确认 --enable-gpu 生效；必要时 crf 20 + preset veryfast 预览 |
 
 ## 12. 版权

@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import wave
 
 import numpy as np
@@ -820,6 +821,64 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
     return out
 
 
+# ---------------------------------------------------------------- 配乐来源判定
+MUSIC_PLANS = ("score", "file", "bed", "off", "none", "missing-file", "missing-bpm", "unknown-mode")
+
+
+def music_plan(script, has_music_file: bool = False):
+    """统一判定"这次配乐从哪来"，返回 (plan, 说明)。
+
+    为什么要一个统一函数：v0.3.0 的 st_score 说"mode=off 不生成配乐"，但 st_audio
+    又无条件读已存在的 work/music.wav —— 结果用户把 mode 改成 off / 删掉 bpm 之后，
+    上一轮跑出来的旧配乐仍被混进成片（README/SKILL 写的是 off = 不要配乐）。
+    现在 score 与 audio 两个 stage 都用这一份判定，口径不会再打架。
+
+    plan 取值：
+      score         scorekit 程序化配乐（work/music.wav）
+      file          外部提供 / 上一轮留下的 work/music.wav
+      bed           v0.2 和弦床（music.chords）
+      off           明确不要配乐（mode=off/none 或 music.enabled=false）
+      none          没配 bpm / chords / music.wav，本次没有配乐
+      missing-file  mode=file 但没有 work/music.wav（调用方应明确报错）
+      missing-bpm   mode=score 但没有 bpm（调用方应明确报错）
+      unknown-mode  music.mode 写了不认识的值（调用方应明确报错）
+
+    兼容语义（不写 music.mode，即 v0.2 老项目）：
+      有 bpm -> score；没 bpm 但有外部 music.wav -> file；再退和弦床 -> bed。
+    """
+    mus = script.get("music") or {}
+    raw = str(mus.get("mode") or "").strip().lower()
+    bpm = script.get("bpm")
+    if raw == "auto":
+        raw = ""
+    if raw in ("off", "none", "mute"):
+        return "off", "music.mode=%s：本片不要配乐（不读 work/music.wav）" % raw
+    if not raw and not mus.get("enabled", True):
+        return "off", "music.enabled=false：本片不要配乐（不读 work/music.wav）"
+    if raw in ("bed", "chord", "chords"):
+        return "bed", "music.mode=bed：v0.2 和弦床（不读 work/music.wav）"
+    if raw in ("file", "external", "provided"):
+        if has_music_file:
+            return "file", "music.mode=file：外部 work/music.wav"
+        return "missing-file", ("music.mode=file 但 work/music.wav 不存在"
+                                "（把外部配乐拷成 work/music.wav，或删掉 mode=file）")
+    if raw in ("score", "programmatic"):
+        if bpm in (None, ""):
+            return "missing-bpm", "music.mode=score 但没有 bpm（scorekit 需要 bpm）"
+        return "score", "music.mode=score：scorekit 程序化配乐 bpm=%s" % bpm
+    if raw:
+        return "unknown-mode", ("music.mode=%r 不认识（可用：score / bed / file / off，"
+                                "或不写 mode 走兼容链）" % mus.get("mode"))
+    # 缺省（v0.2 兼容链）
+    if bpm not in (None, ""):
+        return "score", "缺省配乐：有 bpm=%s，用 scorekit 程序化配乐" % bpm
+    if has_music_file:
+        return "file", "缺省配乐：沿用已有 work/music.wav（外部提供的配乐）"
+    if mus.get("chords"):
+        return "bed", "缺省配乐：没有 bpm，退回 v0.2 和弦床"
+    return "none", "缺省配乐：没有 bpm / music.chords / work/music.wav，本片无配乐"
+
+
 # ---------------------------------------------------------------- 程序化音源
 def tone(freq, dur, sr=SR, amp=0.2, kind="sine", decay=2.2, harmonics=(1.0,)):
     """单音衰减。kind 参数保留以兼容 v0.1（目前只实现 sine）。"""
@@ -908,7 +967,6 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
     import asyncio
     import time as _time
 
-    last = None
     for attempt in range(max(1, int(retries))):
         try:
             import edge_tts
@@ -922,7 +980,6 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
                 raise RuntimeError("合成产物异常")
             break
         except Exception as e:              # noqa: BLE001
-            last = e
             if attempt == max(1, int(retries)) - 1:
                 raise RuntimeError("edge-tts 合成失败（重试 %d 次）：%s" % (retries, e)) from e
             _time.sleep(1.2 * (attempt + 1))
@@ -1166,10 +1223,6 @@ def probe(path):
         return {}
 
 
-def _video_copy_args():
-    return ["-c:v", "copy"]
-
-
 def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
         loudnorm=True, target_i=-16.0, target_tp=-1.5, reencode_video=False):
     """合成成片：视频流默认直接 copy（不再二次编码），音频走两遍 loudnorm。
@@ -1182,6 +1235,10 @@ def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
     if d:
         os.makedirs(d, exist_ok=True)
     af = loudnorm_two_pass(audio, target_i=target_i, target_tp=target_tp) if loudnorm else None
+    if loudnorm and not af:
+        # 不静默降级：量不到就喊出来（qa 的响度门禁还在，但这里先说清楚）
+        print("   [WARN] loudnorm 两遍测量失败（ffmpeg 输出里没解析到 JSON），本次不做响度标准化",
+              flush=True)
 
     vd = media_dur(video)
     ad = media_dur(audio)
@@ -1286,9 +1343,23 @@ def qa_text_safe(scenes, tol=1.0, band=SUB_BAND):
 
 
 # ---------------------------------------------------------------- 编码质量
+# cv2 在 README / THIRD_PARTY / requirements.txt 里都写成**可选**，所以这里必须真的可选：
+# 以前是函数内裸 `import cv2`，装了才算"可选"——没装时 --stage qa 直接 ImportError 崩掉，
+# 而文档写"缺了跳过锐度门禁"。现在缺 cv2 时返回 None，由调用方打 WARN 并跳过该门禁。
+def _cv2():
+    """按需取 cv2；没装返回 None（调用方负责降级 + 报警，不静默）。"""
+    try:
+        import cv2
+    except Exception:                                       # noqa: BLE001
+        return None
+    return cv2
+
+
 def sharpness(png_or_img):
-    """文字/线条锐度：Laplacian 方差。"""
-    import cv2
+    """文字/线条锐度：Laplacian 方差。没装 cv2 时返回 None（不是 0.0，别把"没测"当"很差"）。"""
+    cv2 = _cv2()
+    if cv2 is None:
+        return None
     if isinstance(png_or_img, str):
         im = cv2.imread(str(png_or_img), cv2.IMREAD_GRAYSCALE)
     else:
@@ -1313,21 +1384,24 @@ def encode_quality(film, ref_png, at_sec=None, ref_img=None):
     ⚠ 关键：ref 必须是场景函数渲染出的原图，不能用成片自己抽的帧，
     否则 sharp_ref 与 sharp_dec 几乎相同、ratio 恒为 1，门禁形同虚设
     （v0.1 就是这么写的，本片 0.922 的真实值需要正确参考帧才测得出来）。
+
+    没装 cv2 时返回 None（调用方据此跳过锐度门禁并 WARN）。
     """
-    import cv2
+    cv2 = _cv2()
+    if cv2 is None:
+        return None
     if ref_img is not None:
         ref = np.array(ref_img.convert("L"))
-        ref_dir = os.path.dirname(os.path.abspath(str(ref_png))) if ref_png else os.getcwd()
     else:
         ref = cv2.imread(str(ref_png), cv2.IMREAD_GRAYSCALE)
-        ref_dir = os.path.dirname(os.path.abspath(str(ref_png)))
     if ref is None:
         return None
-    if not os.path.isdir(ref_dir):
-        ref_dir = os.getcwd()
-    tmp = os.path.join(ref_dir, "_dec_tmp.png")
-    snap(film, at_sec if at_sec is not None else 0.0, tmp)
-    dec = cv2.imread(tmp, cv2.IMREAD_GRAYSCALE)
+    # 解码帧写进系统临时目录：以前写在 cwd / 参考帧目录，跑一次 --stage qa
+    # 就在项目根留一个 250KB 的 _dec_tmp.png（既污染目录，也可能被当成交付物）。
+    with tempfile.TemporaryDirectory(prefix="filmkit_qa_") as td:
+        tmp = os.path.join(td, "_dec_tmp.png")
+        snap(film, at_sec if at_sec is not None else 0.0, tmp)
+        dec = cv2.imread(tmp, cv2.IMREAD_GRAYSCALE)
     if dec is None:
         return None
     sa = float(cv2.Laplacian(ref, cv2.CV_64F).var())
@@ -1415,6 +1489,8 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
         if abs(d - expect_frames / float(FPS)) > 0.5:
             errors.append("时长 %.2fs 与预期 %.2fs 不符" % (d, expect_frames / float(FPS)))
     lo = loudness(path)
+    if "I" not in lo:
+        warns.append("未能测到积分响度（ebur128 解析失败），响度门禁本次未执行")
     if "I" in lo:
         if lo["I"] > -12:
             errors.append("响度 %.1f LUFS 过大（目标 -16 ~ -14）" % lo["I"])
@@ -1434,8 +1510,17 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
         warns.append("首尾之外检测到 %d 段长黑帧" % nb)
     if detect_silence(path) > 0:
         warns.append("检测到长静音段（确认是否有意留白）")
+    quality = None
     if ref_img is not None or (ref_png and os.path.exists(ref_png)):
         q = encode_quality(path, ref_png, ref_sec, ref_img=ref_img)
+        quality = q
+        if not q:
+            if _cv2() is None:
+                warns.append("没装 cv2（opencv-python-headless），锐度比门禁本次未执行——"
+                             "这条门禁查的是「文字发不发虚」，装了才有；缺它不代表片子坏了，"
+                             "但别把「没查」当成「通过了」")
+            else:
+                warns.append("锐度比计算失败（参考帧或抽帧不可读），编码锐度门禁本次未执行")
         if q:
             if q["ratio"] < 0.85:
                 errors.append("编码损失偏大：锐度比 %.3f（<0.85 文字会发虚，降 CRF 或提 preset）"
@@ -1452,6 +1537,8 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
                 got = len([b for b in open(str(cand), encoding="utf-8").read().strip().split("\n\n")
                            if b.strip()])
                 break
-        if got and got != int(expected_subtitles):
+        if not got:
+            warns.append("没有找到 sub.srt（或它是空的），字幕条数门禁本次未执行")
+        elif got != int(expected_subtitles):
             errors.append("字幕条数 %d != 剧本句数 %d（有字幕被静默丢弃）" % (got, expected_subtitles))
-    return dict(errors=errors, warnings=warns, probe=pr, loudness=lo)
+    return dict(errors=errors, warnings=warns, probe=pr, loudness=lo, quality=quality)

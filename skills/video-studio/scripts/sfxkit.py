@@ -21,11 +21,10 @@ import inspect
 import math
 import os
 import re
-import struct
 import sys
 import tempfile
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +38,13 @@ __version__ = "0.3.0"
 
 SR = 48000
 LN1000 = 6.907755278982137            # ln(1000)：幅度衰减 60 dB 对应的自然对数
+
+# 单配方 render() 的性能预算（秒）。两条实现路径分开写，绝不共用一个数字：
+# 1.5 s 是按"有 scipy"的实现能力定的（最慢 wind 0.83 s）；没有 scipy 时所有 IIR
+# 都走"短冲激响应 + FFT 卷积"，时变滤波配方会慢 3~4 倍（wind 实测 2.3 s），
+# 所以兜底路径单独给一份更宽的预算，自检输出里会写明当前按哪一档判定。
+PERF_BUDGET_SCIPY = 1.5
+PERF_BUDGET_FALLBACK = 3.5
 
 
 # ============================================================================
@@ -1245,7 +1251,15 @@ _ROOM_IR_CACHE: dict = {}
 
 
 def _room_ir_uncached(room, seed, order: int, sr: int) -> np.ndarray:
-    cfg = ROOMS[room] if isinstance(room, str) else dict(room)
+    if isinstance(room, str):
+        if room not in ROOMS:
+            raise ValueError("未知房间 %r（可用 %s）" % (room, "/".join(sorted(ROOMS))))
+        cfg = ROOMS[room]
+    else:
+        cfg = dict(room)
+        for key in ("dims", "rt60", "hf_damping"):
+            if key not in cfg:
+                raise ValueError("自定义房间缺少 %r 字段（需要 dims/rt60/hf_damping）" % (key,))
     L = np.asarray(cfg["dims"], dtype=float)
     rt60, hfd = float(cfg["rt60"]), float(cfg["hf_damping"])
     g = rng(seed)
@@ -2026,6 +2040,31 @@ def in_key(freq: float) -> float:
     return float(p[i])
 
 
+def _enum(value, allowed, where: str, name: str = "值") -> str:
+    """严格校验语义枚举参数：未知值立刻报错并列出可用值，不静默落到默认分支。
+
+    历史上 rain(surface=) 严格报错，wind(env=)/ui_blip(kind=)/text_stream(voice=)
+    却把写错的值悄悄当成默认分支——同一个"看起来像开关"的参数，行为却一个炸一个
+    不吭声。统一成严格报错（本仓库的规矩：可以保守，但不能静默降级）。
+    """
+    v = str(value)
+    if v not in allowed:
+        raise ValueError("%s: 未知 %s=%r（可用 %s）"
+                         % (where, name, value, "/".join(allowed)))
+    return v
+
+
+def _times(value, where: str) -> list:
+    """校验 times 数组：必须是有限、非负的相对时刻（负值会让 _place 静默丢样本）。"""
+    ts = [float(t) for t in (value or [0.0])]
+    if not ts:
+        ts = [0.0]
+    for t in ts:
+        if not math.isfinite(t) or t < 0.0:
+            raise ValueError("%s: times 里的时刻必须是非负有限数，收到 %r" % (where, t))
+    return ts
+
+
 def _tone(f, dur, t60, attack=0.0008, index=0.0, ratio=2.0, seed=0):
     """带起音的衰减正弦（或 FM 钟声）。提示音的基本单元。"""
     n = max(2, n_samples(dur))
@@ -2190,6 +2229,7 @@ def recipe(name=None, *, tags=(), master=None):
 @_recipe(tags=("界面", "提示音"))
 def ui_blip(seed=0, pitch=2200.0, kind="tick", dur=0.22, **kw):
     """极短的"嘀"：玻璃/金属的敲击，音高吸附五声音阶。"""
+    kind = _enum(kind, ("tick", "ping"), "ui_blip", "kind")
     g = rng(seed)
     f = in_key(float(pitch)) * float(g.uniform(0.985, 1.015))
     if kind == "tick":
@@ -2222,6 +2262,9 @@ def ui_click(seed=0, press=True, release=True, **kw):
 def relay_click(seed=0, count=1, gap=0.18, **kw):
     """继电器/老机器的"嗒"：低频撞击 + 一小段金属余振。"""
     n = max(1, int(count))
+    gap = float(gap)
+    if gap < 0.0:                       # 负 gap 会让总线长度变成负数 → 静默产出哑音
+        raise ValueError("relay_click: gap 必须 >= 0，收到 %r" % (gap,))
     x = _bus(0.22 + gap * (n - 1), stereo=False)
     b = plate(320.0, material="metal", aspect=1.2, n_modes=22, tilt=0.5, seed=seed)
     for i in range(n):
@@ -2285,9 +2328,7 @@ def typing(seed=0, keys=12, speed=1.0, dur=None, **kw):
 @_recipe(tags=("界面", "文字"))
 def typing_at(seed=0, times=(0.0, 0.12, 0.25, 0.4), spaces=(), **kw):
     """逐字对齐的打字声：times 是相对时刻数组（画面上每出现一个字就有一下）。"""
-    ts = [float(t) for t in (times or [0.0])]
-    if not ts:
-        ts = [0.0]
+    ts = _times(times, "typing_at")
     g = rng(seed)
     total = max(ts) + 0.25
     x = _bus(total, stereo=False)
@@ -2301,9 +2342,8 @@ def typing_at(seed=0, times=(0.0, 0.12, 0.25, 0.4), spaces=(), **kw):
 @_recipe(tags=("界面", "数据", "文字"))
 def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone", **kw):
     """AI 逐字输出：比打字更连贯。voice="tone" 是带音高的五声颗粒；"soft" 是不带音高的沙沙。"""
-    ts = [float(t) for t in (times or [0.0])]
-    if not ts:
-        ts = [0.0]
+    voice = _enum(voice, ("tone", "soft"), "text_stream", "voice")
+    ts = _times(times, "text_stream")
     g = rng(seed)
     total = max(ts) + 0.30
     x = _bus(total, stereo=False)
@@ -2338,6 +2378,7 @@ def data_chirp(seed=0, dur=0.8, rate=28.0, base=1800.0, **kw):
 @_recipe(tags=("转场", "空气"))
 def whoosh(seed=0, dur=0.9, brightness=0.6, size=0.6, direction="lr", **kw):
     """物理飞过：湍流噪声 + 按传播延迟读取造成的真多普勒 + 1/r 钟形音量 + 越远越闷 + 地面反射梳状。"""
+    direction = _enum(direction, ("lr", "rl", "center", "c", "none"), "whoosh", "direction")
     d = float(dur)
     n = max(2, n_samples(d))
     g = rng(seed)
@@ -2377,6 +2418,7 @@ def whoosh(seed=0, dur=0.9, brightness=0.6, size=0.6, direction="lr", **kw):
 @_recipe(tags=("转场", "张力"))
 def riser(seed=0, dur=4.0, tone=True, end="cut", **kw):
     """上升张力：粉噪扫频 + 可选的上行正弦（越来越亮），结尾可硬切。"""
+    end = _enum(end, ("cut", "fade"), "riser", "end")
     d = max(0.15, float(dur))
     n = max(2, n_samples(d))
     t = np.linspace(0.0, 1.0, n)
@@ -2400,7 +2442,6 @@ def impact(seed=0, size=1.0, brightness=0.5, metal=0.3, tail=1.0, **kw):
     s = float(np.clip(size, 0.3, 2.0))
     d = 1.1 * s * float(np.clip(tail, 0.3, 2.5))
     x = _bus(d)
-    g = rng(seed)
     # 低频体：正弦下坠 + 饱和
     f0 = 92.0 / s
     n_low = n_samples(min(d, 0.75 * s))
@@ -2432,7 +2473,10 @@ def sub_drop(seed=0, dur=1.8, start_hz=80.0, end_hz=24.0, **kw):
     n = max(2, n_samples(d))
     t = time_axis(n)
     p = (t / d) ** 0.75
-    f = float(start_hz) * (float(end_hz) / float(start_hz)) ** p
+    # 频率必须为正：start_hz<=0 时 (end/start)**p 会除零；负底数取分数次幂还会出 NaN
+    s0 = max(1e-3, abs(float(start_hz)))
+    e0 = max(1e-3, abs(float(end_hz)))
+    f = s0 * (e0 / s0) ** p
     ph = np.cumsum(f) / SR
     x = np.sin(2 * np.pi * ph) * np.exp(-t * 2.2)
     x = saturate(x, drive_db=5.0)
@@ -2556,6 +2600,7 @@ def wind(seed=0, dur=15.0, strength=0.6, gustiness=0.6, whistle=0.5, env="open",
     """
     g = rng(seed)
     sr = SR
+    env = _enum(env, ("open", "trees", "indoor"), "wind", "env")
 
     def make(d):
         n = max(2, n_samples(d))
@@ -2614,16 +2659,14 @@ def rain(seed=0, dur=12.0, intensity=0.6, surface="mixed", **kw):
     roof 铁皮屋顶 | window 隔着玻璃窗。长片自动短段平铺（见 wind 的说明）。
     """
     g = rng(seed)
-    sr = SR
 
     def make(d):
         n = max(2, n_samples(d))
         it = float(np.clip(intensity, 0.05, 1.0))
-        surf = str(surface)
+        surf = _enum(surface, ("mixed", "leaves", "pavement", "roof", "window"),
+                     "rain", "surface")
         kinds = {"mixed": ("pavement", "leaves"), "leaves": ("leaves",),
                  "pavement": ("pavement",), "roof": ("roof",), "window": ("window",)}
-        if surf not in kinds:
-            raise ValueError("rain: 未知 surface=%r（可用 %s）" % (surf, "/".join(sorted(kinds))))
         swell = np.clip(1.0 + 0.35 * smooth_random(d, 0.1, g, octaves=2), 0.3, None)
         rate = (120.0 + 3000.0 * it ** 1.5) / 6.0 * swell
         kern = [_rain_kernel(k, g) for k in kinds[surf]]
@@ -2667,7 +2710,6 @@ def campfire(seed=0, dur=12.0, size=0.6, crackle=0.6, **kw):
     size 0~1 火的大小；crackle 0~1 噼啪多少。长片自动短段平铺（见 wind 的说明）。
     """
     g = rng(seed)
-    sr = SR
 
     def make(d):
         n = max(2, n_samples(d))
@@ -2724,7 +2766,8 @@ def knock_wood(seed=0, knocks=3, force=0.8, door="solid", room="small_room", wet
     k = max(1, int(knocks))
     f = float(np.clip(force, 0.1, 2.0))
     g = rng(seed)
-    b = plate(210.0 if str(door) == "solid" else 150.0, material="wood",
+    door = _enum(door, ("solid", "hollow"), "knock_wood", "door")
+    b = plate(210.0 if door == "solid" else 150.0, material="wood",
               aspect=1.5, n_modes=34, tilt=0.3, seed=seed)
     times = human_rhythm(k, 0.42, jitter=0.12, drift=0.02, seed=seed + 7)
     d = float(times[-1]) + 0.9
@@ -2740,7 +2783,7 @@ def knock_wood(seed=0, knocks=3, force=0.8, door="solid", room="small_room", wet
 @_recipe(tags=("撞击", "金属"))
 def metal_hit(seed=0, obj="pipe", force=1.0, room="warehouse", wet_db=-13.0, **kw):
     """金属撞击：管/板/片的模态（余音长、泛音非整数），带简并分裂的拍频。"""
-    o = str(obj)
+    o = _enum(obj, ("pipe", "plate", "bell"), "metal_hit", "obj")
     if o == "plate":
         b = plate(240.0, material="metal", aspect=1.8, n_modes=40, tilt=0.15, seed=seed)
     elif o == "bell":
@@ -2816,9 +2859,17 @@ def render(name, seed=0, **params):
         return None
     ent = REGISTRY[key]
     fn = ent["fn"]
+    # seed 统一在这里挡：负 seed 在 numpy 里是深层的 "expected non-negative integer"，
+    # cue 的 seed 都是 1000+i 不会触发，但手工/CLI 传错时应该给一句人话。
+    try:
+        seed_i = int(seed)
+    except (TypeError, ValueError):
+        raise ValueError("seed 必须是整数，收到 %r" % (seed,)) from None
+    if seed_i < 0:
+        raise ValueError("seed 必须是非负整数，收到 %r" % (seed,))
     params = {k: v for k, v in (params or {}).items() if k != "name"}
     try:
-        x = fn(seed=int(seed), **params)
+        x = fn(seed=seed_i, **params)
     except TypeError:
         # 配方不认识这些参数：删掉不认识的再试一次（cue 会透传 dur/size/gain 等）
         sig = inspect.signature(fn)
@@ -2826,7 +2877,7 @@ def render(name, seed=0, **params):
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             raise
         kept = {k: v for k, v in params.items() if k in allowed}
-        x = fn(seed=int(seed), **kept)
+        x = fn(seed=seed_i, **kept)
     if x is None or len(np.asarray(x)) == 0:
         return None
     return finalize(x, **ent["master"])
@@ -2883,8 +2934,9 @@ def selftest() -> int:
     import time as _time
 
     _ensure_utf8_stdout()
-    print("sfxkit v%s 自检  SR=%d  scipy=%s"
-          % (__version__, SR, "有" if _sig is not None else "无（FFT 卷积兜底）"))
+    budget = PERF_BUDGET_SCIPY if _sig is not None else PERF_BUDGET_FALLBACK
+    print("sfxkit v%s 自检  SR=%d  scipy=%s  单配方预算 %.1f s"
+          % (__version__, SR, "有" if _sig is not None else "无（FFT 卷积兜底）", budget))
     print("-" * 66)
     results = []
 
@@ -2907,9 +2959,9 @@ def selftest() -> int:
         if len(reg) != 24:
             raise ValueError("配方数应为 24，实际 %d" % len(reg))
         for k, ent in reg.items():
-            for field in ("fn", "title", "tags", "master"):
-                if field not in ent:
-                    raise ValueError("%s 缺少字段 %s" % (k, field))
+            for fld in ("fn", "title", "tags", "master"):
+                if fld not in ent:
+                    raise ValueError("%s 缺少字段 %s" % (k, fld))
         return "%d 个配方" % len(reg)
 
     def t_aliases():
@@ -2932,7 +2984,10 @@ def selftest() -> int:
         return "impact/whoosh/ui_blip/typing/rain 逐采样一致"
 
     def t_all_render():
-        slow = []
+        # 预算分两条路径（见文件头 PERF_BUDGET_* 注释）：有 scipy 1.5 s；无 scipy 走
+        # FFT 卷积兜底按实测给 3.5 s。绝不共用一个数字掩盖两条路径的差异。
+        budget = PERF_BUDGET_SCIPY if _sig is not None else PERF_BUDGET_FALLBACK
+        slow, retried = [], []
         for k in sorted(REGISTRY):
             t0 = _time.time()
             x = render(k, seed=5)
@@ -2949,11 +3004,26 @@ def selftest() -> int:
                 raise ValueError("%s 几乎是静音（峰值 %.6f）" % (k, pk))
             if pk > 1.0 + 1e-6:
                 raise ValueError("%s 超过满刻度（峰值 %.3f）" % (k, pk))
-            if el > 1.5:
-                slow.append("%s=%.2fs" % (k, el))
+            if el > budget:
+                # 计时抖动：机器被别的进程占着时会偶发超预算。超了先复核一次，取两次里
+                # 较快的一次（失败信息同时带出两次数字，别让它变成随机红灯）。
+                t1 = _time.time()
+                render(k, seed=5)
+                el2 = _time.time() - t1
+                retried.append("%s %.2fs/%.2fs" % (k, el, el2))
+                el = min(el, el2)
+                if el > budget:
+                    slow.append("%s=%.2fs" % (k, el))
         if slow:
-            raise ValueError("以下配方渲染过慢（>1.5s）：%s" % ", ".join(slow))
-        return "%d 个配方出门、不越界、均 ≤1.5s" % len(REGISTRY)
+            raise ValueError("以下配方渲染过慢（>%.1fs，已复核仍超）：%s；计时可能受机器负载影响"
+                             % (budget, ", ".join(slow)))
+        detail = "%d 个配方出门、不越界、均 ≤%.1fs" % (len(REGISTRY), budget)
+        if _sig is None:
+            detail += ("（当前无 scipy，按 fallback 预算 %.1fs 判定；装 scipy 可加速并回到 %.1fs）"
+                       % (PERF_BUDGET_FALLBACK, PERF_BUDGET_SCIPY))
+        if retried:
+            detail += "；超预算后复核：%s" % ", ".join(retried)
+        return detail
 
     def t_alias_render():
         a = render("blip", seed=3)
@@ -2972,7 +3042,32 @@ def selftest() -> int:
         y = render("ui_blip", seed=3, pitch=1760.0, gain=-6)
         if y is None or len(y) == 0:
             raise ValueError("ui_blip 透传多余参数后无输出")
-        return "gain/pan/note 等被 **kw 吞掉"
+        # 但"认识的参数写错值"必须响亮报错，不能静默落到默认分支（统一口径见 _enum）；
+        # 顺手把负 seed / 负 gap / 负 times 这类"会产出哑音或深层 numpy 报错"的入口也挡住。
+        bad = (("wind", dict(env="bogus", dur=0.2)),
+               ("rain", dict(surface="bogus", dur=0.2)),
+               ("ui_blip", dict(kind="bogus")),
+               ("text_stream", dict(voice="bogus")),
+               ("whoosh", dict(direction="bogus")),
+               ("riser", dict(end="bogus")),
+               ("knock_wood", dict(door="bogus")),
+               ("knock_wood", dict(room="bogus")),
+               ("metal_hit", dict(obj="bogus")),
+               ("relay_click", dict(gap=-1.0, count=3)),
+               ("typing_at", dict(times=[-1.0])))
+        for rname, kw in bad:
+            try:
+                render(rname, seed=3, **kw)
+            except ValueError:
+                continue
+            raise ValueError("%s 对非法参数没报错（静默兜底）：%r" % (rname, kw))
+        try:
+            render("impact", seed=-1)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("render(seed=-1) 没报错")
+        return "gain/pan/note 等被 **kw 吞掉；%d 组非法参数全部 ValueError；seed=-1 被挡" % len(bad)
 
     def t_durations():
         d = len(render("impact", seed=1)) / float(SR)
@@ -3069,7 +3164,6 @@ def selftest() -> int:
         return "analyze 字段齐 / qc 能检出削波"
 
     def t_io():
-        import tempfile
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
@@ -3095,7 +3189,6 @@ def selftest() -> int:
             return "跳过（未找到 ffmpeg）"
         import re as _re
         import subprocess
-        import tempfile
         sig = _selftest_signal()
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)

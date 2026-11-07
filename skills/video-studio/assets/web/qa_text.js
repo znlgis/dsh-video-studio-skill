@@ -27,9 +27,10 @@
     var end = (t1 == null || !isFinite(Number(t1))) ? dur : Number(t1);
     var fps = Number(global.FPS) || 30;
     var dt = Math.max(Number(step) || 0.2, 1 / fps);
-    var empty = { overlaps: [], offscreen: [], brief: [], never: [], frames: 0 };
+    var empty = { overlaps: [], offscreen: [], brief: [], never: [], frames: 0, texts: 0 };
     if (end < start) return empty;
     F.qaReset();
+    var sampled = 0;    // 实际扫描的采样帧数（=== frames 字段，与文档一致）
 
     var life = new Map();    // key -> {text, group, first, last, n}
     var overl = new Map();   // 名字对 -> {at, to, ratio}
@@ -37,6 +38,7 @@
     var visTotal = 0;
 
     for (var T = start; T <= end + 1e-6; T += dt) {
+      sampled += 1;
       await global.renderFrame(Math.round(T * fps));
       var all = F.texts().filter(function (q) {
         return q.alpha >= 0.3 && (q.x1 - q.x0) >= 2 && (q.y1 - q.y0) >= 2;
@@ -99,7 +101,10 @@
     overlaps.sort(function (x, y) { return x.at - y.at; });
     offscreen.sort(function (x, y) { return x.at - y.at; });
     brief.sort(function (x, y) { return x.at - y.at; });
-    return { overlaps: overlaps, offscreen: offscreen, brief: brief, never: never, frames: visTotal };
+    // frames = 采样帧数（12 s / step 0.2 → 61，与 references/web-engine.md 的示例一致）；
+    // texts  = 扫描期间累计可见文本实例数（原来的 visTotal，语义本来就不同）。
+    return { overlaps: overlaps, offscreen: offscreen, brief: brief, never: never,
+             frames: sampled, texts: visTotal };
   }
 
   global.qaText = qaText;

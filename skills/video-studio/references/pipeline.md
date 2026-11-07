@@ -73,10 +73,11 @@ tl = K.build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0)
 字幕窗口规则（防交叠，来自实战）：
 ```
 t0 = voice_start - 0.12
-t1 = min(voice_end + 0.45, voice_start + 5.2)
+t1 = voice_end + 0.45                     # v0.2 起不再有 5.2 s 硬钳；要钳短显式传 max_hold
 t1 = min(t1, next.voice_start - 0.12)   # 绝不压住下一句
 ```
-停留时长参考 `0.5 + 字数/9` 秒（上限 5.2 s）。按字符比例平均分配会产生大量交叠。
+停留时长参考 `0.5 + 字数/9` 秒。**没有默认上限**（v0.2 移除了 5.2 s 硬钳）——
+真要缩短就显式传 `max_hold` / `sub_max_hold`。按字符比例平均分配会产生大量交叠。
 
 ## P5 混音（numpy 总线）
 
@@ -94,7 +95,9 @@ K.wav_write("work/audio.wav", bus.mix())
 ## P6 母版（先看再渲）
 
 ```bash
-# 只渲 3 帧看风格
+# 母版预览：先渲 3 帧看风格（缺 tts/layout 会自动补，联网合成一次旁白）
+python render.py ... --stage stills --stills "l01:3,l02:5"
+# 定稿之后才渲全片
 python render.py ... --stage frames --jobs 4          # 分块并行渲染
 python render.py ... --stage frames --jobs 4 --resume   # 只补缺块（按绝对帧号）
 python render.py ... --stage qa                          # 只读质检，不重渲不重编

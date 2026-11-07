@@ -1,6 +1,6 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic PIL/browser frame rendering, programmatic SFX and score, cue-driven sound sync, ffmpeg encoding, sample-level mixing and multi-layer QA gates.",
   "type": "module",
   "main": "index.js",
@@ -24,8 +24,20 @@
     "locale/*.json",
     "docs/demo-pil-sheet.png",
     "THIRD_PARTY_NOTICES.md",
-    "skills"
+    "skills",
+    "!skills/**/__pycache__",
+    "!skills/**/*.pyc"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/znlgis/dsh-video-studio-skill#readme",
+  "bugs": {
+    "url": "https://github.com/znlgis/dsh-video-studio-skill/issues"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -45,7 +57,7 @@
     "url": "git+https://github.com/znlgis/dsh-video-studio-skill.git"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.0-rc.6 <0.3.0"
+    "@deepseek-ai/dsh-skill-filesystem": ">=0.1.0-rc.6 <0.3.0-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-skill-filesystem": {

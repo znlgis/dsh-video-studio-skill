@@ -21,7 +21,7 @@
 |---|---|---|---|
 | ① 容器/母带层 | `filmkit.qa_report()`（probe / loudness / detect_black / encode_quality / 字幕条数） | 分辨率、帧率、音轨、时长、响度/真峰、长黑帧、锐度比、字幕条数 | 画面内部的一帧白闪/空窗 |
 | ② 帧级/时间轴层 | **本模块** `qa_frames.report()`（`render.py` 的 `qa` stage 自动调用） | 单帧闪烁、画面空窗、音画同步、亮度/响度曲线 | 字形/语义（文字压字、出画） |
-| ③ 文字/目检层 | `webengine.qaText()` + `read_image` 静帧/联系表 | 文字重叠、出画、一闪而过、从没露面；构图、元素存在性 | 逐帧时间轴上的瞬时异常（抽帧碰运气） |
+| ③ 文字/目检层 | `webengine.qa_text()` + `read_image` 静帧/联系表 | 文字重叠、出画、一闪而过、从没露面；构图、元素存在性 | 逐帧时间轴上的瞬时异常（抽帧碰运气） |
 
 ② 的独特价值是 **"时间轴 × 局部空间"**：160×90 全片逐帧过一遍，比抽 6 张静帧可靠得多；
 但它只看亮度统计。**三层互补，不能互相替代**——只做 ① 会漏掉"一帧白闪"，只做 ③ 会漏掉"两秒空窗"。
@@ -38,7 +38,7 @@ python scripts/qa_frames.py out/film.mp4 \
     --png work/qa/deep.png \
     --expect-duration 389.0
 
-# 自检（合成语料，不联网，约 3 s，19 项 PASS/FAIL）
+# 自检（合成语料，不联网，约 5 s，22 项 PASS/FAIL）
 python scripts/qa_frames.py --selftest
 ```
 
@@ -175,6 +175,37 @@ r[t] = |F[t+1] - F[t-1]|      # 同一块上的"前后两帧彼此差多少"
   **绝对响度是否合规（-16 LUFS ±、真峰 ≤ -1 dBTP）以 `filmkit.loudness()`（ffmpeg ebur128）为门禁**，
   本曲线只回答"哪段掉下去了、重击比环境高多少、空窗处声音是不是也停了"。
 
+### 2.4b `_static_warnings` — 画面长时间静止（v0.4 重写）
+
+判据（**替换** v0.3 的"全帧平均亮度 3 s 内波动 < 0.002"）：
+
+```
+drift[t] = max over 8x8 blocks of mean |F[t] - F[t-lag]| * 255     (lag = FLAT_LAG_S = 0.5 s)
+连续 FLAT_MIN_DUR = 6.0 s 内每一帧都 drift <= FLAT_DRIFT_EPS = 1.5  →  WARN
+```
+
+物理含义：**0.5 秒内，画面里最活跃的那块 8×8 区域（占全屏 0.53%）平均变化不到 1.5 级灰度**——
+人眼看到的就是一张静止的图。用"最活跃块"而不是"全帧均值"，是因为逐字入场、数字滚动、卡片切换
+只占全屏几个百分点，全帧均值几乎不动，而观众显然看得到它们在动。
+
+为什么旧判据要废：全帧均值对局部动画天生不敏感。自带模板片（30.10 s）实测误报 **4 段**
+（411/814 个滑动窗口命中），而画面一直在动。新判据在同一片上 **0 段**。
+
+实测分布（160×90 解码，H.264）：
+
+| 内容 | drift 量级 |
+|---|---|
+| 逐字节冻结 | 0–1.5（只剩编码噪声） |
+| 300 帧缓慢渐变 | 约 6 |
+| 逐字入场 / 呼吸光 / 粒子 | 20–108 |
+| 场景切换 / 白闪 | 40–105 |
+
+阈值怎么调：漏报卡帧 → 调小 `FLAT_MIN_DUR` 或 `FLAT_DRIFT_EPS`；设计上确实要静止 >6 s →
+按 SKILL.md「每 3–6 秒要有视觉变化」改画面节奏，而不是把阈值调大。
+
+它只出 **warning**（最多 6 条），与"画面空窗"（近黑 ≥0.8 s，出 error）是两回事：
+静止不等于黑，可能是刻意定版，所以不阻断交付。
+
 ### 2.5 `sync_check` — 音画同步
 
 对每个 cue（`{"t","type",…}`）找对应视觉事件（`{"t","kind",…}`）：
@@ -197,6 +228,27 @@ r[t] = |F[t+1] - F[t-1]|      # 同一块上的"前后两帧彼此差多少"
 同 kind 判超差的前提是 **`events.kind` 与 cue 的配方名同名**。如果页面只导出
 `flash / shake / ring` 而 cue 是 `impact / whoosh`，同 kind 永远配不上，跨 kind 又只做确认，
 结果就是 **`sync` 恒为空、检查静默全过**——看起来"零超差"，其实是"一条都没在查"。
+
+#### v0.4：PIL 路线的两条补救（这条门禁以前真的没在查）
+
+`--engine pil` 根本没有页面、没有 `events`，所以上面的配对必然配不上。v0.4 给了两条路：
+
+1. **cue 自带画面锚点**：给 cue 加 `"visual_at"`（或 `"visual_t"`）字段，值是画面上该事件
+   **真正发生的绝对秒数**。`sync_check` 会直接算 `dt = visual_at - cue.t` 并判超差，
+   不依赖 `events`、也不依赖命名约定：
+
+   ```json
+   {"at": "l03+0.05", "type": "impact", "visual_at": 15.77}
+   ```
+
+   锚点必须写画面上的真实时刻。**随手填一个等于自己骗自己**，而且骗得比没有门禁更彻底。
+
+2. **把"没查"升级为失败**：`QA_REQUIRE_SYNC=1`（或 `qa_frames.py --require-sync`）会把
+   "`sync` 一条都没判"从 warning 升级为 error。`render.py` 的 `qa` stage 调 `report()` 时
+   自动继承该环境变量，所以 CI 里设一次就够。
+
+`deep.json` 里现在还有一份 `sync_info`（`anchors / same / judged / blockers`），用来看
+"到底判了几条"。**`sync: []` + `judged: 0` 就是"没在查"**，不要读成"零超差"。
 
 两条路任选：
 
@@ -341,7 +393,7 @@ deep = qf.report(film, cues_json="work/cues.json", expect_duration=tl["total"],
 
 ---
 
-## 6. 自检（`--selftest`，19 项，约 2.7 s，不联网）
+## 6. 自检（`--selftest`，22 项，约 5 s，不联网）
 
 合成语料完全由本模块用 numpy + ffmpeg 现场生成（rawvideo 管道 → libx264 + AAC），不依赖仓库素材：
 
@@ -351,7 +403,7 @@ deep = qf.report(film, cues_json="work/cues.json", expect_duration=tl["total"],
 - `cues_plain.json` / `cues_flash.json`：3 个 cue/event，含一处 +0.35 s 同步超差；flash 版多一个
   `{"t":5.5,"kind":"flash"}` 用来验证"设计事件不记 error"。
 
-断言覆盖（18 项）：ffmpeg 可用、`sample_frames` 形状/类型/范围、`from_s/to_s` 时间窗确实是黑帧、
+断言覆盖（22 项）：ffmpeg 可用、`sample_frames` 形状/类型/范围、`from_s/to_s` 时间窗确实是黑帧、
 干净画面 0 误报（闪烁+空窗）、注入白闪被检出（时刻/强度/bbox 合法）、1.5 s 黑窗被检出且片头 0.8 s 黑不误报、
 亮度曲线暗场/正常段、响度曲线能测到静音谷（<-45 LUFS）、`sync_check` 只报超差、
 **孤立性判据回归**（连续小元素运动不报 / 单帧尖峰要报 / 硬切不报 / 加速运动放过 /

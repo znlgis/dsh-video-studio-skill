@@ -32,6 +32,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -65,6 +66,18 @@ BROWSER_ARGS = [
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
+]
+# 确定性模式（v0.4.0）：关掉 GPU 光栅，2D canvas 全部走软件光栅。
+# 为什么需要：默认参数下**同一页面会话内**截图 byte 完全一致，但**跨浏览器会话**
+# （崩溃重开 / 多 worker / 续跑重渲）不完全一致——GPU 抗锯齿光栅化会有极小的非确定性。
+# 实测（assets/web 模板，f=179/180，8 个独立会话）：
+#   默认参数：8 个会话分成 2 簇，差异 4 个像素、每个通道 ±1 级（文字抗锯齿边缘），
+#             成片经 H.264 后不可见，但"byte 完全一致"的说法不成立；
+#   加 --disable-gpu：8/8 会话 byte 完全一致，代价是每帧 79.9 ms → 97.7 ms（约 +22%）。
+# 所以做成显式开关（WEBENGINE_DETERMINISTIC=1 / --deterministic），默认仍走 GPU 求快；
+# 要求"跨会话字节级可复现"（例如质检要拿两次渲染做 diff）时再打开。
+DETERMINISTIC_ARGS = [
+    "--disable-gpu",
 ]
 
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -132,15 +145,64 @@ def _console_log(msg) -> None:
         pass
 
 
-async def open_page(pw, url, width=W, height=1080, log=False):
+def _use_deterministic(flag=None) -> bool:
+    """确定性开关：显式参数优先，其次环境变量 WEBENGINE_DETERMINISTIC（1/true/yes/on）。"""
+    if flag is not None:
+        return bool(flag)
+    return str(os.environ.get("WEBENGINE_DETERMINISTIC") or "").strip().lower() in (
+        "1", "true", "yes", "on", "y", "t")
+
+
+def browser_args(deterministic=None) -> list:
+    """浏览器启动参数；deterministic=True 时追加软件光栅参数（跨会话字节可复现）。"""
+    args = list(BROWSER_ARGS)
+    if _use_deterministic(deterministic):
+        args += DETERMINISTIC_ARGS
+    return args
+
+
+async def _page_contract(page) -> dict:
+    """读页面的接口契约（都是 cheap 的同步求值），用于给出可操作的报错。"""
+    try:
+        return await page.evaluate(
+            "() => ({ready: window.ready === true,"
+            " renderFrame: typeof window.renderFrame,"
+            " duration: (typeof window.DURATION === 'number' ? window.DURATION : null),"
+            " fps: (typeof window.FPS === 'number' ? window.FPS : null),"
+            " getCues: typeof window.getCues,"
+            " getEvents: typeof window.getEvents,"
+            " qaText: typeof window.qaText,"
+            " hasFK: typeof window.FK === 'object' && window.FK !== null})")
+    except Exception as exc:            # noqa: BLE001
+        return {"_error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
+def _format_contract(contract: dict) -> str:
+    if contract.get("_error"):
+        return "读页面契约失败（%s）" % contract["_error"]
+    return ("renderFrame=%s, DURATION=%s, FPS=%s, getCues=%s, getEvents=%s, qaText=%s, FK=%s"
+            % (contract.get("renderFrame"), contract.get("duration"), contract.get("fps"),
+               contract.get("getCues"), contract.get("getEvents"), contract.get("qaText"),
+               "有" if contract.get("hasFK") else "无"))
+
+
+async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None,
+                    ready_timeout=300_000):
     """打开页面并等到 window.ready === true，返回 (browser, page, cdp)。
 
     浏览器优先 Microsoft Edge（channel="msedge"），启动失败回落 Playwright 自带的 Chromium；
     视口固定 1920x1080 / devicePixelRatio=1，截图与画布 1:1 像素。
+
+    v0.4.0 起多了两道**可操作**的契约检查（以前缺 window.ready / renderFrame 时只会
+    抛 Playwright 的裸超时异常，看不出是页面脚本挂了还是没调 FK.boot()）：
+      1. 等到 window.ready === true 超时 → 报错里带上页面异常/控制台错误和契约快照；
+      2. window.renderFrame 不是函数 → 直接报错（不再逐帧重试 5 次才发现）。
+    确定性：deterministic=True（或环境变量 WEBENGINE_DETERMINISTIC=1）走软件光栅，
+    跨浏览器会话 byte 级可复现；缺省走 GPU，快约 22%。
     """
     global _BROWSER_KIND
     browser = None
-    args = list(BROWSER_ARGS)
+    args = browser_args(deterministic)
     try:
         browser = await pw.chromium.launch(channel="msedge", headless=True, args=args)
         _BROWSER_KIND = "msedge"
@@ -154,12 +216,47 @@ async def open_page(pw, url, width=W, height=1080, log=False):
         if log:
             print("[浏览器] Playwright Chromium", flush=True)
     page = await browser.new_page(viewport={"width": int(width), "height": int(height)}, device_scale_factor=1)
-    if log:
-        page.on("console", _console_log)
-        page.on("pageerror", lambda exc: print("[页面异常] %s" % exc, flush=True))
+    page_errors = []
+
+    def _on_pageerror(exc):
+        page_errors.append(str(exc)[:200])
+        print("[页面异常] %s" % exc, flush=True)
+
+    def _on_console(msg):
+        try:
+            if msg.type in ("error", "warning"):
+                page_errors.append("%s: %s" % (msg.type, msg.text[:200]))
+        except Exception:               # noqa: BLE001
+            pass
+        if log:
+            _console_log(msg)
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=180_000)
-        await page.wait_for_function("window.ready === true", timeout=300_000, polling=250)
+        try:
+            await page.wait_for_function("window.ready === true", timeout=int(ready_timeout),
+                                         polling=250)
+        except Exception as exc:        # noqa: BLE001
+            contract = await _page_contract(page)
+            detail = ("；页面异常/控制台错误：" + " | ".join(page_errors[:5])) if page_errors else ""
+            raise RuntimeError(
+                "页面 %s 在 %d s 内没有把 window.ready 置 true（%s）。契约快照：%s%s。"
+                "排查：① 页面脚本是否报错（上面若有 [页面异常] 就是它）；"
+                "② index.html 末尾是否调用了 window.FK.boot()；"
+                "③ boot 里 document.fonts.ready 是否卡住。"
+                % (url, int(ready_timeout) // 1000, type(exc).__name__,
+                   _format_contract(contract), detail)
+            ) from exc
+        contract = await _page_contract(page)
+        if contract.get("renderFrame") != "function":
+            raise RuntimeError(
+                "页面 %s 缺少 window.renderFrame(f)。契约快照：%s。"
+                "逐帧渲染必须导出 renderFrame：engine.js 加载后应挂到 window 上，"
+                "页面脚本顺序为 engine.js → film.js → qa_text.js。"
+                % (url, _format_contract(contract))
+            )
     except Exception:
         try:
             await browser.close()
@@ -177,10 +274,10 @@ async def _grab(page, cdp, f: int) -> bytes:
     return base64.b64decode(reply["data"])
 
 
-async def _page_meta_async(html_path):
+async def _page_meta_async(html_path, deterministic=None):
     url = _to_url(html_path)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url)
+        browser, page, _cdp = await open_page(pw, url, deterministic=deterministic)
         try:
             duration = float(await page.evaluate("window.DURATION"))
             fps = float(await page.evaluate("window.FPS || 30"))
@@ -199,7 +296,7 @@ def page_meta(html_path):
 
 
 # ---------------------------------------------------------------- snap
-def snap(html_path, times, out_dir, tag="") -> list:
+def snap(html_path, times, out_dir, tag="", deterministic=None) -> list:
     """截取指定时刻的静帧（PNG）；多帧时额外拼一张联系表。返回帧 PNG 路径列表。"""
     _setup_stdout()
     tlist = [float(t) for t in times]
@@ -209,14 +306,14 @@ def snap(html_path, times, out_dir, tag="") -> list:
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(_snap_async(html_path, tlist, out, str(tag)))
+    return asyncio.run(_snap_async(html_path, tlist, out, str(tag), deterministic))
 
 
-async def _snap_async(html_path, times, out: Path, tag: str) -> list:
+async def _snap_async(html_path, times, out: Path, tag: str, deterministic=None) -> list:
     url = _to_url(html_path)
     paths = []
     async with _playwright()() as pw:
-        browser, page, cdp = await open_page(pw, url, W, H)
+        browser, page, cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
             fps = float(await page.evaluate("window.FPS || 30"))
             for t in times:
@@ -270,16 +367,16 @@ def _norm_events(raw) -> list:
     return out
 
 
-def export_cues(html_path) -> dict:
+def export_cues(html_path, deterministic=None) -> dict:
     """导出页面登记的 cue / 视觉事件，返回可直接写 work/cues.json 的字典（契约 §4.2）。"""
     _setup_stdout()
-    return asyncio.run(_export_cues_async(html_path))
+    return asyncio.run(_export_cues_async(html_path, deterministic))
 
 
-async def _export_cues_async(html_path) -> dict:
+async def _export_cues_async(html_path, deterministic=None) -> dict:
     url = _to_url(html_path)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url, W, H)
+        browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
             duration = float(await page.evaluate("window.DURATION"))
             fps = float(await page.evaluate("window.FPS || 30"))
@@ -359,13 +456,18 @@ def _probe_duration(path):
 
 
 def _check_chunk_durations(chunks, fps: float) -> None:
-    """块时长校验：块损坏 / 旧参数残留都会在拼接前被拦下。"""
+    """块时长校验：块损坏 / 旧参数残留都会在拼接前被拦下。
+
+    v0.4.0：探测不出时长的块（空文件 / 非视频 / ffprobe 失败）以前是 continue 静默放过，
+    结果 concat 时才发现；现在一并算异常——"读不出时长"本身就说明块是坏的。
+    """
     bad = []
     for f0, f1, path in chunks:
+        want = (f1 - f0) / float(fps)
         got = _probe_duration(path)
         if got is None:
+            bad.append("%s 探测不到时长（块损坏 / 空文件 / 不是视频）" % Path(path).name)
             continue
-        want = (f1 - f0) / float(fps)
         if abs(got - want) > max(0.15, 1.5 / float(fps)):
             bad.append("%s 实际 %.3fs / 期望 %.3fs" % (Path(path).name, got, want))
     if bad:
@@ -376,13 +478,14 @@ def _check_chunk_durations(chunks, fps: float) -> None:
 class _Browser:
     """一个无头浏览器会话；卡住/崩溃时自动关掉重开（逐帧无状态，从同一帧继续即可）。"""
 
-    def __init__(self, pw, url, width=W, height=1080, k=0, log=False):
+    def __init__(self, pw, url, width=W, height=1080, k=0, log=False, deterministic=None):
         self.pw = pw
         self.url = url
         self.width = width
         self.height = height
         self.k = k
         self.log = log
+        self.deterministic = deterministic
         self.browser = None
         self.page = None
         self.cdp = None
@@ -390,7 +493,8 @@ class _Browser:
     async def open(self):
         await self.close()
         self.browser, self.page, self.cdp = await open_page(
-            self.pw, self.url, self.width, self.height, log=self.log
+            self.pw, self.url, self.width, self.height, log=self.log,
+            deterministic=self.deterministic,
         )
 
     async def close(self):
@@ -474,9 +578,10 @@ async def _write_chunk(br: _Browser, f0: int, f1: int, dst: Path, fps: float,
     )
 
 
-async def _worker(k: int, queue, state: dict, url: str, fps: float, crf: int, preset: str) -> None:
+async def _worker(k: int, queue, state: dict, url: str, fps: float, crf: int, preset: str,
+            deterministic=None) -> None:
     async with _playwright()() as pw:
-        br = _Browser(pw, url, W, H, k=k)
+        br = _Browser(pw, url, W, H, k=k, deterministic=deterministic)
         try:
             while True:
                 try:
@@ -490,20 +595,23 @@ async def _worker(k: int, queue, state: dict, url: str, fps: float, crf: int, pr
 
 # ---------------------------------------------------------------- render_full
 def render_full(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
-                resume=True, from_s=0.0, to_s=None, crf=17, preset="slow") -> Path:
+                resume=True, from_s=0.0, to_s=None, crf=17, preset="slow",
+                deterministic=None) -> Path:
     """并行渲染整片（或一段）→ mp4。返回成片绝对路径。
 
     duration 传 None 时读页面 window.DURATION；传数字时与页面对不上会直接 raise。
+    deterministic=True（或 WEBENGINE_DETERMINISTIC=1）→ 软件光栅，跨会话 byte 可复现。
     """
     _setup_stdout()
     return asyncio.run(_render_full_async(
         html_path, out_mp4, duration, workers=workers, chunk_s=chunk_s, resume=resume,
-        from_s=from_s, to_s=to_s, crf=crf, preset=preset,
+        from_s=from_s, to_s=to_s, crf=crf, preset=preset, deterministic=deterministic,
     ))
 
 
 async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
-                             resume=True, from_s=0.0, to_s=None, crf=17, preset="slow") -> Path:
+                             resume=True, from_s=0.0, to_s=None, crf=17, preset="slow",
+                             deterministic=None) -> Path:
     url = _to_url(html_path)
     out = Path(out_mp4).expanduser()
     if not out.is_absolute():
@@ -511,7 +619,7 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # 先问页面要长度与帧率：这是块切分与成片校验的唯一真值来源
-    page_dur, fps = await _page_meta_async(url)
+    page_dur, fps = await _page_meta_async(url, deterministic=deterministic)
     if duration is None:
         duration = page_dur
     duration = float(duration)
@@ -551,7 +659,8 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
         state = {"done": 0, "total": sum(b - a for a, b, _p in todo), "t0": time.perf_counter()}
         nw = max(1, min(int(workers), len(todo)))
         tasks = [
-            asyncio.create_task(_worker(k, queue, state, url, fps, int(crf), str(preset)))
+            asyncio.create_task(_worker(k, queue, state, url, fps, int(crf), str(preset),
+                                        deterministic=deterministic))
             for k in range(nw)
         ]
         try:
@@ -581,16 +690,16 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
 
 
 # ---------------------------------------------------------------- 浏览器端文字质检
-def qa_text(html_path, t0=0.0, t1=None, step=0.2) -> dict:
+def qa_text(html_path, t0=0.0, t1=None, step=0.2, deterministic=None) -> dict:
     """浏览器端文字质检：重叠 / 出画 / 一闪而过 / 从没露面（渲染期间会临时改页面状态）。"""
     _setup_stdout()
-    return asyncio.run(_qa_text_async(html_path, t0, t1, step))
+    return asyncio.run(_qa_text_async(html_path, t0, t1, step, deterministic))
 
 
-async def _qa_text_async(html_path, t0, t1, step) -> dict:
+async def _qa_text_async(html_path, t0, t1, step, deterministic=None) -> dict:
     url = _to_url(html_path)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url, W, H)
+        browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
             if t1 is None:
                 t1 = float(await page.evaluate("window.DURATION"))
@@ -671,8 +780,9 @@ async def _selftest_probe() -> dict:
 
             out["cues"] = await page.evaluate("window.getCues()")
             out["events"] = await page.evaluate("window.getEvents()")
+            # step 用 0.2（文档口径）：12 s 页面 → 61 个采样点，自检据此校验 frames 字段
             out["qa"] = await page.evaluate(
-                "([a, b, c]) => window.qaText(a, b, c)", [0.0, out["duration"], 0.5]
+                "([a, b, c]) => window.qaText(a, b, c)", [0.0, out["duration"], 0.2]
             )
 
             # 零外部网络：重载一次，记录页面发出的全部请求
@@ -687,6 +797,53 @@ async def _selftest_probe() -> dict:
             except Exception:
                 pass
     return out
+
+
+# ---------------------------------------------------------------- 自检辅助（v0.4.0）
+_NONDET_JS = re.compile(r"(Math\.random|Date\.now|performance\.now|new\s+Date\s*\()")
+
+
+def _strip_js_comments(text: str) -> str:
+    """去掉 JS 的 /* */ 与 // 注释，避免把文档注释里的"不许用 Math.random"当成违规。"""
+    out = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    out = re.sub(r"(?m)^\s*//.*$", "", out)
+    out = re.sub(r"(?<!:)//[^\n]*", "", out)
+    return out
+
+
+def _nondet_hits(text: str) -> list:
+    """在（剔除注释后的）JS 里找非确定性时间/随机 API；返回 [(行号, 命中片段)]。"""
+    cleaned = _strip_js_comments(text)
+    hits = []
+    for i, line in enumerate(cleaned.splitlines(), 1):
+        for m in _NONDET_JS.finditer(line):
+            hits.append((i, m.group(1)))
+    return hits
+
+
+async def _capture_frames(html_path, frames, deterministic=None):
+    """开一个浏览器会话，连续截指定帧，返回 [(帧号, PNG bytes)]。"""
+    url = _to_url(html_path)
+    async with _playwright()() as pw:
+        browser, page, cdp = await open_page(pw, url, W, H, deterministic=deterministic)
+        try:
+            return [(f, await _grab(page, cdp, f)) for f in frames]
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+
+async def _open_page_expect_error(html_path, ready_timeout=3000) -> str:
+    """打开一个坏页面，返回它抛出的错误消息（用来断言报错可操作）。"""
+    url = _to_url(html_path)
+    async with _playwright()() as pw:
+        try:
+            await open_page(pw, url, W, H, ready_timeout=ready_timeout)
+        except Exception as exc:        # noqa: BLE001
+            return "%s: %s" % (type(exc).__name__, exc)
+        raise RuntimeError("坏页面居然没有报错：%s" % html_path)
 
 
 # ---------------------------------------------------------------- 自检
@@ -721,6 +878,18 @@ def selftest() -> int:
             net_bad.append("%s 含 %s" % (name, hit.group(0)))
     check("页面零网络依赖（不连 CDN / 无外链）", not net_bad,
           "只引用同目录本地文件" if not net_bad else "；".join(net_bad[:4]))
+
+    # 非确定性 API 扫描（剔除注释后）：Math.random / Date.now / performance.now / new Date()
+    nondet_bad = []
+    for name in names:
+        path = _ASSET_DIR / name
+        if not path.is_file() or not name.endswith(".js"):
+            continue
+        for ln, frag in _nondet_hits(path.read_text(encoding="utf-8", errors="replace")):
+            nondet_bad.append("%s:%d %s" % (name, ln, frag))
+    check("页面脚本零非确定性 API（Math.random / Date.now / performance.now）",
+          not nondet_bad, "5 个 js 文件剔除注释后 0 命中" if not nondet_bad
+          else "；".join(nondet_bad[:5]))
 
     # 纯函数级检查（不开浏览器）
     tmp_root = Path(tempfile.mkdtemp(prefix="webengine_self_"))
@@ -815,6 +984,54 @@ def selftest() -> int:
               ("f=45 两次均 %d bytes，sha256=%s…" % (probe.get("same_len", 0), probe.get("same_sha", "")))
               if same else (perr or "两次截图字节不同（页面存在非确定性）"))
 
+        # 跨浏览器会话确定性：确定性模式（软件光栅）下两次独立会话必须 byte 一致。
+        # 默认 GPU 模式下实测会有 4 个像素 ±1 级的抗锯齿差异（见 DETERMINISTIC_ARGS 注释），
+        # 所以这里测的是"确定性模式真的确定性"，而不是把 GPU 差异当失败。
+        cross_ok = False
+        cross_detail = perr or "无截图数据"
+        if not perr:
+            try:
+                d1 = asyncio.run(_capture_frames(DEFAULT_HTML, (45, 180), deterministic=True))
+                d2 = asyncio.run(_capture_frames(DEFAULT_HTML, (45, 180), deterministic=True))
+                diff = [f for (f, a), (_f, b) in zip(d1, d2) if a != b]
+                cross_ok = not diff
+                cross_detail = ("两次独立会话 f=45/180 byte 完全一致（%d/%d bytes）"
+                                % (len(d1[0][1]), len(d1[1][1])) if cross_ok
+                                else "两次独立会话有差异帧：%s" % diff)
+            except Exception as exc:    # noqa: BLE001
+                cross_detail = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+        check("确定性模式（软件光栅）跨会话截图 byte 一致", cross_ok, cross_detail)
+
+        # 坏页面 1：缺 window.renderFrame —— 报错要点名 renderFrame，不能只抛裸超时
+        bad_html = tmp_root / "bad_no_render.html"
+        bad_html.write_text(
+            "<!doctype html><meta charset='utf-8'><canvas id='stage' width='960' height='540'></canvas>"
+            "<script>window.DURATION=2.0;window.FPS=30;window.ready=true;</script>",
+            encoding="utf-8")
+        msg = ""
+        try:
+            msg = asyncio.run(_open_page_expect_error(bad_html))
+        except Exception as exc:        # noqa: BLE001
+            msg = "%s: %s" % (type(exc).__name__, exc)
+        check("页面缺 renderFrame 时给出可操作报错", "renderFrame" in msg and "缺少" in msg,
+              msg[:200])
+
+        # 坏页面 2：ready 永远不置 true（且脚本报错）—— 报错要带页面异常与排查步骤
+        bad_html2 = tmp_root / "bad_no_ready.html"
+        bad_html2.write_text(
+            "<!doctype html><meta charset='utf-8'><canvas id='stage' width='960' height='540'></canvas>"
+            "<script>window.DURATION=2.0;window.FPS=30;"
+            "window.renderFrame=async function(f){return true;};"
+            "throw new Error('故意炸掉的场景脚本');</script>",
+            encoding="utf-8")
+        msg2 = ""
+        try:
+            msg2 = asyncio.run(_open_page_expect_error(bad_html2, ready_timeout=2500))
+        except Exception as exc:        # noqa: BLE001
+            msg2 = "%s: %s" % (type(exc).__name__, exc)
+        check("页面 ready 不置 true 时给出可操作报错", "window.ready" in msg2 and "排查" in msg2,
+              msg2[:200])
+
         stats = probe.get("frame_stats") or {}
         dark = []
         detail = []
@@ -842,12 +1059,67 @@ def selftest() -> int:
               "%d 个视觉事件" % len(events) if events else (perr or "空列表"))
 
         qa = probe.get("qa") or {}
-        qa_keys = all(k in qa for k in ("overlaps", "offscreen", "brief", "never"))
+        qa_keys = all(k in qa for k in ("overlaps", "offscreen", "brief", "never", "frames"))
         qa_clean = qa_keys and not qa.get("overlaps") and not qa.get("offscreen")
-        check("qaText() 跑通且模板页无重叠 / 出画", qa_clean,
-              perr or "重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"
-              % (len(qa.get("overlaps") or []), len(qa.get("offscreen") or []),
-                 len(qa.get("brief") or []), len(qa.get("never") or [])))
+        # frames 字段 = 采样帧数：12 s / step 0.2 = 60 步 → 61 个采样点
+        want_frames = int(round(float(probe.get("duration") or 0) / 0.2)) + 1
+        frames_ok = int(qa.get("frames") or 0) == want_frames
+        check("qaText() 跑通、模板页无重叠/出画、frames=采样数", qa_clean and frames_ok,
+              perr or ("重叠 %d、出画 %d、一闪而过 %d、从没露面 %d、frames=%s（期望 %d）"
+                       % (len(qa.get("overlaps") or []), len(qa.get("offscreen") or []),
+                          len(qa.get("brief") or []), len(qa.get("never") or []),
+                          qa.get("frames"), want_frames)))
+
+        # 坏页面 3：四类文字缺陷各造一个 —— 验证 qa_text.js 的阈值真的会失败，不是摆设。
+        bad_page = tmp_root / "bad_text.html"
+        eng = (_ASSET_DIR / "engine.js").as_uri()
+        qat = (_ASSET_DIR / "qa_text.js").as_uri()
+        bad_page.write_text(
+            "<!doctype html><meta charset='utf-8'>"
+            "<style>body{margin:0;background:#000}</style>"
+            "<canvas id='stage' width='1920' height='1080'></canvas>"
+            "<script src='%s'></script><script src='%s'></script>"
+            "<script>"
+            "window.DURATION=2.0;"
+            "window.FK.watch('never.key','从没露面的文字');"
+            "window.FK.scene('bad',0.0,2.0,function(S){"
+            "  S.update(function(t){"
+            "    window.FK.g.text('重叠甲',400,500,{size:90,key:'ov.a',group:'ov.a'});"
+            "    window.FK.g.text('重叠乙',420,520,{size:90,key:'ov.b',group:'ov.b'});"
+            "    window.FK.g.text('出画文字',1990,500,{size:60,key:'off.a',group:'off.a'});"
+            "    if(t>0.45&&t<0.55) window.FK.g.text('一闪而过',800,800,{size:60,key:'brief.a',group:'brief.a'});"
+            "  });"
+            "});"
+            "window.FK.boot();"
+            "</script>" % (eng, qat),
+            encoding="utf-8")
+        bad_qa = {}
+        try:
+            bad_qa = qa_text(str(bad_page), 0.0, 2.0, 0.1)
+        except Exception as exc:        # noqa: BLE001
+            bad_qa = {"_error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        err = bad_qa.get("_error")
+        bad_ok = (not err and bad_qa.get("overlaps") and bad_qa.get("offscreen")
+                  and bad_qa.get("brief") and bad_qa.get("never"))
+        check("qaText 能报出重叠/出画/一闪而过/从没露面（故意做坏的页面）",
+              bool(bad_ok),
+              err or ("重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"
+                      % (len(bad_qa.get("overlaps") or []), len(bad_qa.get("offscreen") or []),
+                         len(bad_qa.get("brief") or []), len(bad_qa.get("never") or []))))
+
+        # 坏页面 3b：CLI textqa 遇到这四类必须 exit 1（以前只把重叠/出画算失败）
+        cli_bad = None
+        try:
+            cp = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "textqa", str(bad_page),
+                 "--from", "0", "--to", "2", "--step", "0.1"],
+                capture_output=True, timeout=180)
+            cli_bad = (cp.returncode, (cp.stdout or b"").decode("utf-8", "replace"))
+        except Exception as exc:        # noqa: BLE001
+            cli_bad = (-1, "%s: %s" % (type(exc).__name__, exc))
+        check("CLI textqa 对四类缺陷 exit 1", cli_bad[0] == 1,
+              "exit=%s；%s" % (cli_bad[0], (cli_bad[1] or "").strip().splitlines()[0][:120]
+                               if cli_bad[1] else "无输出"))
 
         reqs = probe.get("requests") or []
         external = [u for u in reqs if not u.startswith(("file:", "data:", "blob:", "about:"))]
@@ -936,10 +1208,13 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--to", dest="t_to", type=float)
     s.add_argument("--out", default="", help="输出目录（缺省 ./snaps）")
     s.add_argument("--tag", default="", help="文件名前缀")
+    s.add_argument("--deterministic", action="store_true",
+                   help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
 
     c = sub.add_parser("cues", help="导出 cue / 视觉事件（契约 §4.2 schema）")
     c.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
     c.add_argument("--out", default="", help="写到 JSON 文件；缺省打到标准输出")
+    c.add_argument("--deterministic", action="store_true")
 
     f = sub.add_parser("full", help="并行渲染整片（分块 + 断点续跑 + 缺口检测）")
     f.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
@@ -953,6 +1228,8 @@ def _build_parser() -> argparse.ArgumentParser:
     f.add_argument("--to", dest="t_to", type=float, default=None, help="结束秒（缺省到片尾）")
     f.add_argument("--crf", type=int, default=17)
     f.add_argument("--preset", default="slow")
+    f.add_argument("--deterministic", action="store_true",
+                   help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
 
     q = sub.add_parser("textqa", help="浏览器端文字质检（重叠 / 出画 / 一闪而过 / 从没露面）")
     q.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
@@ -960,6 +1237,7 @@ def _build_parser() -> argparse.ArgumentParser:
     q.add_argument("--to", dest="t1", type=float, default=None)
     q.add_argument("--step", type=float, default=0.2)
     q.add_argument("--out", default="", help="把完整结果写到 JSON")
+    q.add_argument("--deterministic", action="store_true")
 
     sub.add_parser("selftest", help="跑自检（等价于 --selftest）")
     return ap
@@ -995,11 +1273,11 @@ def main(argv=None) -> int:
             print("[错误] snap 需要 --times 3,9.5 或 --every 2 [--to 12]", flush=True)
             return 2
         out_dir = args.out or str(Path.cwd() / "snaps")
-        snap(args.html, times, out_dir, tag=args.tag)
+        snap(args.html, times, out_dir, tag=args.tag, deterministic=args.deterministic)
         return 0
 
     if args.cmd == "cues":
-        data = export_cues(args.html)
+        data = export_cues(args.html, deterministic=args.deterministic)
         if args.out:
             dst = _json_dump(data, args.out)
             print("[cues] %d 个 cue、%d 个视觉事件 → %s"
@@ -1013,12 +1291,14 @@ def main(argv=None) -> int:
             args.html, args.out, args.duration,
             workers=args.workers, chunk_s=args.chunk_s, resume=args.resume,
             from_s=args.t_from, to_s=args.t_to, crf=args.crf, preset=args.preset,
+            deterministic=args.deterministic,
         )
         print("[done] %s" % out, flush=True)
         return 0
 
     if args.cmd == "textqa":
-        result = qa_text(args.html, args.t0, args.t1, args.step)
+        result = qa_text(args.html, args.t0, args.t1, args.step,
+                         deterministic=args.deterministic)
         print("[textqa] 重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"
               % (len(result.get("overlaps") or []), len(result.get("offscreen") or []),
                  len(result.get("brief") or []), len(result.get("never") or [])), flush=True)
@@ -1030,7 +1310,10 @@ def main(argv=None) -> int:
             print("  从没露面：%s" % item, flush=True)
         if args.out:
             print("[textqa] 详情 → %s" % _json_dump(result, args.out), flush=True)
-        bad = bool(result.get("overlaps")) or bool(result.get("offscreen"))
+        # 四类缺陷都算没通过：重叠/出画是布局错，一闪而过/从没露面同样会让成片看起来"漏字"。
+        # v0.4.0 之前只看前两类，后两类会被打印出来却 exit 0 —— 门禁形同建议。
+        bad = (bool(result.get("overlaps")) or bool(result.get("offscreen"))
+               or bool(result.get("brief")) or bool(result.get("never")))
         return 1 if bad else 0
 
     _build_parser().print_help()

@@ -10,8 +10,15 @@
    阈值 + 孤立性判据），返回时刻、强度、异常块坐标。
 3. black_windows：连续近黑片段（"画面空窗"），片头/片尾刻意淡入淡出不计。
 4. luma_curve / loudness_curve：亮度与响度时间曲线（响度是近似值，见文档）。
-5. sync_check：cues.json 的音频提示点与页面导出的视觉事件配对，报 dt 超容差项。
-6. report：一次扫描产出 work/qa/deep.json（CONTRACT §4.5）与一张 PIL 诊断 PNG
+5. static_warnings（"_static_warnings"，报告里进 warnings）：画面长时间"完全没有运动"
+   （卡帧 / 忘了加动画）。判据是"最活跃的 8x8 块在 0.5 s 里是否变了 > 1.5 级灰度"，
+   连续 6 s 全部不动才告警——v0.4.0 换掉了原来"全帧平均亮度 3 s 波动 < 0.002"的判据
+   （后者对逐字入场这类局部动画不敏感，自带模板片误报 4 段）。
+6. sync_check：cues.json 的音频提示点与视觉事件配对，报 dt 超容差项。v0.4.0 起支持
+   cue 自带 visual_at / visual_t 画面锚点（PIL 路线没有 window.getEvents() 也能自校验），
+   并可用 require_sync（环境变量 QA_REQUIRE_SYNC=1 / CLI --require-sync）把
+   "同步门禁没执行"从 warning 升级为 error。
+7. report：一次扫描产出 work/qa/deep.json（CONTRACT §4.5）与一张 PIL 诊断 PNG
    （亮度曲线 + 响度曲线 + 闪烁点 + 空窗区 + 同步偏差，一眼看出问题位置）。
 
 判据与阈值来自 ai-history-film（MIT）的实测经验：
@@ -95,9 +102,36 @@ SYNC_SAME_WIN = 2.0     # 同 kind 配对的最大搜索窗（秒）
 # 这个常量保留给"events 每项带可选 cue 字段、允许跨 kind 显式配对"的下一版（CONTRACT §5.4 兼容位）。
 SYNC_NEAR_WIN = 0.5
 
-# 亮度"长时间无变化"警告
-FLAT_MIN_DUR = 3.0
-FLAT_EPS = 0.002
+# 画面"长时间静止"警告（可能卡帧 / 忘了加动画）—— v0.4.0 重写判据
+#
+# 旧判据（v0.3.0）：160x90 全帧平均亮度在 3 s 滑动窗内波动 < 0.002。
+# 它对**局部动画**天生不敏感：逐字入场、数字滚动、卡片切换只占全屏几个百分点，
+# 平均亮度几乎不动。实测自带模板片（30.10 s）因此报出 4 段假"亮度长时间无变化"
+# （411/814 个窗口命中），而画面一直在动——这是本轮修掉的假阳性。
+#
+# 新判据看"画面里最活跃的 8x8 块，在 0.5 s 里变了多少级灰度"：
+#   drift[t] = max over 8x8 blocks of mean |F[t] - F[t-lag]| * 255,  lag = 0.5 s * fps
+# 物理含义：把画面切成 8x8 块（160x90 下共 20x11 块，单块占全屏 0.53%），取
+# "0.5 秒内变化最大的那一块的平均变化量"（单位：灰度级 0–255）。
+#   - 完全冻结：0（只有编码噪声，实测 ≤ 1.5）
+#   - 慢速漂移/呼吸光/缓推镜头：数级灰度（实测合成 6 级/0.5s 的慢渐变仍被判"在动"）
+#   - 逐字入场 / 数字滚动 / 粒子：几十级灰度
+# 用 0.5 s 而不是逐帧比较，是为了不被 H.264 的单帧量化抖动打断：same 画面在静止段里
+# 偶发 intra 重编码会让相邻帧差 1–4 级灰度（实测 hold_6.0 的 6 s 冻结里有 5 帧如此），
+# 逐帧阈值在"不被噪声误判"和"不漏掉真冻结"之间没有余量；隔 0.5 s 看，抖动被摊平，
+# 而真正的慢动画在 0.5 s 里的累计位移是实打实的。
+#
+# 阈值实测（160x90 解码，H.264 yuv420p，30 fps）：
+#   - 纯冻结段（渲染器卡住）：drift 0–1.5
+#   - 合成慢渐变（6 级/0.5s）：6.0
+#   - 模板片第 2 段"静态卡片 + 字幕逐字入场"：窗口内最大 drift > 4.5（不会被误判）
+#   - 逐字入场/粒子/场景切换：20–108
+# 取 1.5：比冻结噪声上限高，又明显低于任何肉眼可见的动画。
+FLAT_MIN_DUR = 6.0      # 静止持续多久才告警（秒）：与 SKILL.md「静止超过 6 秒观众就走」
+                        # 和 references/quality-gates.md「连续 >6 s ≈ 静止」同一口径。
+                        # 旧代码的 3.0 s 与这两处文档承诺不一致（文档说 6 s、代码报 3 s）。
+FLAT_LAG_S = 0.5        # 判据时间尺度：比较"当前帧"与"0.5 s 前那一帧"的块级差异
+FLAT_DRIFT_EPS = 1.5    # 0.5 s 内最活跃 8x8 块的平均变化 ≤ 此值（灰度 0–255）→ "没动"
 
 # 报告图表尺寸（PIL 手绘，1600x820 在 1080p 屏上可直接看）
 PLOT_W = 1600
@@ -351,13 +385,30 @@ def _block_max(diff, block) -> tuple[float, tuple[int, int, int, int], float]:
     return float(means[r, c]), bb, med
 
 
-def _scan_full(path, w=SAMPLE_W, h=SAMPLE_H, block=FLICKER_BLOCK):
-    """一次流式解码：返回 (means[n], scores[n], boxes[n-2], returns[n])。
+def _block_peak(diff, block) -> float:
+    """(h,w) 差异图按 block×block 分块取均值的最大值（只要数值，不算 bbox / 中值）。
+
+    与 _block_max 同一套分块口径；静止判据每帧都要调，省掉 bbox / median 的开销。
+    """
+    h, w = diff.shape
+    b = max(1, int(block))
+    rows = np.arange(0, h, b, dtype=np.int64)
+    cols = np.arange(0, w, b, dtype=np.int64)
+    sums = np.add.reduceat(np.add.reduceat(diff.astype(np.float64), rows, axis=0), cols, axis=1)
+    rc = np.diff(np.append(rows, h)).astype(np.float64)
+    cc = np.diff(np.append(cols, w)).astype(np.float64)
+    return float((sums / np.outer(rc, cc)).max())
+
+
+def _scan_full(path, w=SAMPLE_W, h=SAMPLE_H, block=FLICKER_BLOCK, fps=None):
+    """一次流式解码：返回 (means[n], scores[n], boxes[n-2], returns[n], drift[n])。
 
     scores[t]  = |F[t] - (F[t-1]+F[t+1])/2| 的块最大均值（0–255 单位）——"中间帧偏了多少"；
-    returns[t] = |F[t+1] - F[t-1]| 的同一块均值——"前后两帧彼此差多少"。
+    returns[t] = |F[t+1] - F[t-1]| 的同一块均值——"前后两帧彼此差多少"；
+    drift[t]   = |F[t] - F[t-lag]| 的块最大均值（lag = FLAT_LAG_S * fps）——"0.5 s 里
+                 最活跃的 8x8 块变了多少"，静止判据用；t < lag 的帧为 NaN（不参与判定）。
 
-    为什么要两个：二阶差分**分不清**"单帧闪烁"和"加速运动"。
+    为什么要 scores+returns 两个：二阶差分**分不清**"单帧闪烁"和"加速运动"。
     真正只亮一帧的事件，前后两帧几乎一样（returns ≈ 0）而中间偏得很多；
     加速运动（逐字入场、缓动推近）三个二阶差分都大，returns 也大。
     只看 scores 会把"运动最快的那一帧"报成闪烁——这是本项目实测踩到的假阳性。
@@ -365,9 +416,18 @@ def _scan_full(path, w=SAMPLE_W, h=SAMPLE_H, block=FLICKER_BLOCK):
     scores[0] / scores[n-1] 无前后帧，为 NaN。boxes[k] 对应帧 t=k+1 的 (bbox, 块内中值)。
     """
     means, scores, boxes, returns = [], [], [], []
+    use_fps = float(fps) if fps and math.isfinite(float(fps)) and float(fps) > 0 else FPS_FALLBACK
+    lag = max(1, int(round(float(FLAT_LAG_S) * use_fps)))
+    history = []                      # 最近 lag+1 帧（float32 160x90 ≈ 0.06 MB/帧）
+    drift = []
     prev2 = prev1 = None
     for fr in _iter_frames(path, w, h):
         means.append(float(fr.mean()))
+        drift.append(_block_peak(np.abs(fr - history[-lag]) * 255.0, block)
+                     if len(history) >= lag else float("nan"))
+        history.append(fr)
+        if len(history) > lag:
+            history.pop(0)
         if prev2 is not None:
             diff = np.abs(prev1 - (prev2 + fr) * 0.5) * 255.0
             s, bb, med = _block_max(diff, block)
@@ -386,7 +446,8 @@ def _scan_full(path, w=SAMPLE_W, h=SAMPLE_H, block=FLICKER_BLOCK):
     for k, v in enumerate(scores):
         sc[k + 1] = v
         rt[k + 1] = returns[k] if k < len(returns) else np.nan
-    return np.asarray(means, dtype=np.float64), sc, boxes, rt
+    dr = np.asarray(drift, dtype=np.float64)
+    return np.asarray(means, dtype=np.float64), sc, boxes, rt, dr
 
 
 def _scan_means(path, w=SAMPLE_W, h=SAMPLE_H) -> np.ndarray:
@@ -471,8 +532,8 @@ def flicker_scan(path, *, thresh=FLICKER_THRESH, block=FLICKER_BLOCK) -> list[di
       median  异常块内差异的**中值**：真单帧闪烁整块一起变（中值≈score），
               小元素漂移/加速运动只有少数像素变（中值远小于 score），是人工复核的关键线索
     """
-    means, scores, boxes, returns = _scan_full(path, SAMPLE_W, SAMPLE_H, block)
     fps = _probe(path)["fps"]
+    means, scores, boxes, returns, _drift = _scan_full(path, SAMPLE_W, SAMPLE_H, block, fps)
     return _flicker_from_scores(scores, boxes, fps, thresh, returns=returns)
 
 
@@ -602,65 +663,175 @@ def sync_check(cues, events, tol=SYNC_TOL) -> list[dict]:
     """cues（音频提示点）与 events（画面视觉事件）配对，返回 dt 超容差的列表。
 
     返回 [{"cue","cue_t","event_t","dt"}]，dt = event_t - cue_t（秒，3 位小数）。
-    配对规则：同 kind 优先（搜索窗 2 s）；异 kind 只在 |dt| <= tol 时认可（作佐证）。
+    配对规则（按优先级）：
+      0. **cue 自带视觉锚点**（v0.4.0 新增）：cue 里写了数值 visual_at / visual_t 时，
+         直接拿它当"这条音效对应的画面时刻"自校验，不需要 events。
+         这条是给 PIL 路线补的口子——pil 引擎没有 window.getEvents()，events 恒空，
+         原来的 sync 检查在 PIL 路线**永远是空的**，但 SKILL.md §7 把"
+         dt ≤ 60 ms"写成通用门禁（文档承诺、代码没做到）。
+         用法：scenes.py 的 cues() 钩子里返回
+             {"at": "l03+0.35", "type": "impact", "visual_at": "abs:12.42"}
+         或在 film.json 的 sfx.cues 里直接写 visual_at（秒）。CueBus 会原样带进 cues.json。
+      1. 同 kind：kind == cue.type，搜索窗 SYNC_SAME_WIN（2 s）；
+      2. 异 kind：只取时间最近者，且**只有 |dt| <= tol 时才认可**（作为"确实同步了"的佐证）。
+         超过容差就不配对——跨 kind 的"最近事件"不是"预期事件"，据此判超差会制造假 FAIL。
     配不上的 cue 视为"没有对应视觉事件"，不判超差（很多音效本来就没有画面事件）。
     ⚠ 命名约定见 references/frame-qa.md §2.5：events 与 cue 不同名时本检查会静默全过。
     """
     out = []
     cues = [c for c in (cues or []) if isinstance(c, dict)]
     events = [e for e in (events or []) if isinstance(e, dict) and e.get("t") is not None]
-    if not cues or not events:
+    if not cues:
         return out
     for cue in sorted(cues, key=lambda c: float(c.get("t") or 0.0)):
+        ct = float(cue.get("t") or 0.0)
+        # 锚点可以来自 _load_cues 解析后的 _anchor_t，也可以直接读原始 visual_at/visual_t
+        anchor = cue.get("_anchor_t")
+        if anchor is None:
+            anchor = _cue_anchor(cue)
+        if anchor is not None:
+            # cue 自带视觉锚点：直接自校验（不依赖 events / 命名约定）
+            try:
+                at = float(anchor)
+            except Exception:           # noqa: BLE001
+                at = None
+            if at is not None:
+                dt = at - ct
+                if abs(dt) > float(tol) + 1e-9:
+                    out.append({"cue": str(cue.get("type") or ""),
+                                "cue_t": round(ct, 3),
+                                "event_t": round(at, 3),
+                                "dt": round(dt, 3)})
+                continue
+        if not events:
+            continue
         ev, dt, _mode = _match_cue(cue, events, tol)
         if ev is None or dt is None:
             continue
         if abs(dt) > float(tol) + 1e-9:
             out.append({"cue": str(cue.get("type") or ""),
-                        "cue_t": round(float(cue.get("t") or 0.0), 3),
+                        "cue_t": round(ct, 3),
                         "event_t": round(float(ev.get("t") or 0.0), 3),
                         "dt": round(float(dt), 3)})
     return out
 
 
 # ---------------------------------------------------------------- 报告
+# cue 自带的"画面锚点"字段名（都是可选、数值秒）：谁先出现用谁。
+# 语义：这条音效在画面上对应的**意图时刻**，用于 PIL 路线在没有 events 时自校验。
+CUE_ANCHOR_KEYS = ("visual_at", "visual_t")
+
+
+def _cue_anchor(cue) -> float | None:
+    """取 cue 自带的画面锚点（秒）；没有或不是有限数值时返回 None。"""
+    for k in CUE_ANCHOR_KEYS:
+        if k not in cue:
+            continue
+        v = cue.get(k)
+        if isinstance(v, bool):
+            continue
+        try:
+            f = float(v)
+        except Exception:               # noqa: BLE001
+            continue
+        if math.isfinite(f):
+            return f
+    return None
+
+
+def _sync_coverage(cues, events) -> dict:
+    """统计"音画同步到底查了多少条"：返回 {"cues","anchors","same","judged"}。
+
+    judged = 能给出 dt 判定的 cue 数 = 自带锚点的 cue + 至少存在同名 kind 事件的 cue。
+    这是防"静默全过"的量化指标：judged == 0 而 cues > 0 时，sync 为空没有意义。
+    """
+    cues = [c for c in (cues or []) if isinstance(c, dict)]
+    anchors = sum(1 for c in cues if _cue_anchor(c) is not None)
+    ev_kinds = {_event_kind(e) for e in (events or []) if isinstance(e, dict)}
+    same = 0
+    for c in cues:
+        if _cue_anchor(c) is not None:
+            continue
+        if str(c.get("type") or "").strip().lower() in ev_kinds:
+            same += 1
+    return {"cues": len(cues), "anchors": anchors, "same": same,
+            "judged": anchors + same}
+
+
 def _load_cues(cues_json):
-    """读 cues.json（或直接给 dict）。返回 (cues, events, warnings)。"""
+    """读 cues.json（或直接给 dict）。返回 (cues, events, warnings, info)。
+
+    info = {"anchors","same","judged","blockers"}：
+      blockers 是"同步门禁没能真正执行"的原因（人话），require_sync=True 时会被升级成 error。
+    cues 里可选的 visual_at / visual_t（数值秒）会被解析成内部 _anchor_t，
+    供 sync_check 在**没有 events**（pil 路线）时自校验。
+    """
     warns = []
+    info = {"cues": 0, "anchors": 0, "same": 0, "judged": 0, "blockers": []}
     if cues_json is None:
-        return [], [], warns
+        info["blockers"].append(
+            "没有提供 cues.json：音画同步对照没有执行（传 --cues work/cues.json 才能检查）")
+        return [], [], warns, info
     data = cues_json
     if not isinstance(data, dict):
         path = str(cues_json)
         if not os.path.exists(path):
-            return [], [], ["cues.json 不存在（%s），跳过音画同步对照" % path]
+            info["blockers"].append(
+                "cues.json 不存在（%s），音画同步对照没有执行" % path)
+            return [], [], ["cues.json 不存在（%s），跳过音画同步对照" % path], info
         try:
             with open(path, encoding="utf-8") as fp:
                 data = json.load(fp)
         except Exception as e:          # noqa: BLE001
-            return [], [], ["cues.json 解析失败（%s），跳过音画同步对照" % e]
+            info["blockers"].append("cues.json 解析失败（%s）" % e)
+            return [], [], ["cues.json 解析失败（%s），跳过音画同步对照" % e], info
     if not isinstance(data, dict):
-        return [], [], ["cues.json 结构不是对象，跳过音画同步对照"]
+        info["blockers"].append("cues.json 结构不是对象")
+        return [], [], ["cues.json 结构不是对象，跳过音画同步对照"], info
     cues = [c for c in (data.get("cues") or []) if isinstance(c, dict)]
     events = [e for e in (data.get("events") or []) if isinstance(e, dict)]
-    if not events and cues:
-        warns.append("cues.json 没有 events 字段，音画同步对照跳过"
-                     "（web 引擎用 window.getEvents() 导出；pil 引擎可选）")
-    elif not cues and events:
+    bad_anchor = []
+    for c in cues:
+        for k in CUE_ANCHOR_KEYS:
+            if k in c:
+                a = _cue_anchor(c)
+                if a is None:
+                    bad_anchor.append("%s@%s=%r" % (c.get("type"), c.get("t"), c.get(k)))
+                else:
+                    c["_anchor_t"] = a
+                break
+    cov = _sync_coverage(cues, events)
+    info.update(cov)
+    if bad_anchor:
+        warns.append("有 %d 条 cue 的 %s 不是数值秒，已忽略（只认数字，如 12.42）：%s"
+                     % (len(bad_anchor), "/".join(CUE_ANCHOR_KEYS),
+                        "、".join(bad_anchor[:4])))
+    if not cues and events:
         warns.append("cues.json 没有 cues 字段，音画同步对照跳过")
+        info["blockers"].append("cues.json 只有 events 没有 cues，同步门禁无从对照")
+    elif cues and not events and cov["anchors"] > 0:
+        warns.append("cues.json 没有 events 字段，改用 %d 条 cue 自带的 visual_at 锚点自校验"
+                     "（pil 路线的替代方案，见 references/frame-qa.md §2.5）" % cov["anchors"])
+    elif cues and not events:
+        msg = ("cues.json 没有 events 字段，音画同步对照跳过"
+               "（web 引擎用 window.getEvents() 导出；pil 路线请给 cue 加数值 visual_at，"
+               "或按 §2.5 登记 events）")
+        warns.append(msg)
+        info["blockers"].append(msg)
     elif cues and events:
         # 门禁静默失效的最后一道保险：同 kind 配对要求 events.kind == cue.type。
         # 若一个都对不上，sync_check 会"零超差"通过——看起来干净，其实一条都没在查。
         cue_types = {str(c.get("type") or "").strip().lower() for c in cues}
         ev_kinds = {_event_kind(e) for e in events}
         paired = cue_types & ev_kinds
-        if not paired:
-            warns.append(
-                "音画同步检查可能没生效：%d 个 cue 的 type 与 %d 个事件的 kind 没有任何同名项"
-                "（同 kind 配对要求 events.kind == cue 的配方名）。"
-                "sync 为空不代表同步正确——请按 references/frame-qa.md §2.5 的命名约定登记事件，"
-                "或把某个 cue 故意改错 0.3 s 重跑做反证。" % (len(cue_types), len(ev_kinds)))
-    return cues, events, warns
+        if not paired and cov["anchors"] == 0:
+            msg = ("音画同步检查可能没生效：%d 个 cue 的 type 与 %d 个事件的 kind 没有任何同名项"
+                   "（同 kind 配对要求 events.kind == cue 的配方名）。"
+                   "sync 为空不代表同步正确——请按 references/frame-qa.md §2.5 的命名约定登记事件，"
+                   "或把某个 cue 故意改错 0.3 s 重跑做反证。" % (len(cue_types), len(ev_kinds)))
+            warns.append(msg)
+            info["blockers"].append(msg)
+    return cues, events, warns, info
 
 
 def _visual_event_times(events) -> list[float]:
@@ -675,25 +846,67 @@ def _visual_event_times(events) -> list[float]:
     return out
 
 
-def _flat_luma_warnings(means, fps) -> list[str]:
-    """亮度长时间无变化（可能卡帧/静态画面）-> 中文警告文本。"""
-    means = np.asarray(means, dtype=np.float64)
-    n = int(len(means))
-    w = int(round(FLAT_MIN_DUR * float(fps)))
-    if n < w or w < 2:
+def _static_segments(drift, fps, blacks=None) -> list[tuple[float, float]]:
+    """画面长时间"完全没有运动"（卡帧 / 忘了加动画）-> [(t0, t1)] 秒区间。
+
+    判据（v0.4.0 重写，替换原来的"全帧平均亮度 3 s 波动 < 0.002"）：
+      对每个窗口起点 i，看 (i+lag, i+w] 这 w-lag 个 drift 值（drift[t] = "t 与 t-lag
+      之间最活跃的 8x8 块平均变了多少级灰度"）是否都 <= FLAT_DRIFT_EPS。
+    全部命中 → 这 6 秒里画面里任何一个 8x8 块在任意 0.5 s 内都没动过，人眼就是一张定格。
+
+    为什么不用全帧平均亮度：逐字入场 / 数字滚动只占全屏几个百分点，
+    平均亮度几乎不变（实测模板片误报 4 段），而块级差分能看见它们。
+    为什么不用"逐像素完全相等"：H.264 每帧都有量化/去块噪声（实测静态段仍有
+    最多 4 级灰度抖动），要求像素级相等会把真卡帧放过。
+    为什么用"隔 0.5 s 比"而不是"相邻帧比"：编码器的单帧抖动会被 0.5 s 的跨度摊平，
+    真动画在 0.5 s 里的累计变化反而更明显（见 FLAT_LAG_S / FLAT_DRIFT_EPS 注释的实测分布）。
+
+    blacks 传 _black_from_means 的结果：与"画面空窗"重合的段不重复告警
+    （空窗已经是 error，再报一条"静止"只是噪音）。
+    """
+    drift = np.asarray(drift, dtype=np.float64)
+    n = int(len(drift))
+    fps = float(fps) if fps and math.isfinite(float(fps)) and float(fps) > 0 else FPS_FALLBACK
+    w = int(round(FLAT_MIN_DUR * fps))
+    lag = max(1, int(round(float(FLAT_LAG_S) * fps)))
+    if n < w or w < 2 or lag >= w - 1:
         return []
-    sw = np.lib.stride_tricks.sliding_window_view(means, w)
-    rng = sw.max(axis=1) - sw.min(axis=1)
-    runs = _runs(rng <= FLAT_EPS)
+    quiet = np.isfinite(drift) & (drift <= float(FLAT_DRIFT_EPS))
+    if not bool(quiet.any()):
+        return []
+    # 窗口 i 覆盖帧 [i, i+w)；判定用 drift[i+lag .. i+w)：这些帧的"0.5 s 前"也在窗口内
+    core = np.lib.stride_tricks.sliding_window_view(quiet[lag:], w - lag)
+    all_quiet = core.all(axis=1)
+    runs = _runs(all_quiet)
     out = []
     for a, b in runs:
-        t0 = a / float(fps)
-        t1 = (b - 1 + w) / float(fps)
-        out.append("亮度长时间无变化：%.2f–%.2fs（%.1fs 内波动 < %.3f，确认是否刻意静止或卡帧）"
-                   % (t0, t1, t1 - t0, FLAT_EPS))
+        t0 = a / fps
+        t1 = (b - 1 + w) / fps
+        if blacks:
+            if any(not (t1 <= float(bw["t0"]) or t0 >= float(bw["t1"])) for bw in blacks):
+                continue                        # 与近黑空窗重叠：已由 error 覆盖
+        out.append((t0, t1))
         if len(out) >= 6:
-            out.append("……其余亮度静止段省略")
             break
+    return out
+
+
+def _static_warnings(drift, fps, blacks=None) -> list[str]:
+    """画面长时间"完全没有运动"（卡帧 / 忘了加动画）-> 中文警告文本。
+
+    判据见 _static_segments：连续 6 s 内"最活跃的 8x8 块在任意 0.5 s 里的变化"都 < 1.5 级灰度。
+    为什么不用全帧平均亮度：逐字入场 / 数字滚动只占全屏几个百分点，平均亮度几乎不变
+    （实测自带模板片因此误报 4 段），而块级差分能看见它们。
+    blacks 传 _black_from_means 的结果：与"画面空窗"重合的段不重复告警
+    （空窗已经是 error，再报一条"静止"只是噪音）。
+    """
+    segs = _static_segments(drift, fps, blacks=blacks)
+    out = []
+    for t0, t1 in segs:
+        out.append(
+            "画面长时间静止（可能卡帧/忘了加动画）：%.2f–%.2fs（连续 %.1fs 内最活跃的 8x8 块"
+            "在任意 %.1f s 里的变化都 < %.1f 级灰度；判据见 references/frame-qa.md §2.7）"
+            % (t0, t1, t1 - t0, FLAT_LAG_S, FLAT_DRIFT_EPS))
     return out
 
 
@@ -707,12 +920,21 @@ def _write_json(rep, out_json):
         fp.write(txt + "\n")
 
 
-def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png=None) -> dict:
+def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png=None,
+           require_sync=None) -> dict:
     """对成片做帧级深检，返回 CONTRACT §4.5 结构的 dict（并可选写 JSON / PNG）。
 
-    一次流式解码同时得到：亮度曲线、单帧闪烁、画面空窗；音频轨另解一次得到响度曲线。
+    一次流式解码同时得到：亮度曲线、单帧闪烁、画面空窗、静止段；音频轨另解一次得到响度曲线。
     cues_json 可以是路径或已载入的 dict；events 里闪白/震屏/冲击环时刻会用来排除
     "设计好的重击"（记 warning，不记 error）。
+
+    require_sync（v0.4.0 新增）：把"音画同步门禁没能执行"从 warning 升级为 error。
+      默认 None = 读环境变量 QA_REQUIRE_SYNC（1/true/yes/on 时开启），便于不改进 render.py
+      就整体开闸（render.py 的 st_qa 调的正是本函数）。
+      背景：SKILL.md §7 把"音画同步 dt ≤ 60 ms"写成通用门禁，但 --engine pil 时 cues.json
+      没有 events（只有 web 引擎导 getEvents），sync 恒为空却静默 PASS。
+      两种修法配合使用：① cue 写 visual_at 锚点（pil 路线自校验）；② 开 require_sync 让
+      "一条都没查"变成 FAIL 而不是静默通过。
     """
     film = str(film)
     if not os.path.exists(film):
@@ -721,7 +943,8 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     fps = float(meta["fps"]) if meta.get("fps") else FPS_FALLBACK
     if not math.isfinite(fps) or fps <= 0:
         fps = FPS_FALLBACK
-    means, scores, boxes, returns = _scan_full(film, SAMPLE_W, SAMPLE_H, FLICKER_BLOCK)
+    means, scores, boxes, returns, drift = _scan_full(film, SAMPLE_W, SAMPLE_H,
+                                                    FLICKER_BLOCK, fps)
     n = int(len(means))
     duration = n / fps if n else float(meta.get("duration") or 0.0)
 
@@ -731,8 +954,11 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
                                    returns=returns, suppressed=suppressed)
     blacks = _black_from_means(means, fps, BLACK_LUMA_MAX, BLACK_MIN_DUR, HEAD_SKIP, TAIL_SKIP)
 
-    cues, events, warnings = _load_cues(cues_json)
-    sync = sync_check(cues, events, SYNC_TOL) if cues and events else []
+    if require_sync is None:
+        require_sync = str(os.environ.get("QA_REQUIRE_SYNC") or "").strip().lower() in (
+            "1", "true", "yes", "on", "y", "t")
+    cues, events, warnings, sync_info = _load_cues(cues_json)
+    sync = sync_check(cues, events, SYNC_TOL) if cues else []
 
     explained_times = _visual_event_times(events)
     for fl in flicker:
@@ -765,6 +991,20 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     for s in sync:
         errors.append("音画同步超差：cue '%s' @ %.3fs 与视觉事件 @ %.3fs（dt=%+.3fs，容差 ±%.3fs）"
                       % (s["cue"], s["cue_t"], s["event_t"], s["dt"], SYNC_TOL))
+    # 音画同步门禁"没查"的处理：默认 warning（可见），require_sync 时升级为 error。
+    blockers = list(sync_info.get("blockers") or [])
+    if require_sync:
+        for msg in blockers:
+            errors.append("音画同步门禁未执行（require_sync=开，按 error 处理）：%s" % msg)
+        # 同一句话已经在 _load_cues 里进了 warnings，升级为 error 后去掉，避免一条问题报两遍
+        warnings = [w for w in warnings if w not in blockers]
+    if (require_sync and cues and sync_info.get("judged", 0) <= 0
+            and not any("音画同步门禁未执行" in e for e in errors)):
+        errors.append(
+            "音画同步门禁未执行（require_sync=开）：%d 条 cue 里没有一条能判定 dt"
+            "（既没有 cue 自带的 visual_at 锚点，也没有同名 kind 的事件）。"
+            "SKILL.md §7 承诺了 dt ≤ %.0f ms，这条门禁必须真的在查。"
+            % (len(cues), SYNC_TOL * 1000.0))
     if expect_duration is not None:
         try:
             exp = float(expect_duration)
@@ -783,7 +1023,7 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     else:
         loud = []
         warnings.append("成片没有音轨，响度曲线为空（帧级判据照常检查）")
-    warnings.extend(_flat_luma_warnings(means, fps))
+    warnings.extend(_static_warnings(drift, fps, blacks=blacks))
 
     rep = {"flicker": flicker, "black_windows": blacks, "luma": luma, "loudness": loud,
            "sync": sync, "errors": errors, "warnings": warnings}
@@ -1061,9 +1301,11 @@ def _print_summary(rep, film, out_json=None, out_png=None):
     print("== qa_frames 深度质检")
     print("   成片:", film)
     n_sup = sum(1 for w in (rep.get("warnings") or []) if "高分异常被判为运动" in str(w))
-    print("   闪烁 %d（其中与已登记视觉事件重合 %d） / 空窗 %d / 同步超差 %d%s"
+    n_static = sum(1 for w in (rep.get("warnings") or []) if "画面长时间静止" in str(w))
+    print("   闪烁 %d（其中与已登记视觉事件重合 %d） / 空窗 %d / 同步超差 %d%s%s"
           % (len(fl), explained, len(rep.get("black_windows") or []),
              len(rep.get("sync") or []),
+             ("  / 静止段 %d" % n_static) if n_static else "",
              ("  / 高分异常待复核 %d" % n_sup) if n_sup else ""))
     print("   亮度采样 %d 点 / 响度采样 %d 点"
           % (len(rep.get("luma") or []), len(rep.get("loudness") or [])))
@@ -1122,16 +1364,19 @@ def _make_test_audio(path, duration=8.0):
 
 
 def _motion_frames(duration, fps, w, h, *, intro_black=0.0, black_win=None,
-                   flash_at=None):
+                   flash_at=None, drift_at=None, drift_win=None):
     """合成测试画面：平滑运动的条纹/渐变（正常运动，闪烁分数应远低于阈值）。
 
     intro_black：片头多少秒纯黑（验证片头不误报）；
     black_win：注入的 (t0,t1) 近黑空窗；
-    flash_at：注入的单帧全白闪时刻。
+    flash_at：注入的单帧全白闪时刻；
+    drift_win/drift_at：把 drift_win 秒区间内的画面**冻结**成同一张图（drift_at 是冻结起点），
+       用来造"真的卡帧"——不是黑屏、不是静帧设计，而是渲染器把同一帧重复输出。
     """
     n = int(round(float(duration) * float(fps)))
     yy, xx = np.mgrid[0:int(h), 0:int(w)].astype(np.float32)
     out = np.zeros((n, int(h), int(w)), dtype=np.uint8)
+    frozen = None
     for i in range(n):
         t = i / float(fps)
         fr = np.zeros((int(h), int(w)), dtype=np.float32)
@@ -1146,6 +1391,17 @@ def _motion_frames(duration, fps, w, h, *, intro_black=0.0, black_win=None,
             fr = (0.22 + 0.24 * bars * grad).astype(np.float32)
         if flash_at is not None and abs(t - float(flash_at)) < 0.5 / float(fps):
             fr = np.ones((int(h), int(w)), dtype=np.float32)
+        if drift_at is not None and drift_win is not None:
+            if float(drift_at) <= t < float(drift_at) + float(drift_win):
+                if frozen is None:
+                    # 冻结成"上一帧那张图"：渲染器卡住时，第 3.000 s 输出的就是第 2.967 s
+                    # 已经画好的那张图，所以 3.000 s 这一帧与前一帧是**逐字节相同**的。
+                    # 这样 drift_win=6.0 恰好产生 180 个"与前一帧相同"的帧 = 整 6.0 s。
+                    frozen = out[i - 1].copy() if i > 0 else np.clip(
+                        fr * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+                out[i] = frozen
+                continue
+            frozen = None
         out[i] = np.clip(fr * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     return out
 
@@ -1318,6 +1574,86 @@ def selftest() -> int:
                 return False, "容差内（dt=0.05）被误报：%s" % (good,)
             return True, "whoosh dt=%+.3fs；容差内不误报" % s["dt"]
 
+        def c_static_hold():
+            """真的卡帧 6 s 必须报；5 s 定格（片尾定版卡级别）不报 —— 静止判据回归。"""
+            hold = os.path.join(tmp, "hold6.mp4")
+            short = os.path.join(tmp, "hold5.mp4")
+            _encode_rawvideo(hold, _motion_frames(12.0, 30, 320, 180,
+                                                  drift_at=3.0, drift_win=6.0), 30)
+            _encode_rawvideo(short, _motion_frames(12.0, 30, 320, 180,
+                                                   drift_at=3.0, drift_win=5.0), 30)
+            rep = report(hold)
+            got = [w for w in rep["warnings"] if "画面长时间静止" in w]
+            if len(got) != 1:
+                return False, "注入 6 s 卡帧应报 1 段，实际 %d：%s" % (len(got), got)
+            # 报出的区间要覆盖注入段（首尾各留一帧容差）
+            if "3.00–9.00s" not in got[0]:
+                return False, "静止区间不对（应 3.00–9.00s）：%s" % got[0][:120]
+            rep2 = report(short)
+            got2 = [w for w in rep2["warnings"] if "画面长时间静止" in w]
+            if got2:
+                return False, "5 s 定格被误报成卡帧（阈值应为 6 s）：%s" % got2
+            return True, "6 s 冻结报 1 段（3.00–9.00s）；5 s 定格不报"
+
+        def c_anchor_sync():
+            """cue 自带 visual_at 锚点时，PIL 路线（没有 events）也能自校验音画同步。"""
+            cues = [{"t": 2.0, "type": "impact", "visual_at": 2.3},
+                    {"t": 5.0, "type": "whoosh", "visual_at": 5.04}]
+            evs = []
+            got = sync_check(cues, evs)
+            if len(got) != 1 or abs(got[0]["dt"] - 0.3) > 1e-6:
+                return False, "带锚点的 cue 应报 1 条 dt=+0.3，实际 %s" % (got,)
+            loaded, loaded_ev, warns, info = _load_cues(
+                {"cues": [{"t": 2.0, "type": "impact", "visual_at": 2.3}], "events": []})
+            if info["anchors"] != 1 or info["judged"] != 1:
+                return False, "锚点统计不对：%s" % (info,)
+            if any("没有 events 字段，音画同步对照跳过" in w for w in warns):
+                return False, "有锚点却仍报'同步跳过'：%s" % (warns,)
+            rep_ok = report(bad_mp4, cues_json={"cues": [
+                {"t": 2.0, "type": "impact", "visual_at": 2.03}], "events": []})
+            if any("音画同步" in e for e in rep_ok["errors"]):
+                return False, "容差内锚点被误报：%s" % (rep_ok["errors"],)
+            rep_bad = report(bad_mp4, cues_json={"cues": [
+                {"t": 2.0, "type": "impact", "visual_at": 2.4}], "events": []})
+            if not any("音画同步超差" in e for e in rep_bad["errors"]):
+                return False, "锚点超差未被检出：%s" % (rep_bad["errors"],)
+            # require_sync：锚点齐全 → 不升级；没有锚点也没有同名事件 → 升级为 error
+            rep_rs_ok = report(bad_mp4, cues_json={"cues": [
+                {"t": 2.0, "type": "impact", "visual_at": 2.0}]}, require_sync=True)
+            if any("音画同步门禁未执行" in e for e in rep_rs_ok["errors"]):
+                return False, "有锚点却被 require_sync 判成没查：%s" % (rep_rs_ok["errors"],)
+            rep_rs_bad = report(bad_mp4, cues_json={"cues": [
+                {"t": 2.0, "type": "impact"}], "events": []}, require_sync=True)
+            if not any("音画同步门禁未执行" in e for e in rep_rs_bad["errors"]):
+                return False, "require_sync 没把'没查'升级成 error：%s" % (rep_rs_bad["errors"],)
+            if any("没有 events 字段" in w for w in rep_rs_bad["warnings"]):
+                return False, "升级为 error 后 warning 没有去重：%s" % (rep_rs_bad["warnings"],)
+            return True, "visual_at 锚点自校验（dt=+0.3 报错）；require_sync 升级/去重正确"
+
+        def c_fastflash():
+            """快速运动段 + 单帧白闪：不允许静默放过，至少进 warning 或 error。"""
+            p = os.path.join(tmp, "fastflash.mp4")
+            rng = np.random.default_rng(7)
+            tex = rng.integers(40, 220, size=(180 + 40, 320 + 400)).astype(np.float32)
+            frames = []
+            for i in range(int(8.0 * 30)):
+                t = i / 30.0
+                xs = (np.arange(320) + int(round(i * 9.0))) % tex.shape[1]
+                fr = tex[20:20 + 180][:, xs]
+                if abs(t - 5.5) < 0.5 / 30.0:
+                    fr = fr.copy()
+                    fr[55:125, 90:160] = 255.0
+                frames.append(np.clip(fr, 0, 255).astype(np.uint8))
+            _encode_rawvideo(p, np.stack(frames), 30)
+            rep = report(p)
+            hit = [fl for fl in rep["flicker"] if abs(fl["t"] - 5.5) <= 0.1]
+            sup = [w for w in rep["warnings"] if "高分异常被判为运动" in w]
+            if hit:
+                return True, "单帧白闪在快速运动段仍被检出 error（score=%.1f）" % hit[0]["score"]
+            if sup:
+                return True, "单帧白闪被运动闸拦下但进了 warning（风险可见）：%s" % sup[0][:80]
+            return False, "快速运动段的单帧白闪被静默放过（无 error 也无 warning）"
+
         def c_isolation():
             """判据回归：连续小元素运动（近似 16.933 s 案例）不报；单帧尖峰要报；硬切不报。"""
             boxes = [((0, 0, 8, 8), 1.0)] * 32
@@ -1371,15 +1707,19 @@ def selftest() -> int:
             """events.kind 与 cue.type 全不同名时，必须给 warning —— 否则 sync 会静默全过。"""
             good = {"cues": [{"t": 1.0, "type": "impact"}],
                     "events": [{"t": 1.0, "kind": "impact"}]}
-            _, _, w_good = _load_cues(good)
+            _, _, w_good, info_good = _load_cues(good)
             if any("音画同步检查可能没生效" in w for w in w_good):
                 return False, "同名事件被误报：%s" % (w_good,)
+            if info_good.get("judged") != 1:
+                return False, "judged 统计错（应 1）：%s" % (info_good,)
             bad = {"cues": [{"t": 1.0, "type": "impact"}],
                    "events": [{"t": 1.0, "kind": "flash"}]}
-            _, _, w_bad = _load_cues(bad)
+            _, _, w_bad, info_bad = _load_cues(bad)
             if not any("音画同步检查可能没生效" in w for w in w_bad):
                 return False, "异名事件没有触发守卫（sync 会静默全过）：%s" % (w_bad,)
-            return True, "同名不误报；异名触发'可能没生效'的 warning"
+            if info_bad.get("judged") != 0 or not info_bad.get("blockers"):
+                return False, "异名事件的 judged/blockers 不对：%s" % (info_bad,)
+            return True, "同名不误报；异名触发'可能没生效'的 warning（judged=0）"
 
         out_json = os.path.join(tmp, "deep.json")
         out_png = os.path.join(tmp, "deep.png")
@@ -1486,6 +1826,9 @@ def selftest() -> int:
         check("loudness_curve 能测到静音谷", c_loud)
         check("sync_check 只报超差", c_sync)
         check("孤立性判据回归（连续运动不误报）", c_isolation)
+        check("卡帧判据：6 s 冻结报出、5 s 定格不报", c_static_hold)
+        check("快速运动段单帧白闪不静默", c_fastflash)
+        check("cue 自带 visual_at 锚点的同步自校验", c_anchor_sync)
         check("report 三档 error + §4.5 字段", c_report)
         check("report 排除已登记设计事件", c_expected)
         check("音画同步命名约定守卫", c_sync_naming)
@@ -1519,6 +1862,9 @@ def main(argv=None) -> int:
     ap.add_argument("--png", default=None, help="报告 PNG 输出路径（缺省不写文件）")
     ap.add_argument("--expect-duration", type=float, default=None,
                     help="预期成片时长（秒），偏差 > 0.5 s 记 error")
+    ap.add_argument("--require-sync", action="store_true",
+                    help="音画同步门禁未能执行时记 error（默认只记 warning；"
+                         "也可用环境变量 QA_REQUIRE_SYNC=1 全局开启，render.py 的深检会自动继承）")
     ap.add_argument("--selftest", action="store_true", help="跑内置自检（不联网，≤60 s）")
     a = ap.parse_args(argv)
     if a.selftest:
@@ -1528,7 +1874,7 @@ def main(argv=None) -> int:
     _utf8_stdout()
     try:
         rep = report(a.film, cues_json=a.cues, expect_duration=a.expect_duration,
-                     out_json=a.out, out_png=a.png)
+                     out_json=a.out, out_png=a.png, require_sync=a.require_sync)
     except Exception as e:              # noqa: BLE001
         print("[FAIL] 深度质检失败：%s" % e, file=sys.stderr)
         return 1

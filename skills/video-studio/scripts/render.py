@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -37,6 +38,47 @@ sys.path.insert(0, str(HERE))
 import filmkit as K
 
 STAGES = ("tts", "layout", "cues", "score", "sfx", "audio", "frames", "mux", "qa", "stills", "all")
+
+
+def _setup_stdio():
+    """输出被管道/文件重定向时把 stdout/stderr 切到 UTF-8。
+
+    只在"非交互"时切（isatty=False）：Windows 下 python render.py ... | tee out.log
+    的 stdout 默认是 GBK 代码页，日志里中文全是乱码；真实控制台保持系统编码，
+    交互运行时中文照样正常。与 scorekit / webengine 的入口处理保持同一口径。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+def _file_sha1(path):
+    """文件内容指纹（缺文件返回 missing，不抛异常）。"""
+    try:
+        h = hashlib.sha1()
+        with open(str(path), "rb") as fh:
+            for blk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(blk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return "missing"
+
+
+def _frames_plan_stamp(tl, script, scenes_path, chunk):
+    """分块计划的指纹：时长 / scenes.py 内容 / 剧本快照任一变化，旧分块就画出错帧。
+
+    断点续跑只看"分块文件在不在"是危险的：改一句台词 -> 时间轴变了 -> 旧分块
+    仍然被跳过复用，最后拼出一部"画面和旁白对不上"的片子却不报错。
+    """
+    body = json.dumps(dict(script), sort_keys=True, ensure_ascii=False, default=str)
+    payload = dict(total=round(float(tl["total"]), 3), frames=int(tl["frames"]),
+                   fps=int(tl["fps"]), chunk=int(chunk),
+                   scenes=_file_sha1(scenes_path),
+                   script=hashlib.sha1(body.encode("utf-8")).hexdigest()[:16])
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 # 可选模块（v0.3.0）：缺哪个就明确报错/跳过，不影响老流程
 HERE_SCRIPTS = str(HERE)
@@ -91,14 +133,44 @@ def load_module(path: str, name="film_scenes"):
 
 
 def load_script(p) -> dict:
+    """读剧本并做前置校验：坏 film.json 给一句能照着改的错，而不是 Python traceback。"""
     p = Path(p).resolve()
-    s = json.load(open(p, encoding="utf-8"))
+    if not p.exists():
+        raise SystemExit("[缺少剧本] %s（--script 指向 film.json）" % p)
+    try:
+        s = json.load(open(p, encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise SystemExit("[剧本格式错误] %s 不是合法 JSON：%s" % (p, e)) from e
+    if not isinstance(s, dict):
+        raise SystemExit("[剧本格式错误] %s 顶层必须是一个 JSON 对象" % p)
     for req in ("title", "lines"):
         if req not in s:
             raise SystemExit("film.json 缺少字段: " + req)
-    for i, ln in enumerate(s["lines"]):
+    lines = s["lines"]
+    if not isinstance(lines, list) or not lines:
+        raise SystemExit("film.json 的 lines 必须是非空数组（当前是 %r）" % (lines,))
+    for k in ("music", "sfx", "web"):
+        if s.get(k) is not None and not isinstance(s.get(k), dict):
+            raise SystemExit("film.json 的 %s 必须是对象（当前是 %s）" % (k, type(s[k]).__name__))
+    if s.get("bpm") not in (None, ""):
+        try:
+            if float(s["bpm"]) <= 0:
+                raise ValueError("必须大于 0")
+        except (TypeError, ValueError) as e:
+            raise SystemExit("film.json 的 bpm 必须是正数（收到 %r：%s）" % (s["bpm"], e)) from e
+    seen = set()
+    for i, ln in enumerate(lines):
+        if not isinstance(ln, dict):
+            raise SystemExit("film.json 的 lines[%d] 必须是对象（当前是 %s）"
+                             % (i, type(ln).__name__))
+        if not str(ln.get("text") or "").strip():
+            raise SystemExit("film.json 的 lines[%d] 缺少 text（朗读文本）" % i)
         ln.setdefault("id", "l%02d" % (i + 1))
         ln.setdefault("sub", ln["text"])
+        sid = str(ln["id"])
+        if sid in seen:
+            raise SystemExit("film.json 的 lines id 重复: %r（TTS 文件与 cue 都会串）" % ln["id"])
+        seen.add(sid)
     s["_path"] = str(p)
     s["_dir"] = str(p.parent)
     return s
@@ -254,22 +326,27 @@ def _st_cues_web(script, work):
 
 # ---------------------------------------------------------------- 配乐 / 音效
 def st_score(script, work, tl):
-    """程序化配乐 -> work/music.wav（scorekit 不在就跳过，不阻断出片）。"""
+    """程序化配乐 -> work/music.wav（scorekit 不在就跳过，不阻断出片）。
+
+    配乐来源由 K.music_plan 统一判定（与 st_audio 共用同一份语义）：
+      - mode=off/none 或 enabled=false：不出配乐，也不删已存在的 music.wav
+        （删文件会误删"外部提供的配乐"，而 off 的语义只是"本片不要配乐"）；
+      - mode=bed：走 v0.2 和弦床，不生成 scorekit 产物；
+      - mode=file：外部 work/music.wav，原样交给 audio 阶段；
+      - 缺省：有 bpm 就生成，没有 bpm 沿用已有 music.wav / 和弦床（v0.2 兼容）。
+    """
     print("== Score")
     mus = script.get("music") or {}
-    mode = str(mus.get("mode") or ("score" if mus.get("enabled", True) else "off")).lower()
-    if mode in ("off", "bed", "none") or not script.get("bpm"):
-        path = os.path.join(work, "music.wav")
-        if os.path.exists(path) and mode == "off":
-            print("   music.mode=off，沿用已有 music.wav（不重出配乐）")
-        else:
-            print("   music.mode=%s / bpm=%s -> 本次不生成程序化配乐" % (mode, script.get("bpm")))
-            if os.path.exists(path):
-                os.remove(path)
+    music_path = os.path.join(work, "music.wav")
+    plan, why = K.music_plan(script, has_music_file=os.path.exists(music_path))
+    print("   " + why)
+    if plan in ("off", "bed", "file", "none"):
         return None
+    if plan in ("missing-file", "missing-bpm", "unknown-mode"):
+        raise SystemExit("[score] " + why)
     sk = _try_module("scorekit")
     if sk is None:
-        print("   [WARN] 没有 scorekit.py，跳过配乐（audio 阶段会退回和弦床）")
+        print("   [WARN] 没有 scorekit.py，跳过配乐（audio 阶段没有 music.wav，本片将无配乐）")
         return None
     anchors = K.scenes_anchors(tl["scenes"])
     sections = mus.get("sections")
@@ -359,7 +436,8 @@ def st_audio(tl, work, script):
 
     v0.3.0 起把三条总线分开处理再合：
       - 旁白：单声道，居中（voice_gain 可调）
-      - 配乐：work/music.wav（scorekit 产出）优先；没有就用 music.mode=bed 的和弦床
+      - 配乐：来源由 K.music_plan 判定（score/file/bed/off），口径与 st_score 完全一致——
+        music.mode=off 时一条配乐都不混，即使 work/music.wav 还在（外部配乐请用 mode=file）
       - 音效：work/sfx.wav（按 cues.json 合成）；没有 cues 时退回 v0.2 的转场 whoosh
     音效响起时配乐自动让位（duck_db），避免重击被配乐吃掉。
     """
@@ -370,13 +448,28 @@ def st_audio(tl, work, script):
     mus = script.get("music") or {}
     music = None
     music_path = os.path.join(work, "music.wav")
-    if os.path.exists(music_path):
-        music, _ = K.wav_read(music_path)
-        print("   配乐: music.wav（%s）" % ("scorekit" if script.get("bpm") else "外部文件"))
-    elif str(mus.get("mode") or "").lower() != "off":
+    plan, why = K.music_plan(script, has_music_file=os.path.exists(music_path))
+    if plan == "off":
+        # 关键语义：mode=off = 不要配乐。旧实现会无条件读 work/music.wav，
+        # 于是"上一轮跑出来的配乐"仍被混进新片（用户改了 mode 却听不出变化）。
+        print("   配乐: " + why)
+    elif plan == "bed":
         music = _legacy_music(tl, script)
         if music is not None:
-            print("   配乐: 和弦床（music.mode=bed 兜底；要程序化配乐请设 bpm 并跑 --stage score）")
+            print("   配乐: 和弦床（%s）" % why)
+        else:
+            print("   配乐: %s，但没有 music.chords，跳过" % why)
+    elif plan in ("missing-file", "missing-bpm", "unknown-mode"):
+        raise SystemExit("[audio] " + why)
+    elif plan in ("file", "score"):
+        music, _ = K.wav_read(music_path)
+        print("   配乐: music.wav（%s）" % why)
+    elif plan == "none":
+        print("   配乐: " + why)
+    if plan == "score" and music is None:
+        # 单独跑 --stage audio 时 score 还没跑过：不混配乐，但必须说清楚为什么
+        print("   [WARN] music 用 scorekit 但 %s 不存在（先跑 --stage score）；本次无配乐"
+              % music_path)
 
     sfx = None
     sfx_path = os.path.join(work, "sfx.wav")
@@ -413,7 +506,6 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
     sink = K.FrameSink(out_path, crf=crf, preset=preset)
     idx = 0
     t_start = time.time()
-    n = max(1, f1 - f0)
     last_rep = 0
     for fi in range(f0, f1):
         t = fi / float(tl["fps"])
@@ -465,6 +557,8 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
     if int(jobs) <= 1:
         silent = os.path.join(work, "silent.mp4")
         # 断点续跑：顶层 single 渲染不做帧级续跑（用分块模式才有意义）
+        if resume:
+            print("   [提示] --jobs 1 是单进程整片渲染，--resume 不生效；要断点续跑请用 --jobs N（N>1）")
         _render_range(tl, scenes_mod, script, 0, total_frames, silent, crf, preset)
         return silent
 
@@ -486,15 +580,41 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
     script_path = os.path.join(work, "_script_snapshot.json")
     json.dump(script, open(script_path, "w", encoding="utf-8"), ensure_ascii=False)
     tl_path = os.path.join(work, "timeline.json")
+    scenes_path = script.get("_scenes") or os.path.join(script["_dir"], "scenes.py")
+
+    # ---- 断点续跑的前置校验：计划变了就不许复用旧分块 ----
+    stamp = _frames_plan_stamp(tl, script, scenes_path, chunk)
+    stamp_path = os.path.join(seg_dir, "_plan.json")
+    old_stamp = None
+    if os.path.exists(stamp_path):
+        try:
+            old_stamp = (json.load(open(stamp_path, encoding="utf-8")) or {}).get("stamp")
+        except Exception:                                   # noqa: BLE001
+            old_stamp = "unreadable"
+    if resume and old_stamp and old_stamp != stamp:
+        raise SystemExit(
+            "[断点续跑] 分块计划已变化（timeline / scenes.py / 剧本 / 编码参数改过），\n"
+            "  旧分块会画出与当前时间轴不符的画面，拒绝拼接。\n"
+            "  确认要重渲就删掉分块目录再跑：rm -rf %s" % seg_dir)
+    with open(stamp_path, "w", encoding="utf-8") as fh:
+        json.dump(dict(stamp=stamp, total=tl["total"], frames=tl["frames"], chunk=chunk),
+                  fh, ensure_ascii=False)
 
     todo = []
+    planned = set()
     for (f0, f1) in plan:
         seg = os.path.join(seg_dir, "seg_%06d_%06d.mp4" % (f0, f1))
+        planned.add(os.path.basename(seg))
         if resume and os.path.exists(seg) and os.path.getsize(seg) > 1024:
             print("   skip 段 %d-%d（已存在）" % (f0, f1))
             continue
-        todo.append((tl_path, str(Path(script["_dir"]) / script.get("_scenes", "scenes.py")),
-                     script_path, f0, f1, seg, crf, preset))
+        todo.append((tl_path, scenes_path, script_path, f0, f1, seg, crf, preset))
+
+    # 旧计划留下的分块不会参与拼接，但会一直占盘：说出来，不静默
+    stale = [n for n in os.listdir(seg_dir)
+             if n.startswith("seg_") and n.endswith(".mp4") and n not in planned]
+    if stale:
+        print("   [WARN] 分块目录里有 %d 个不属于当前计划的旧文件（不会拼接，可手动删除）" % len(stale))
 
     if todo:
         import multiprocessing as mp
@@ -581,30 +701,42 @@ def st_mux(silent, audio, out, script):
 
 def st_qa(film, tl, work, scenes_mod=None, script=None):
     print("== QA")
-    shots, refs = [], []
+    shots, refs = [], []             # refs: [(frac 下标, PIL 原图)]
     fracs = (0.08, 0.3, 0.55, 0.78)
-    for frac in fracs:
+    ref_script = dict(script) if script is not None else None
+    if ref_script is not None:
+        # 参考帧必须和 frames 阶段用同一份 script（含 _total），否则 HUD 进度条等
+        # 依赖 _total 的元素画得不一样，锐度比会把"渲染差异"当成"编码损失"。
+        ref_script["_total"] = float(tl["total"])
+    for k, frac in enumerate(fracs):
         sec = tl["total"] * frac
         p = os.path.join(work, "qa", "snap_%02d.png" % int(frac * 100))
         K.snap(film, sec, p)
         shots.append(p)
         # 参考帧：用场景函数重新渲染同一时刻，而不是拿成片自己抽的帧
-        if scenes_mod is not None and script is not None:
+        if scenes_mod is not None and ref_script is not None:
             idx = 0
             for i, s in enumerate(tl["scenes"]):
                 if sec >= s["start"]:
                     idx = i
             s = tl["scenes"][idx]
             try:
-                fr = scenes_mod.draw_frame(s, sec - s["start"], s["dur"], sec, script,
+                fr = scenes_mod.draw_frame(s, sec - s["start"], s["dur"], sec, ref_script,
                                            int(round(sec * tl["fps"])))
-                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, script.get("sub_max_hold")))
-                refs.append(fr)
+                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, ref_script.get("sub_max_hold")))
+                refs.append((k, fr))
             except Exception as e:      # noqa: BLE001
                 print("   [WARN] 参考帧渲染失败:", e)
 
-    ref_img = refs[len(refs) // 2] if len(refs) >= 3 else (refs[0] if refs else None)
-    ref_sec = tl["total"] * fracs[len(fracs) // 2]
+    # 锐度比只跟"同一时刻"的参考帧比：某几张参考帧渲染失败时，不能拿别的时刻顶替
+    ref_img, ref_sec = None, None
+    if refs:
+        k_ref = min(refs, key=lambda kn: abs(kn[0] - 2))[0]
+        ref_img = dict(refs)[k_ref]
+        ref_sec = tl["total"] * fracs[k_ref]
+        print("   锐度参考帧: 场景函数重渲染 t=%.2fs（第 %d 张）" % (ref_sec, k_ref + 1))
+    elif scenes_mod is None:
+        print("   [WARN] 没有场景函数参考帧（web 引擎或 scenes.py 缺失），锐度比门禁本次跳过")
     rep = K.qa_report(film, expect_frames=tl["frames"], ref_img=ref_img,
                       ref_sec=ref_sec, expected_subtitles=len(tl["scenes"]),
                       notes=os.path.join(work, "sub.srt"))
@@ -614,8 +746,22 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
         float(f.get("duration", 0)), int(f.get("size", 0)) / 1048576,
         int(f.get("bit_rate", 0)) / 1e6))
     print("   响度", rep["loudness"])
+    q = rep.get("quality")
+    if q:
+        print("   锐度比 %.2f（参考帧=场景函数重渲染，不是成片抽帧）" % q["ratio"])
+    elif ref_img is None and scenes_mod is None:
+        print("   [WARN] 锐度比门禁未执行（没有参考帧）")
     safe = K.qa_text_safe(tl["scenes"])
     print("   字幕安全区:", "OK" if not safe else safe[:2])
+    # 字幕安全区 / 缺字形以前只 print，不进 qa_report 的 warnings ——
+    # 于是 CI、前端、任何只读 JSON 的人**看不到**这两条（"门禁可以保守，但不能静默"）。
+    # 现在它们进 warnings（仍是 warning 级，不阻断，但能被程序读到）。
+    for _m in (safe or [])[:4]:
+        rep["warnings"].append("字幕安全区: %s" % _m)
+    _glyph = K.check_glyphs((script or {}).get("lines") or [])
+    for _lid, _fld, _chars in (_glyph or [])[:4]:
+        rep["warnings"].append("缺字形 %s.%s: %r（会显示为方块，改用矢量线条画）"
+                               % (_lid, _fld, _chars))
     sheet = K.contact_sheet(shots, os.path.join(work, "qa", "sheet.png"))
     if sheet:
         print("   联系表:", sheet, "  <- 必须亲眼看")
@@ -692,6 +838,12 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
         tg = s["start"] + float(lt)
         fr = scenes_mod.draw_frame(s, float(lt), s["dur"], tg, script,
                                    int(round(tg * tl["fps"])))
+        if fr is None:
+            raise RuntimeError("场景 %s 在 t=%.2fs 返回 None（draw_frame 必须返回 PIL.Image）"
+                               % (sid, tg))
+        if tuple(fr.size) != (K.W, K.H):
+            raise RuntimeError("场景 %s 在 t=%.2fs 返回 %dx%d，期望 %dx%d（stills 与 FrameSink 一样严格）"
+                               % (sid, tg, fr.size[0], fr.size[1], K.W, K.H))
         fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, script.get("sub_max_hold")))
         p = os.path.join(outdir, "%s_%05.1f.png" % (sid, float(lt)))
         fr.save(p)
@@ -706,6 +858,7 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
 
 # ---------------------------------------------------------------- main
 def main():
+    _setup_stdio()
     ap = argparse.ArgumentParser(description="video-studio 编排器")
     ap.add_argument("--script", default="film.json")
     ap.add_argument("--scenes", default="scenes.py")
@@ -721,7 +874,10 @@ def main():
     ap.add_argument("--stills", default="", help="stills 阶段用：逗号分隔的 id:秒")
     a = ap.parse_args()
 
-    os.makedirs(a.work, exist_ok=True)
+    try:
+        os.makedirs(a.work, exist_ok=True)
+    except OSError as e:
+        raise SystemExit("[工作目录不可用] %s：%s（--work 指到一个能写的目录）" % (a.work, e)) from e
     script = load_script(a.script)
     engine = _engine(script, a.engine or None)
     if engine not in ("pil", "web"):
@@ -729,17 +885,43 @@ def main():
     script["_engine"] = engine
     script["_scenes"] = str(Path(a.scenes).resolve())
     if a.force_music:
-        for name in ("music.wav", "score.json"):
-            p = os.path.join(a.work, name)
-            if os.path.exists(p):
-                os.remove(p)
+        plan, _why = K.music_plan(script, has_music_file=os.path.exists(os.path.join(a.work, "music.wav")))
+        if plan in ("off", "bed", "file"):
+            print("[force-music] %s：不清 work/music.wav（那是外部配乐 / 本片不用配乐）" % plan)
+        else:
+            for name in ("music.wav", "score.json"):
+                p = os.path.join(a.work, name)
+                if os.path.exists(p):
+                    os.remove(p)
     tl_p = os.path.join(a.work, "timeline.json")
     tts_p = os.path.join(a.work, "tts.json")
 
     def ensure_tl():
         if not os.path.exists(tl_p):
             raise SystemExit("[前置] 没有 %s，先跑 --stage layout" % tl_p)
-        return json.load(open(tl_p, encoding="utf-8"))
+        try:
+            return json.load(open(tl_p, encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise SystemExit("[前置] %s 不是合法 JSON（%s），重新跑 --stage layout" % (tl_p, e)) from e
+
+    def load_scenes(strict=True):
+        """加载场景模块：strict=False 时失败只 WARN（qa 缺参考帧也要能跑）。"""
+        try:
+            mod = load_module(a.scenes)
+        except Exception as e:                              # noqa: BLE001
+            if strict:
+                raise SystemExit("[场景模块加载失败] %s：%s\n"
+                                 "  --scenes 要指向定义 draw_frame() 的 scenes.py"
+                                 % (a.scenes, e)) from e
+            print("   [WARN] 场景模块加载失败（%s），跳过场景函数参考帧: %s" % (a.scenes, e))
+            return None
+        if not hasattr(mod, "draw_frame"):
+            if strict:
+                raise SystemExit("[场景模块错误] %s 没有 draw_frame(scene, t_local, dur, t_global, script, frame)"
+                                 % a.scenes)
+            print("   [WARN] %s 没有 draw_frame()，跳过场景函数参考帧" % a.scenes)
+            return None
+        return mod
 
     stage = a.stage
     if stage in ("all", "tts"):
@@ -761,20 +943,36 @@ def main():
     if stage in ("all", "audio"):
         tl = tl if stage == "all" else ensure_tl()
         _need(all(s.get("path") for s in tl["scenes"]), "timeline 里没有旁白路径，先跑 --stage tts")
+        missing = [s.get("id") for s in tl["scenes"] if not os.path.exists(str(s.get("path") or ""))]
+        _need(not missing, "旁白文件不存在：%s（tts 目录被删/挪过？重新跑 --stage tts）"
+              % (missing[:6],))
         st_audio(tl, a.work, script)
 
     if stage == "stills":
-        tl = ensure_tl()
-        mod = load_module(a.scenes)
+        # 母版预览是"上手第一件事"，可它需要 timeline。以前干净目录直接 SystemExit，
+        # 而文档三步上手就把它排在第 4 步（照抄必失败）。这里自动补前置：
+        # 缺 tts.json 就真合成一次旁白（要联网），缺 timeline 就排一次轴——
+        # 但每一步都**明说**自己在补什么，不偷偷跑。
+        if not os.path.exists(tts_p):
+            print("[stills] 没有 tts.json，自动先跑 --stage tts（需要联网合成旁白）")
+            lines = st_tts(script, a.work, force=a.force_tts)
+            tl_tmp = st_layout(script, a.work, lines)
+            tl = tl_tmp
+        elif not os.path.exists(tl_p):
+            print("[stills] 没有 timeline.json，自动先跑 --stage layout")
+            tl = st_layout(script, a.work)
+        else:
+            tl = ensure_tl()
+        mod = load_scenes()
         specs = [x.strip() for x in a.stills.split(",") if x.strip()] if a.stills else None
         st_stills(tl, a.work, mod, script, specs)
         return 0
 
     if stage == "qa":
-        # qa 只读：绝不重渲、也不重新合成。缺成片就直接报错。
+        # qa 不重渲、也不重新合成：缺成片就直接报错；缺 scenes.py 只丢参考帧、不阻断质检。
         tl = ensure_tl()
         _need(os.path.exists(a.out), "没有成片 %s，先跑 --stage mux" % a.out)
-        mod = load_module(a.scenes) if engine == "pil" else None
+        mod = load_scenes(strict=False) if engine == "pil" else None
         errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script)
         return 1 if errs else 0
 
@@ -782,15 +980,18 @@ def main():
         tl = tl if stage == "all" else ensure_tl()
         audio = os.path.join(a.work, "audio.wav")
         silent = os.path.join(a.work, "silent.mp4")
-        mod = load_module(a.scenes) if engine == "pil" else None
+        mod = None
         if stage in ("all", "frames"):
             # 渲染帧本身不需要音频（silent.mp4 是无声的）。只有 --stage all 才要求
             # audio.wav 已经在前面阶段生成——否则 --stage frames 在空 work 目录会白渲全片再挂掉。
             if stage == "all":
                 _need(os.path.exists(audio), "混音阶段异常：audio.wav 未生成")
+            if engine == "pil":
+                mod = load_scenes()
             silent = st_frames(tl, a.work, mod, script, jobs=a.jobs, resume=a.resume,
                                engine=engine)
         if stage in ("all", "mux"):
+            # mux 只需要 silent.mp4 + audio.wav：不加载 scenes.py（缺场景模块也能合成）
             _need(os.path.exists(silent), "没有 silent.mp4，先跑 --stage frames")
             _need(os.path.exists(audio), "没有 audio.wav，先跑 --stage audio")
             film = st_mux(silent, audio, a.out, script)
@@ -803,4 +1004,21 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        # 领域错误（音视频时长不符 / 分块缺口 / 编码失败 / TTS 重试耗尽 …）给一句话，
+        # 不要甩 Python traceback；要完整栈就 set RENDER_DEBUG=1。
+        if os.environ.get("RENDER_DEBUG"):
+            raise
+        _setup_stdio()
+        print("\n[ERROR] %s" % e, file=sys.stderr)
+        print("  （要看完整 traceback：set RENDER_DEBUG=1 后重跑）", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        if os.environ.get("RENDER_DEBUG"):
+            raise
+        _setup_stdio()
+        print("\n[ERROR] 文件/目录操作失败：%s" % e, file=sys.stderr)
+        print("  （要看完整 traceback：set RENDER_DEBUG=1 后重跑）", file=sys.stderr)
+        sys.exit(1)

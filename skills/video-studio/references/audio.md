@@ -1,6 +1,6 @@
 # 音频：采样级混音、配乐与音效
 
-> **v0.3.0 新增三节**（下面的 §10–§12 是新的推荐做法，§1–§9 是底层原理与手写示例，仍然有效）：
+> **v0.3.0 新增三节**（§10–§12 是新的推荐做法，§1–§9.5 是底层原理与手写示例，仍然有效）：
 > §10 提示点系统（声音跟着画面走）、§11 程序化配乐（scorekit）、§12 程序化音效（sfxkit）。
 > 先读 §10——它决定了另外两节怎么用。
 
@@ -34,12 +34,16 @@ wav = bus.mix(normalize=True, fade=0.6)
 ## 3. 响度链路（三步）
 
 ```python
-# 1) 各轨目标 LUFS：旁白 -13.5 / 音效 -24.5 / 配乐 -26.5
-# 2) 用 ebur128 实测每条轨积分响度，算增益差额
-# 3) 差额用"前瞻限幅器"补，而不是整体拉高
-# 4) 母带：两遍 loudnorm 到 -16 LUFS / -1.5 dBTP
+# 本仓库**实际**链路（filmkit.mix_film + mux）：
+#   旁白 voice_gain=1.0 居中 → 配乐 music.gain_db(默认 -1.5) → 音效按 CUE_BASE_DB 逐条
+#   → duck(3 dB) → 峰值保护 0.89 → ffmpeg loudnorm 两遍到 -16 LUFS / 目标真峰 -1.5
 af = K.loudnorm_two_pass("work/audio.wav", target_i=-16.0, target_tp=-1.5)
 ```
+
+> **下面是"设计建议"，本仓库没有实现**（以前这段被写成既有链路，容易误导）：
+> 「各轨目标 LUFS 旁白 -13.5 / 音效 -24.5 / 配乐 -26.5」+「前瞻限幅器补差额」——
+> 这套是专业分轨母带流程，本项目用"相对增益 + 最终 loudnorm"替代，**代码里没有逐轨 LUFS 对齐，
+> 也没有前瞻限幅器**。要那套效果得自己在 `mix_film` 之后接。
 
 **不要用 RMS 近似 LUFS**：RMS 是线性平均，LUFS 有 K 计权 + 门限，误差可达 6–8 dB。
 **不要整体拉高补响度**：会把峰值推爆。正确顺序是"分轨对齐 → 限幅压峰 → 母带归一"。
@@ -128,7 +132,7 @@ def loop_noise(dur=8.0, sr=48000, lo=180, hi=900, seed=5):
 #   meta.path -> xxx.trim.wav, meta.dur = 裁剪后实测时长；原 mp3 保留在 meta.mp3
 # 缓存 key = sha1(text|voice|rate|pitch)；改台词会自动重新合成（v0.1 只判文件存在）
 pcm = K.decode_pcm(mp3)
-trimmed = trim_tail(pcm, threshold=0.002, keep=0.12)
+trimmed = K.trim_silence(pcm, thresh_db=-42.0, keep_ms=80)   # 不是 trim_tail：本仓库没这个函数
 
 # 轻 EQ：200 Hz 以下衰减 2 dB（去闷），3 kHz 提 1 dB（清晰度）
 ```
@@ -159,7 +163,10 @@ print("peak:", np.max(np.abs(bus.bus)))      # 期望 < 0.99
 | 配音机械 | 语速超过 +15% | 降到 +6% 左右，加自然停顿 |
 | 字幕比声音慢/快 | 按字数估时长 | 实测反推 |
 
-## 10. 两条混音路线的取舍（含实测坑）
+## 9.5 两条混音路线的取舍（含实测坑）
+
+> 编号说明：本小节原为「§10」，与后加的「§10 提示点系统」重号（v0.3 加节时的历史遗留）。
+> 现改为 §9.5，保证 §10–§12 三段新内容编号唯一。
 
 ### 路线 A：numpy 采样级叠加（推荐）
 
@@ -329,7 +336,7 @@ samples = sc.render()
 | 衰减率（材质） | "木头还是金属" | 所有材质用同一个衰减 |
 | 接触时间（力度/软硬） | 亮不亮 | 力度只改音量，不改亮度 |
 
-`sfxkit` 就是按这三个物理量建模的：`MODAL` 里有 `MATERIALS`（eta/alpha）、
+`sfxkit` 就是按这三个物理量建模的：模块顶部模态区里的 `MATERIALS`（eta/alpha）、
 各种形状的模态比（`bar_ratios` / `plate_ratios` / `ring_ratios` / `BELL_RATIOS`），
 以及 `Hit(contact_ms, hardness)`——**力度越大接触越短，所以重击天然更亮**，不需要额外调 EQ。
 

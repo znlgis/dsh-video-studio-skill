@@ -27,13 +27,16 @@
  21  （v0.3）scorekit 可用时：同 seed bit-identical + 时长精确
  22  （v0.3）webengine 可用时：页面契约齐全（window.renderFrame/getCues/ready）
  23  （v0.3）qa_frames 可用时：能检出注入的单帧闪烁
+ 24  （v0.4.0）配乐来源：music.mode=off 不读上一轮 work/music.wav（模式判定回归）
 """
 import argparse
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -41,6 +44,20 @@ import filmkit as K
 
 RESULTS = []
 VERBOSE = False
+
+
+def _setup_stdio():
+    """非 tty（管道 / 日志 / CI）时把 stdout/stderr 切到 UTF-8，避免 Windows 下中文乱码。
+
+    真控制台（isatty=True）保持系统编码：交互运行时中文照样正常，
+    只有"输出被重定向"才需要固定 UTF-8 字节。与 render / scorekit / webengine 同口径。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            pass
 
 
 def run(name, fn):
@@ -361,6 +378,57 @@ def t_mix_film():
     return "%.2fs / 峰值 %.3f" % (len(out) / float(K.SR), float(np.max(np.abs(out))))
 
 
+def t_music_plan():
+    """配乐来源判定：music.mode=off 不得读上一轮的 work/music.wav（v0.3.0 的回归）。
+
+    背景：v0.3.0 的 st_audio 无条件读 work/music.wav，于是用户把 music.mode 改成 off
+    之后，上一轮跑出来的旧配乐仍被混进成片（文档写的是 off = 不要配乐）。
+    这里既测判定函数，也真的跑一次 st_audio 看输出电平。
+    """
+    # 1) 纯判定函数（K.music_plan）
+    assert K.music_plan({"music": {"mode": "off"}}, True)[0] == "off", "mode=off 没被判成 off"
+    assert K.music_plan({"music": {"enabled": False}}, True)[0] == "off", "enabled=false 没被判成 off"
+    assert K.music_plan({"bpm": 120}, True)[0] == "score", "有 bpm 应走 scorekit"
+    assert K.music_plan({"bpm": 120, "music": {"mode": "bed"}}, True)[0] == "bed", "mode=bed 解析错"
+    assert K.music_plan({"music": {"mode": "file"}}, True)[0] == "file", "mode=file 解析错"
+    assert K.music_plan({"music": {"mode": "file"}}, False)[0] == "missing-file", "mode=file 缺文件没报错"
+    assert K.music_plan({"music": {"mode": "score"}}, True)[0] == "missing-bpm", "mode=score 缺 bpm 没报错"
+    assert K.music_plan({"music": {"mode": "weird"}})[0] == "unknown-mode", "未知 mode 没报错（会静默当 auto）"
+    assert K.music_plan({}, True)[0] == "file", "缺省时外部 music.wav 兼容链断了"
+    assert K.music_plan({}, False)[0] == "none", "缺省且什么都没有时应判 none"
+    assert K.music_plan({"music": {"chords": [[220.0, 261.6]]}}, False)[0] == "bed", "v0.2 和弦床兼容链断了"
+
+    # 2) 端到端：st_audio 在 mode=off 下不得混入 work/music.wav
+    try:
+        import render   # 同目录编排器；只借用它的 stage 函数
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    import numpy as np
+    with tempfile.TemporaryDirectory() as d:
+        work = os.path.join(d, "work")
+        os.makedirs(work)
+        # 旁白轨故意做成全零：这样 audio.wav 的峰值只可能来自配乐
+        voice = os.path.join(d, "voice.wav")
+        K.wav_write(voice, np.zeros(K.SR, dtype=np.float32))
+        tl = dict(total=1.0, fps=K.FPS, frames=K.FPS, scenes=[
+            dict(id="l01", start=0.0, end=1.0, dur=1.0, voice_start=0.1, voice_end=0.9,
+                 path=voice, text="一", sub="一")])
+        n = int(1.0 * K.SR)
+        t = np.arange(n) / float(K.SR)
+        loud = (0.8 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+        K.wav_write(os.path.join(work, "music.wav"), np.stack([loud, loud], axis=1))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            off_out = render.st_audio(tl, work, {"music": {"mode": "off"}})
+            off_peak = float(np.max(np.abs(K.wav_read(off_out)[0])))
+            file_out = render.st_audio(tl, work, {"music": {"mode": "file"}})
+            file_peak = float(np.max(np.abs(K.wav_read(file_out)[0])))
+        assert "music.mode=off" in buf.getvalue(), "off 没有打印说明（静默跳过也不行）"
+        assert off_peak < 0.01, "music.mode=off 仍把旧 music.wav 混进来了（峰值 %.3f）" % off_peak
+        assert file_peak > 0.3, "music.mode=file 没有用外部配乐（峰值 %.3f）" % file_peak
+    return "off 峰值 %.3f / file 峰值 %.3f" % (off_peak, file_peak)
+
+
 def t_sfxkit():
     """sfxkit 存在时的接口与确定性自检；不存在就 SKIP。"""
     mod = None
@@ -470,11 +538,13 @@ CASES = [
     ("21 scorekit 确定性与时长", t_scorekit),
     ("22 webengine 页面契约", t_webengine),
     ("23 qa_frames 函数齐全", t_qa_frames),
+    ("24 配乐来源判定（off 不读旧配乐）", t_music_plan),
 ]
 
 
 def main():
     global VERBOSE
+    _setup_stdio()
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()

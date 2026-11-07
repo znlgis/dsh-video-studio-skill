@@ -23,10 +23,10 @@
 | 组件 | 用途 | 许可 | 必需？ |
 |---|---|---|---|
 | FFmpeg | 编码 / 解码 / 响度测量 / 黑帧检测 | LGPL-2.1+ / GPL（取决于构建） | **必需** |
-| Python 3.9+ | 运行时 | PSF-2.0 | **必需** |
+| Python 3.9+ | 运行时 | PSF-2.0 | **必需**（本仓库 `tools/ci_check.py` 用 `ast.parse(feature_version=(3,9))` 校验了 3.9 **语法**兼容；作者机器实际运行在 3.12，未做 3.9 运行期实测） |
 | numpy | 全部数值计算 | BSD-3-Clause | **必需** |
 | Pillow | PIL 引擎逐帧绘制、联系表、深检图 | HPND | **必需**（PIL 引擎） |
-| edge-tts | 旁白合成（走微软在线语音服务） | GPL-3.0（客户端）；**服务本身另有条款** | 有旁白时必需 |
+| edge-tts | 旁白合成（走微软在线语音服务） | **LGPLv3**（客户端；实测 7.3.1 的分类器为 `License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)`）；**服务本身另有条款** | 有旁白时必需 |
 | opencv-python（cv2） | 编码锐度比（Laplacian 方差） | Apache-2.0 | 可选（缺了跳过锐度门禁） |
 | scipy | sfxkit 的时间域滤波加速 | BSD-3-Clause | 可选（缺了走 FFT 卷积兜底） |
 | playwright | web 引擎驱动 Chromium/Edge | Apache-2.0 | 可选（只在 `--engine web` 时需要） |

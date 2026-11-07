@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""scenes.py — 场景绘制模板（v0.2.0）。
+"""scenes.py — 场景绘制模板（v0.3.0 起带 cues() 提示点钩子）。
 
 唯一约定：提供 draw_frame(scene, t_local, dur, t_global, script, frame) -> PIL.Image
   scene   : timeline.json 里的一段（含 id/text/sub/start/end/dur）
@@ -25,7 +25,9 @@ from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 
 import filmkit as K
-from filmkit import W, H, clamp, lerp, smooth, ease_out, ease_in_out, rng
+# 只 import 模板**当下真的用到**的名字（多余导入会被 pyflakes 记一笔，也容易让人以为哪都能用）。
+# 写自己的场景时，缓动/噪声直接走模块：K.lerp / K.ease_in / K.ease_in_out / K.vnoise / K.hash2 …
+from filmkit import W, H, clamp, smooth, ease_out, rng
 
 # ---------------- 主题（改这里换整片气质） ----------------
 THEME = dict(

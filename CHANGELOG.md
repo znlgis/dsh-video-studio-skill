@@ -2,6 +2,134 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.4.0
+
+> 这一版不是加功能，而是**修"门禁看着干净、其实没在查"**。上一版（0.3.0）把四条质检腿都补齐了，
+> 但复盘时发现其中三处在**默认配置下根本不会失败**——这比没有门禁更危险。
+> 同时把仓库从"一个人本机能跑"提升到"任何人都能验"：仓库级体检、CI、依赖清单、打包卫生。
+
+### 修掉的静默失效（每一条都先复现、再修、再写回归断言）
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 改完台词 `--resume` 拼出的片子**画面和旁白对不上**，且时长门禁照样通过 | 分块只按"文件存在"skip，不校验时间轴/场景/编码参数是否变过 | `work/segments/_plan.json` 存计划指纹（timeline+scenes.py sha1+剧本 sha1+crf/preset/chunk）；指纹不符时**拒绝拼接**并提示删目录。实测旧代码在 t=10 s 处有 27305 个像素差异却 EXIT=0 |
+| 把 `music.mode` 改成 `off`，**旧配乐还在响** | `st_audio` 无条件读 `work/music.wav`；`st_score` 甚至打印"沿用已有 music.wav" | 新增 `K.music_plan()` 统一判定 8 种来源（score/file/bed/off/none/missing-file/missing-bpm/unknown-mode），score 与 audio 共用；off 时既不读也不删 |
+| PIL 路线 `sync: []` 看着"零音画差"，其实**一条都没在查** | 同步门禁依赖页面导出的 `events`，PIL 路线没有 | cue 支持 `visual_at` 锚点自校验 + `QA_REQUIRE_SYNC=1` 把"没查"升级为 error + `sync_info.judged` 暴露查了几条 |
+| 自带模板片报 4 段"亮度长时间无变化"，画面其实一直在动 | 判据用全帧平均亮度，对局部动画天生不敏感 | 换成"最活跃 8×8 块在 0.5 s 内的漂移"，阈值 1.5 级灰度；模板片 4 段 → 0 段，合成"真冻结 6 s"仍能报出 |
+| Windows 管道里 `render.py \| tee` 的中文全是乱码 | stdout 在非 tty 时是 GBK，且 render/selfcheck 没有像其它模块那样切 UTF-8 | `_setup_stdio()`：仅非 tty 时 reconfigure 到 UTF-8，真控制台保持系统编码 |
+| 跑一次 `--stage qa` 就在仓库里留一个 250 KB 的 `_dec_tmp.png` | 锐度比的解码帧写到了 cwd | 写进系统临时目录 |
+| 锐度比偶尔把"不同时刻的参考帧"拿来比 | 部分参考帧渲染失败时仍用 `refs[0]` | 参考帧按时刻配对，并补 `_total` 与 frames 阶段一致 |
+
+### 新增的"会失败"（不是新玩具）
+
+- **浏览器确定性开关**：`--deterministic` / `WEBENGINE_DETERMINISTIC=1`。实测默认参数下
+  **同一会话内**字节一致、**跨会话**有 ≤4 像素 ±1 级抗锯齿差异；开关打开后 8/8 会话字节一致，
+  代价约 +22%/帧。文档相应从"同帧两次截图 byte 完全一致"改成带条件的说法。
+- **`open_page` 契约检查**：缺 `window.ready` / `renderFrame` 时不再是裸 Playwright 超时，
+  而是带上页面异常、控制台错误与契约快照的可操作报错。
+- **`qa_text` 契约修正**：`frames` 字段改为真实采样帧数（原来放的是累计文本实例数），
+  另加 `texts`；CLI `textqa` 对"重叠/出画/一闪而过/从没露面"四类都 `exit 1`（原来只看前两类）。
+- **sfxkit 参数健壮性**：枚举值写错从"一个硬崩、一个静默"统一成明确报错（`_enum()`：
+  `wind(env)` / `ui_blip(kind)` / `text_stream(voice)` / `whoosh(direction)` / `riser(end)` /
+  `knock_wood(door)` / `metal_hit(obj)` 全部收口）；`sub_drop(start_hz=0)`、负/非整数 seed、
+  `relay_click(gap<0)`、`typing_at(times` 含负数/NaN`)`、未知 `room` 都从裸
+  `ZeroDivisionError`/`KeyError`/静默哑音改成可读 `ValueError`。
+- **无 scipy 的性能门禁分档**（`PERF_BUDGET_SCIPY=1.5` / `PERF_BUDGET_FALLBACK=3.5`）：
+  两条实现路径**不共用同一个数字**，自检输出里明写"当前无 scipy，按 fallback 预算判定；
+  装 scipy 可加速并回到 1.5 s"——修掉"没装可选件 = 自检失败"这个假红灯，但没有偷偷放宽。
+- **`film.json` 前置校验**：坏 JSON / `lines` 为空 / id 重复 / bpm 非法 / music·sfx·web 类型错，
+  全部给一句能照着改的错，而不是 Python traceback；顶层加 `except` 兜底（`RENDER_DEBUG=1` 看栈）。
+
+### 仓库工程化
+
+- **`tools/ci_check.py`（9 项，不需要 ffmpeg/字体/网络）**：py 语法、`node --check`、JSON、
+  SKILL.md frontmatter、三方依赖白名单、`npm pack` 打包卫生、文档路径引用、Python 3.9 语法、单文件体积。
+- **`.github/workflows/ci.yml`**：`repo` job 在 ubuntu+windows 跑 ci_check；`skill` job 在 ubuntu
+  装 ffmpeg + `fonts-noto-cjk` 后跑 `selfcheck.py` 与可选模块 selftest。
+- **`skills/video-studio/requirements.txt`**：依赖分"必需 / 强烈建议 / 可选"三档并写明缺了会怎样。
+- **打包卫生**：`files` 增加 `!skills/**/__pycache__` 与 `!skills/**/*.pyc`；补 `publishConfig.access`、
+  `engines.node`、`homepage`、`bugs`。实测修前包内混入 `__pycache__`（922 KB），修后 431 KB / 35 文件。
+- **插件入口不再用静态 `import` 引可选 peer**：改成 `apply` 内按需 `import`，缺依赖时只降级
+  （不挂载 bundled 技能根）并打一条能照着做的日志，不让整行插件加载失败。
+
+### selfcheck：23 条 → 24 条
+
+新增第 24 条「配乐来源判定」：11 条 `music_plan` 断言 + 真跑一次 `st_audio` 验峰值
+（`mode=off` 混音峰值 0.000 / `mode=file` 0.673）。模块自测同步扩到：
+sfxkit 16、scorekit 17、qa_frames 22、webengine 24。
+
+### 文档
+
+- SKILL.md：`--stage qa`"零写入"改为"只读输入、只写 `work/qa/`"；分块目录 `work/segments/` 与
+  默认 chunk 计算方式写清；新增"PIL 路线的同步门禁怎么真的生效"与"画面长时间静止"判据；
+  硬约束补确定性模式；实测表修正"同帧 byte 完全一致"的适用条件。
+- references/frame-qa.md 新增 §2.4b（静止判据实测分布与调阈值方法）、§2.5 补 v0.4 两条补救；
+  web-engine.md 修掉指向不存在的 `assets/web/fonts/`；pitfalls.md 的分块命名改为真实格式。
+- THIRD_PARTY_NOTICES：edge-tts 许可 GPL-3.0 → **LGPLv3**（实测元数据分类器）；Python 版本声明
+  补"语法已验证、运行期未实测"的边界。
+
+### 文档"真话化"（对账 100+ 条承诺 vs 实现）
+
+这一轮专门做了一次**文档逐条对账**（读代码 + 跑命令，不是读文档推断），修掉三类问题：
+
+**A. 抄了就失败（最高优先级）**
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| quickstart 第 4 步 `--stage stills` | 干净目录必失败（`没有 work/timeline.json`，实测 EXIT=1） | 代码侧让 `stills` **自动补 tts/layout**（会打印在补哪一步）；文档同步说明 |
+| `audio.md` `trim_tail(...)` | 本仓库没有这个函数（实际 `trim_silence`） | 换成正确签名 |
+| `SKILL.md` 的 `find ~ -path '*/skills/video-studio/filmkit.py'` | 少 `/scripts/`，永远匹配不到 | 补全路径 |
+| `pipeline.md` 字幕公式 `min(..., voice_start + 5.2)` | 5.2 s 硬钳 v0.2 就移除了 | 更新公式，删"上限 5.2 s" |
+| `pipeline.md` 注释写"只渲 3 帧"却给 `--stage frames --jobs 4` | 照抄会白渲全片 | 改成 `--stage stills` |
+
+**B. 门禁口径不符（影响"能不能交付"的判断）**
+
+- SKILL §7 那张表 8 行里 **5 行实际只出 warning**（48 kHz、长黑帧、字幕安全区、缺字形、画面静止），
+  标题却写"交付前必过"。已拆成 **error 档 / warning 档两张表**，逐行标注级别。
+- 响度「-16 ± 1 LUFS」既不是 error 带（< -19 / > -12）也不是 warn 带（< -17.2 / > -14.5），
+  改成写真实两级阈值，并说明"±1 是目标区，不是判定阈值"。
+- 音画同步行补上"**默认可能根本没在查**"，并指向新增的 `visual_at` / `QA_REQUIRE_SYNC` 两条补救。
+
+**C. 描述了不存在的实现 / 内部矛盾**
+
+- §5.5「母带压缩 threshold -9 / ratio 1.5」：**代码里没有压缩器**，链路只有 求和→duck→峰值保护→loudnorm。已改为如实描述。
+- §5.5「旁白比配乐高 12 dB」「配乐比音效低 1.5 dB」：代码不测量也不保证，改标"人耳经验值 / 默认增益"。
+- `audio.md` §3「各轨目标 LUFS + 前瞻限幅器」：本仓库没实现，标为"设计建议"并给出实际链路。
+- `quality-gates.md` G3 音频判据与 `sfxkit.qc()` 实际判据不同 → 改为以 `qc()` 为准。
+- `SUB_MAX_CHARS=24` 定义后**无任何代码引用** → 文档改为"像素宽度折行为准，24 字是大致上限"。
+- `scene-authoring` 的「正文安全区到 974，天然满足 880 规则」**是错的**（SAFE 974 与字幕带 872 重叠 102 px）→ 改为"正文实际止于 ~860；SAFE 是硬边界不是排版建议"。
+- 「120 BPM 的八分音符 = 0.5 s」算术错（八分是 0.25 s）→ 改为四分音符。
+- `CHANGELOG` v0.3「新增 5 个 stage」实为 3 个；qa_frames「18 项」实为 19 项；§11/§12 编号漂移 → 全部校正。
+- `README`「SKILL.md 第 10 节是实测基准」→ 实为 §12；stage 列表补全为 10 个。
+- `web-engine.md`「可以按段混用两条路线」→ render.py 的 engine 是全局单选项，不支持按段切。
+- `scene-authoring` 的 JPEG q94 数据属**上游经验**，本仓库固定 PNG → 标注来源与适用范围。
+- `sfx-design.md` 引用不存在的 `MODAL` 符号 → 改为可指认的"模块顶部模态区"。
+
+**D. 同一事实多套数字 → 统一成一个权威值 + 条件**
+
+浏览器引擎速度曾有 4 处互斥数字（190–400 ms/帧 / 3–6 fps / 82 ms/帧 / 70–120 ms/帧），
+统一为「80–130 ms/帧（核显、PNG、空载）」并注明条件；PIL 统一「40–80 fps（模板片 68–82）」；
+scorekit 389 s 统一「4–8 s（随负载）」；sfxkit 389 s 环境声标出区间与"rain 余量最小"。
+**原则：区间可以宽，但同一个事实只能有一套。**
+
+### selfcheck / ci_check 之外新增的两道静态检查
+
+- `ci_check` 从 9 项扩到 **10 项**：新增 **Markdown 围栏平衡**（这次真的发现
+  `quality-gates.md` 里有个被反斜杠转义、从未闭合的围栏，会让后面整篇渲染成代码块）。
+- `cv2` 从"文档说可选、代码硬 import"改成**真的可选**：缺 cv2 时 `sharpness`/`encode_quality`
+  返回 `None`，`qa_report` 记一条**明确说明"锐度比门禁本次未执行"**的 warning，
+  而不是抛 `ImportError` 崩掉整个 `--stage qa`。
+
+### 已知局限（写在这里，因为门禁干净时最容易忽略）
+
+1. **锐度比在 web 引擎路线仍是跳过**（没有参考帧），只打 WARN。web 路线要查锐度，得先让
+   `webengine` 提供一个"渲染单帧并截图"的参考帧接口。
+2. **`_peak_bound_ratio` 不是严格上界**（实测 300 组输入有 14 例超出，最坏 0.8 dB），
+   当前靠 `finalize` 的第二道真峰校验兜底；36 次真实渲染未发现越限。
+3. **`sync` 依赖命名约定或 `visual_at` 锚点**：两者都不写时，`sync` 恒空但会有 warning 明示
+   "没在查"。看到 `sync: []` 请先看 `sync_info.judged`。
+4. **跨机器性能数字只是参考**：所有 fps / 耗时都标注了机型，换机须重测（SKILL.md §12）。
+
 ## 0.3.0
 
 > 这一版来自一次"把两个项目放在一起看"的复盘：本项目擅长**旁白驱动的图文科普片**（TTS 实测时间轴、
@@ -20,7 +148,7 @@
   v0.2 的 SKILL.md §3 推荐"浏览器 Canvas/WebGL 路线"但**没有任何代码资产**（文档承诺、代码没做到），
   v0.3 补上：Edge/Chromium + CDP 截图 → image2pipe、分块并行、断点续跑、缺口检测、崩溃重开、cue 导出、页面文字质检。
   页面用**原生 Canvas2D + 自写补间**，不 vendor GSAP / three.js（许可干净、体积为零）。
-- **`scripts/qa_frames.py` —— 帧级/时间轴级深检**（18 项自测）。单帧闪烁
+- **`scripts/qa_frames.py` —— 帧级/时间轴级深检**（当时 19 项自测，v0.4 扩到 22）。单帧闪烁
   （二阶差分 + 孤立性 + **"回到原位"双闸**，见下文集成期修正）、画面空窗（≥0.8 s 近黑）、
   音画同步（cue vs 视觉事件 dt）、亮度/响度曲线，出 JSON + PNG（PIL 手绘，不引 matplotlib）。
   这些是**唯一靠"看完全片"才能发现**的问题，单看任何一帧都正常。
@@ -44,7 +172,7 @@
 
 ### render.py 的变化
 
-新增 5 个 stage，`--stage all` 顺序变为：
+新增 3 个 stage（`cues` / `score` / `sfx`，v0.2 的 7 个变 10 个），`--stage all` 顺序变为：
 
 ```
 tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa
@@ -56,7 +184,7 @@ tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa
 ### selfcheck：14 条 → 23 条
 
 新增 9 条，全部对应"v0.3 新代码可能出的错"（另外每个新模块还自带 `--selftest`：
-sfxkit 16 项、scorekit 17 项、webengine 18 项、qa_frames 18 项，全部不联网、合计约 40 秒）：
+sfxkit 16 项、scorekit 17 项、webengine 18 项、qa_frames 19 项，全部不联网、合计约 40 秒）：
 立体声总线形状与声像、`cue_time` 三种写法、`CueBus` 落盘/读回/别名展开/越界丢弃、
 `duck` 真的压低了配乐、`mix_film` 时长与峰值、以及四个新模块的存在性/确定性/契约检查
 （模块缺失标 SKIP，不影响只用 PIL 路线的人）。
@@ -79,7 +207,7 @@ sfxkit 16 项、scorekit 17 项、webengine 18 项、qa_frames 18 项，全部�
 | 浏览器引擎的片子被帧级质检报 3 处"单帧闪烁" | 二阶差分分不清"单帧闪烁"和"加速运动最快的一帧"（3.7/7.7 s 是交界黑场起坡，0.733 s 是最后一个字入场） | `qa_frames` 加"回到原位"闸门：`|F[t+1]-F[t-1]|` 必须 ≤ 1.6×中间帧偏离量；两个演示片 flicker 归零，注入白闪的用例仍 PASS |
 | 音画同步报 -0.40 s / -0.32 s 超差 | 跨 kind 的"最近事件"被当成"预期事件"（闪白去配 data_chirp） | 异 kind 只在 `|dt| ≤ tol` 时作佐证，不再据此判超差 |
 | `scorekit` 写的 24-bit WAV 读不进来 | `filmkit.wav_read` 只支持 16-bit | 支持 16/24/32-bit PCM（含 24-bit 符号扩展） |
-| 场景分块改了画面却不重渲 | 分块只按"文件存在"跳过 | 这是**已知语义**：改画面必须 `rm -rf work/chunks`（已在 SKILL 与困境速查里写明） |
+| 场景分块改了画面却不重渲 | 分块只按"文件存在"跳过 | 这是**已知语义**：改画面必须清掉分块目录（0.3.0 时靠人记；**0.4.0 起改为计划指纹 + 显式拒绝拼接**，见上） |
 
 ### 帧级质检的两条已知盲区（**故意的取舍，不是遗漏**）
 
@@ -138,10 +266,10 @@ sfxkit 16 项、scorekit 17 项、webengine 18 项、qa_frames 18 项，全部�
 - `assets/scenes.py` 重写：示范缓存排版、预烘焙背景、精灵池、HUD 的正确定时方式。
 - `assets/film.json` 增加 `trim_silence` / `tts_workers` / `sub_max_hold` / `chunk_frames` / `reencode_video`。
 - SKILL.md：§1 上手加自检/母版/并行；§5 门禁表重写（真峰/字幕条数/缺字形）；§6 故障速查补 7 条实测坑；
-  新增 §11 升级须知、§12 换机 60 秒自检。
+  新增「升级须知」「换机 60 秒自检」两节（v0.2 时编号为 §11/§12，v0.3 起后移为 §13/§14）。
 - references：quality-gates 的锐度比示例改用 `ref_img`；pipeline 更新 stage/mux；audio 补 TTS 缓存与裁剪。
 
 ### 兼容性
 
 `filmkit` 公共 API 保持向后兼容（`tts`/`build_timeline`/`sub_window`/`mux`/`qa_report` 旧参数仍可用），
-但默认行为有变，迁移项见 SKILL.md §11。
+但默认行为有变，迁移项见 SKILL.md §13。

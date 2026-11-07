@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.3.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -13,6 +13,9 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > （门禁失效、缓存不校验、stage 假独立、mux 二次编码等），全部修掉并补了 14 条回归断言。
 > **v0.3.0**：与另一部 6 分半成片（`ai-history-film`）对照后，补上本项目最缺的四块——
 > 物理建模音效库、程序化配乐、浏览器逐帧渲染引擎、帧级质检，以及把三者串起来的**提示点系统**。
+> **v0.4.0**：修掉 4 处"门禁看着干净、其实没在查"的静默问题（`--resume` 复用旧分块、
+> `music.mode=off` 仍混入旧配乐、PIL 路线音画同步恒空、亮度静止判据误报 4 段），
+> 补上仓库级体检（`tools/ci_check.py`）、CI、`requirements.txt`，并修掉管道中文乱码。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §13。
 
 ## 安装
@@ -47,8 +50,8 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 
 上面四帧是用仓库自带的 `assets/film.json` + `assets/scenes.py` 从零跑一遍 `python render.py` 的
 `work/qa/sheet.png`，未经任何修图。配套实测（同一台机器）：
-**时长 30.10 s / 1920×1080 / 30 fps / h264+aac 48 kHz / -16.0 LUFS / 真峰 -1.3 dBTP / 黑帧 0 /
-帧级深检：闪烁 0、空窗 0、音画同步超差 0**。
+**时长 30.10 s / 1920×1080 / 30 fps / h264+aac 48 kHz / -16.0 LUFS / 真峰 -1.2 dBTP / 黑帧 0 /
+帧级深检：闪烁 0、空窗 0、画面静止 0**（音画同步在 PIL 路线上需要写 `visual_at` 才会真的查，见 SKILL.md §7）。
 
 ## 用法
 
@@ -64,8 +67,8 @@ cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
 cp <SKILL_DIR>/scripts/*.py .                           # filmkit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 23 条环境/回归断言（20 秒，不联网）
-python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览：先看构图
+python selfcheck.py                                     # 24 条环境/回归断言（20 秒，不联网）
+python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 ```
 
@@ -75,7 +78,7 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 tts → layout → cues → score → sfx → audio → frames → mux → qa
 ```
 
-**v0.3 的三种玩法**：
+**三种玩法**：
 
 | 想要 | 怎么做 |
 |---|---|
@@ -83,9 +86,16 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 | 整片要一段像样的配乐 | 设 `bpm` / `music.mode=score` → `--stage score` |
 | 画面要粒子/形变/着色器 | `--engine web` + 拷 `assets/web/`，改页面里的场景代码 |
 
+**v0.4 的两个新开关**（都是"让门禁真的会失败"，不是新玩具）：
+
+| 想要 | 怎么做 |
+|---|---|
+| 让 PIL 路线的音画同步门禁真的生效 | cue 加 `"visual_at": 绝对秒`；CI 里再加 `QA_REQUIRE_SYNC=1` 把"没查"变成失败 |
+| 浏览器渲染要跨会话字节级可复现 | `--deterministic`（或 `WEBENGINE_DETERMINISTIC=1`），代价约 +22%/帧 |
+
 `<SKILL_DIR>` 是 `skill` 工具加载时回报的 resourceBase 目录（`.../skills/video-studio/`）。
 
-分阶段（v0.2 起**每个 stage 只做自己的事**）：`--stage tts | layout | audio | frames | mux | qa | stills`。
+分阶段（v0.2 起**每个 stage 只做自己的事**；完整 10 个 stage 见上）：`--stage tts | layout | cues | score | sfx | audio | frames | mux | qa | stills`。
 
 长片：`--stage frames --jobs 4`（按绝对帧号分块并行）+ `--resume`（中断只补缺块）。
 
@@ -114,14 +124,17 @@ skills/video-studio/
                              quality-gates · pitfalls
   scripts/filmkit.py         生产内核（字体/排版/字幕/音频总线/CueBus/TTS/时间轴/编码/质检）
   scripts/render.py          编排器（10 个独立 stage、pil|web 双引擎、分块并行、断点续跑、母版预览）
-  scripts/selfcheck.py       回归自检（23 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（24 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
-  scripts/qa_frames.py       帧级深检（单帧闪烁 / 画面空窗 / 音画同步 / 亮度响度曲线）
+  scripts/qa_frames.py       帧级深检（单帧闪烁 / 画面空窗 / 画面静止 / 音画同步 / 亮度响度曲线）
+  requirements.txt           Python 依赖（必需 / 强烈建议 / 可选三档，带注释）
   assets/film.json           剧本模板（含 hold / bpm / music / sfx.cues）
   assets/scenes.py           场景模板（开场 / 正文卡片 / 收尾 + cues() 钩子）
   assets/web/                浏览器页面模板（原生 Canvas2D 确定性时间轴）
+tools/ci_check.py            仓库级体检（语法/JSON/依赖白名单/打包卫生/文档引用，不需 ffmpeg）
+.github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu）
 ```
 
 ## 环境前提
@@ -131,7 +144,13 @@ skills/video-studio/
 playwright + Chromium/Edge（只在 `--engine web` 时需要）。
 不需要 moviepy / pydub / soundfile / librosa / manim——本技能一行都不 import 它们。
 
-`SKILL.md` 第 10 节是作者机器（Windows 11 + Ryzen AI 9 HX 370）的实测基准，**换机请先重测**：
+依赖清单有机器可读的一份，别再手抄：
+
+```bash
+pip install -r skills/video-studio/requirements.txt   # 必需 + 强烈建议；可选项目已注释，按需打开
+```
+
+`SKILL.md` 第 12 节是作者机器（Windows 11 + Ryzen AI 9 HX 370）的实测基准，**换机请先重测**：
 `ffmpeg -version`、`python -c "import numpy,PIL,cv2"`、中文字体文件、`edge-tts --list-voices`。
 ffmpeg 路径可用环境变量 `FILMKIT_FFMPEG` 覆盖，字体候选在 `filmkit.FONT_CANDIDATES`。
 
@@ -141,7 +160,24 @@ ffmpeg 路径可用环境变量 `FILMKIT_FFMPEG` 覆盖，字体候选在 `filmk
 
 ## 兼容性
 
-peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0`，覆盖 DSH 0.1.x / 0.2.x。
+peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 DSH 0.1.x / 0.2.x 的**正式版**。
+
+⚠️ **预发布版按 semver 规则不满足这个范围**：`>=0.1.0-rc.6 <0.3.0` 这组比较器里没有带预发布标签的
+基准，所以 `0.2.2-rc.1` 这类版本 `semver.satisfies()` 返回 false（实测）。因为该 peer 标了
+`optional`，pnpm 不会因此阻断安装；插件入口也已经把依赖改成 `apply` 内按需 `import`——
+缺这个包时**只降级（不挂载 bundled 技能根）并打一条能照着做的日志，不会让整个插件行加载失败**。
+
+## 仓库自检（给贡献者与 CI 用，不是给用户用的）
+
+```bash
+python tools/ci_check.py -v     # 10 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
+                                #         npm pack 打包卫生 / 文档路径引用 / Python 3.9 语法 /
+                                #         Markdown 围栏平衡 / 单文件体积
+```
+
+它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
+**它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
+查的是"技能本身还能不能出片"。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 
