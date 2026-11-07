@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <title>DSH Video Studio · Canvas2D 逐帧渲染模板（v0.3.0）</title>
+  <!-- 本地样式与脚本：不引 CDN、不连任何网络 -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- 1920x1080 固定画布：宽高必须与 webengine.py 的 viewport 一致，截图才是 1:1 像素 -->
+  <canvas id="stage" width="1920" height="1080"></canvas>
+
+  <script src="engine.js"></script>
+  <script src="film.js"></script>
+  <script src="qa_text.js"></script>
+  <script>
+    // 场景与文字登记都建好、字体度量稳定后才把 window.ready 置 true
+    window.FK.boot();
+  </script>
+</body>
+</html>

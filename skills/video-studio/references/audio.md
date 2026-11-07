@@ -1,5 +1,9 @@
 # 音频：采样级混音、配乐与音效
 
+> **v0.3.0 新增三节**（下面的 §10–§12 是新的推荐做法，§1–§9 是底层原理与手写示例，仍然有效）：
+> §10 提示点系统（声音跟着画面走）、§11 程序化配乐（scorekit）、§12 程序化音效（sfxkit）。
+> 先读 §10——它决定了另外两节怎么用。
+
 ## 1. 为什么不用 ffmpeg 混音
 
 一条 ffmpeg 命令喂 100+ 个输入做混流，在 Windows 上会产生**非确定性静音**：输入线程池竞争导致某个输入未就绪就被读取，断媒体收到空流，后续输出静音。同一条命令连跑三次：正常 / 静音 / 正常。
@@ -197,3 +201,185 @@ bus[i0:i0+len(src)] += src * gain      # 精确到 1/48000 秒
 ### BGM 循环的淡出陷阱
 
 BGM 素材自带淡出尾音，被 `-stream_loop` 循环后会在每个接缝处"死一下"。做法：循环时只取素材的**稳态段**（裁掉头尾淡入淡出），或改用频域整周期噪声。
+
+## 10. 提示点系统（v0.3.0，先读这一节）
+
+**问题**：手工把音效放到"第 12.5 秒"，只要片子里改一句台词、加一个停留窗口、把 BPM 从 120 改成 100，
+所有音效就全错位。改一次要重新对一遍时间——这就是为什么很多程序化视频"声音和画面对不上"。
+
+**做法**（来自 ai-history-film 的 cue 系统）：**画面登记提示点，音频照着提示点合成**。
+
+```
+场景代码 ──cue(t, type)──> work/cues.json ──> sfxkit 逐条合成 ──> work/sfx.wav ──> 混音
+                ▲                                      ▲
+                │                                      │
+        web 引擎由页面导出                     每条 cue 的 t 是成片绝对秒
+```
+
+### 10.1 三种登记方式
+
+```python
+# A. film.json（少量关键音效，最好改）
+"sfx": {"cues": [
+  {"at": "l03+0.05", "type": "impact", "size": 1.1},
+  {"at": "abs:12.5",  "type": "whoosh", "dur": 0.9, "gain": -2}
+]}
+
+# B. scenes.py 的 cues() 钩子（推荐：画面算到哪就响到哪）
+def cues(tl, script):
+    out = []
+    for s in tl["scenes"]:
+        if s.get("kind") == "body":
+            for i, _ in enumerate(s.get("items") or []):
+                out.append({"at": "%s+%.2f" % (s["id"], 0.48 + 0.32 * i),
+                            "type": "ui_blip", "pitch": 1760.0 + 110.0 * i, "gain": -6})
+    return out
+
+# C. web 引擎直接调 K.CueBus（页面里：S.cue(t, type, params)）
+```
+
+### 10.2 at 的写法
+
+| 写法 | 含义 | 什么时候用 |
+|---|---|---|
+| `"abs:12.5"` | 绝对秒 | 固定位置的重击（片头标题落定） |
+| `12.5` | 数字，同义 | 同上 |
+| `"l03+0.35"` | 场景 l03 起点 + 0.35 s | **绝大多数情况**：跟着这一段的节奏 |
+| `"l03-0.2"` | 场景 l03 起点 - 0.2 s | 转场前的"吸气"/预兆 |
+| `"l03"` | 场景起点 | 段落切换的 whoosh |
+
+**先想"这个声音属于哪个事件"，再写 at。** 属于"第 3 段第 2 张卡片落位"就写 `l03+0.9`，
+不要写 `abs:21.3`——后者在停留窗口一改就废。
+
+### 10.3 gain 怎么给
+
+`gain` 是**相对该类音效基准电平**的 dB 偏移（基准见 `filmkit.CUE_BASE_DB`）：
+- `impact` 基准 -5 dB → 写 `gain: -3` 就是"这一记重击比默认轻 3 dB"
+- 同一类音效在一段里连响 5 次，后面的要递减（`-2, -3, -4, -5, -6`），否则听众只听见前两下
+
+### 10.4 预览与检查
+
+```bash
+python render.py ... --stage cues      # 打印条数、类型分布
+python render.py ... --stage sfx       # 合成音效轨，打印峰值
+python qa_frames.py out/film.mp4 --cues work/cues.json   # 看音画同步 dt
+```
+
+**音画同步 dt > 60 ms 就是错**：人眼/耳对 40–60 ms 以内的错位不敏感，超过就会"感觉哪里不对但说不出来"。
+dt 大的典型原因：cue 挂在字幕出现的时刻上，而画面重击晚 100 ms——应该挂在动画时刻上。
+
+## 11. 程序化配乐（scorekit，v0.3.0）
+
+```python
+import scorekit as sk
+samples, report = sk.render(389.0, bpm=120, key="Dm",
+                            anchors=timeline["scenes"],   # [{id,kind,start,end}]
+                            seed=7)                       # 同 seed 逐采样一致
+sk.save("work/music.wav", samples)
+```
+
+或者用面向对象的写法（要更细的控制时）：
+
+```python
+sc = sk.Score(389.0, bpm=120, key="Dm", seed=7)
+sc.plan_from_anchors(timeline["scenes"], default_energy=0.5)   # 自动分段，边界对齐小节
+sc.section("finale", 360.0, 389.0, energy=0.95)
+sc.suck(360.0, db=-6, dur=0.22)                                # 最终重击前"吸一口气"
+samples = sc.render()
+```
+
+### 11.1 为什么"一张和弦表贯穿全片"
+
+这是"像一首曲子"和"一堆配乐拼起来"的分水岭：全片同一个调、同一张和弦进行，
+换段只改**律动层数与亮度**。观众听到的是"同一首曲子在推进"，而不是"换了五首 BGM"。
+
+### 11.2 分段能量
+
+| energy | 配器 | 用在哪 |
+|---|---|---|
+| 0.1–0.3 | pad + 偶尔的拨弦 | 开场、回忆、安静陈述 |
+| 0.4–0.6 | + bass + kick（每小节 2 下） | 正文讲解 |
+| 0.7–0.85 | + hat + arp | 数据推进、竞赛 |
+| 0.9–1.0 | 全开 + 加花 | 高潮、爆发 |
+
+规则：**相邻两段能量差 ≤ 0.3**，否则会"突然换歌"。
+真正的高潮靠**前面几小节压住**（`suck`）然后放开，不是靠这一段更响。
+
+### 11.3 段落边界对齐小节
+
+`plan_from_anchors` 把每个场景的起点 snap 到最近的小节线（`bpm=120` → 每小节 2 s）。
+代价是段落边界与画面边界差 ≤ 1 s（观众感知不到），收益是**所有画面重音都落在拍点上**。
+
+### 11.4 性能与确定性
+
+- 389 s 立体声 48 kHz 合成应当 ≤ 60 s；慢就是某个乐器在 Python 循环里逐采样合成，改成向量化。
+- 同 seed 必须逐采样一致（`np.random.default_rng(seed)`，不许用全局 `np.random`）。
+- 配乐只保证"不削波、不直流、峰值 ≤ -1 dBFS"；**最终响度交给 ffmpeg loudnorm**。
+
+## 12. 程序化音效（sfxkit，v0.3.0）
+
+### 12.1 为什么不"画波形"
+
+画波形（正弦叠加 + 包络）得到的是**合成器音色**；真实音效是**物理过程**的记录。
+两者的差别在三个地方，而这三个地方恰好是人耳判断"真不真"的依据：
+
+| 物理量 | 决定什么 | 合成器常犯的错 |
+|---|---|---|
+| 模态比（形状） | 音色是"棒/板/膜/钟" | 用整数倍泛音 → 听起来像风琴 |
+| 衰减率（材质） | "木头还是金属" | 所有材质用同一个衰减 |
+| 接触时间（力度/软硬） | 亮不亮 | 力度只改音量，不改亮度 |
+
+`sfxkit` 就是按这三个物理量建模的：`MODAL` 里有 `MATERIALS`（eta/alpha）、
+各种形状的模态比（`bar_ratios` / `plate_ratios` / `ring_ratios` / `BELL_RATIOS`），
+以及 `Hit(contact_ms, hardness)`——**力度越大接触越短，所以重击天然更亮**，不需要额外调 EQ。
+
+```python
+import sfxkit as S
+S.render("impact", seed=3, size=1.2)          # 已做完母带（按真峰 -1 dBTP 归一）
+S.list_recipes()                               # [{name, title, tags, params}]
+```
+
+### 12.2 配方速查（cue 的 type 就是名字）
+
+| 类别 | 配方 | 备注 |
+|---|---|---|
+| 界面 | `ui_blip` `ui_click` `relay_click` `roulette_tick` `answer_chime` | `ui_blip` 有音高，**全片少用** |
+| 文字 | `typing` `typing_at` `text_stream` | `typing_at`/`text_stream` 带 `times[]` 逐字对齐 |
+| 转场 | `whoosh` `riser` `impact` `sub_drop` `reverse_swell` `glitch` `tape_rewind` | `impact` 是"重击"的主力 |
+| 环境 | `wind` `rain` `campfire` | 长环境声，用 `dur` 控制长度 |
+| 撞击 | `knock_wood` `metal_hit` `glass_clink` `go_stone` | 模态合成，改参数换材质 |
+
+### 12.3 逐字对齐（AI 打字声的正确做法）
+
+画面上"AI 逐字输出"时，声音不能是一串等间隔的咔哒——要**跟着字出现的时刻**：
+
+```python
+out.append({"at": "%s+0.3" % s["id"], "type": "text_stream",
+            "times": [i * 0.055 for i in range(len(s["sub"]))]})   # 相对提示点的秒数组
+```
+
+人在打字用 `typing_at`（更脆、更不规则），AI 输出用 `text_stream`（更连贯、偏"沙沙"）。
+
+### 12.4 听感问题诊断表（照症状查）
+
+| 症状 | 根因 | 改法 |
+|---|---|---|
+| 一团闷的低频 | 接触时间太长 / 模态只到低频 | 缩短 `contact_ms`、加 `hardness`、加辐射高通 |
+| 像电子音、纯音 | 整数倍泛音、没有噪声成分 | 用真实形状的模态比；加 `contact_noise`；对称物体用 `split` 产生拍频 |
+| 一串同样的"哒哒哒" | 同一个核被重复几百次 | 核变体 ≥ 30 个；`scatter` 里每粒用不同 seed |
+| 刺耳、嘶嘶 | 10 kHz 以上太多 / 非线性混叠 | 空气吸收 `spectral_tilt_by_distance`、低通、过采样饱和 |
+| 机械感（等间隔等音量） | 事件是均匀网格 | `poisson_times` / `human_rhythm` + `power_law` 幅度 |
+| 悬在真空里 | 没有空间 | `reverb` / `outdoor`，湿声 -18～-9 dB |
+| 小音箱听不见 | 能量集中 60 Hz 以下 | 降次低频层，补中频"质感"层 |
+| 长音死板 | 没有慢变起伏 | `smooth_random` 调制音量/滤波频率/事件速率 |
+
+### 12.5 音量只在成片混音里量
+
+混音时每个音效会先按峰值归一（`finalize`），所以**配方内部的 amp 参数不影响最终响度**。
+真实电平由 `filmkit.CUE_BASE_DB[type] + gain` 决定。要"更响"就调 `gain`，不要改配方里的 amp。
+
+### 12.6 命名与许可
+
+`sfxkit` 的算法思想改编自 `ai-history-film`（MIT）的 `sfx/` 包，实现为本项目单文件重写；
+文件头已注明出处。配方名、参数名保持与上游一致，方便对照上游文档。
+

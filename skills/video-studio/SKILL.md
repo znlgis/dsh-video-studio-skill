@@ -16,6 +16,10 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 4. **原始帧直通编码**：PIL 帧 → `rawvideo` 管道 → `libx264`。**不要**用 `cv2.VideoWriter` 做中间文件（慢 2 倍且二次有损）。
 5. **混音用 numpy 采样级叠加**，不要用一条 ffmpeg 命令喂上百个输入（Windows 上会非确定性静音）。
 6. **交付前必须跑质检脚本 + 亲眼看 3 张静帧**（用 `read_image`）。"能出图"不等于"没问题"。
+7. **（v0.3）声音跟着画面走**：该响一下的地方在**场景代码里登记提示点**（`K.CueBus` / `scenes.py` 的 `cues()` 钩子），
+   不要事后手工对时间。画面改了（换停留窗口、调节奏），提示点自动跟着改。
+8. **（v0.3）没看清就加停留，别整片放慢**：`film.json` 的 `hold`（全局）或 `lines[].hold`（单句）
+   在语音结束后加停留；配乐用 `bpm` 对齐小节。
 
 ## 1. 五步上手（最快路径）
 
@@ -29,8 +33,11 @@ mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .            # 剧本模板（改文字即可）
 cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
 cp <SKILL_DIR>/scripts/{filmkit.py,render.py,selfcheck.py} .
+# 可选（v0.3）：要程序化音效/配乐就一并拷；要走浏览器渲染再拷 webengine.py + assets/web/
+cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,qa_frames.py} .
+cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：14 条回归护栏，10 秒内出结论（不联网）
+# 2) 先跑一次自检：23 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 改 film.json 的 lines[].text / sub / big / items
@@ -48,17 +55,23 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 #    work/qa/snap_*.png     全分辨率静帧
 ```
 
-分阶段跑（**v0.2 起每个 stage 只做自己的事**，不会再顺手重渲全片）：
+分阶段跑（**每个 stage 只做自己的事**，不会再顺手重渲全片）：
 
 ```bash
 python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
-python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass
-python render.py ... --stage audio    # 只混音 -> audio.wav
-python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--jobs N 分块并行）
+python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口）
+python render.py ... --stage cues     # 只出提示点 -> work/cues.json（声音跟着画面走）
+python render.py ... --stage score    # 只出配乐 -> work/music.wav（scorekit）
+python render.py ... --stage sfx      # 只出音效轨 -> work/sfx.wav（sfxkit，按 cues.json）
+python render.py ... --stage audio    # 只混音 -> audio.wav（旁白+配乐+音效，音效响时配乐让位）
+python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--engine pil|web，--jobs N 分块并行）
 python render.py ... --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
-python render.py ... --stage qa       # 只质检（读成片，零写入）
+python render.py ... --stage qa       # 只质检（读成片，零写入）+ 帧级深检
 python render.py ... --stage stills   # 只渲母版静帧 + 联系表
 ```
+
+`--stage all` 的完整顺序：`tts → layout → cues → score → sfx → audio → frames → mux → qa`。
+**任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
 
 长片渲染（分块并行 + 断点续跑）：
 
@@ -88,11 +101,35 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 | 场景 | 选型 | 实测速度 | 适合 |
 |---|---|---|---|
 | 图文/数据/科普/UI 风 | **PIL（numpy+cv2 辅助）** — `filmkit` 默认 | 40–100 fps @1080p30 | 绝大多数中文科普片、报告转视频 |
-| 需要流畅矢量/粒子/3D/纸纹质感 | **无头浏览器 Canvas2D/WebGL + CDP 截图 → image2pipe** | 190–400 ms/帧（核显） | 纪录片级长片、需要复杂视觉语言 |
+| 需要流畅矢量/粒子/3D/纸纹质感 | **无头浏览器 Canvas2D/WebGL + CDP 截图 → image2pipe**（`webengine.py`） | 190–400 ms/帧（核显） | 纪录片级长片、需要复杂视觉语言 |
 | 纯数据动画 | **manim**（若已安装） | 视场景而定 | 数学/公式推导 |
 
 **默认走 PIL**：依赖少（numpy+Pillow 就够）、启动快、确定性强、调试成本低。
-只有当你需要"一镜到底的粒子形变 / 实时着色器质感"时才上浏览器方案（见 `references/scene-authoring.md`）。
+需要"一镜到底的粒子形变 / 实时着色器质感"才上浏览器方案——**v0.3 起它是真的可用了**，不再是"文档里说有"：
+
+```bash
+cp -r <SKILL_DIR>/assets/web ./web                     # 页面模板（原生 Canvas2D，零三方库）
+pip install playwright && python -m playwright install chromium   # 只在走 web 引擎时需要
+python render.py ... --engine web --stage cues        # 从页面导出提示点
+python render.py ... --engine web --stage frames --jobs 3 --resume
+python webengine.py textqa ./web/index.html            # 文字重叠/出画/一闪而过/从没露面
+```
+
+两条路线的取舍（**先想清楚再选，换引擎要重做画面**）：
+
+| | PIL（`engine: pil`） | 浏览器（`engine: web`） |
+|---|---|---|
+| 依赖 | numpy + Pillow（+cv2 做锐度比） | + playwright + Chromium/Edge |
+| 速度 | 40–100 帧/秒 | 3–6 帧/秒（逐帧截图，慢一个数量级） |
+| 画面语言 | 位图合成、渐变、几何、文字 | Canvas2D/WebGL：粒子、形变、着色器、矢量动画 |
+| 确定性 | 天然（纯函数画图） | 靠"把时间轴精确 seek 到 f/FPS"保证（`window.renderFrame`） |
+| 调试 | 改一帧跑一帧 | 浏览器里 `index.html?dev=1&t=秒` 直接看，出了 bug 好查 |
+| 适合 | 图文/数据/科普/宣传片 | 纪录片级长片、需要一镜到底的视觉语言 |
+
+**浏览器引擎的三条硬约束**（`webengine.py` 已实现，自己写页面时也要守）：
+1. 所有补间放在一条**暂停的**主时间轴上，渲染第 f 帧 = 把它 seek 到 `f / FPS` 秒；**不许依赖播放**。
+2. 循环/粒子/波浪这类程序化内容用"按时间直算"的更新器（`update(fn)`），不许用 `setInterval` 累加。
+3. 页面必须暴露 `window.ready / DURATION / renderFrame(f) / getCues()`；**不连 CDN、不请求网络**。
 
 ## 4. 画质清单（这几项决定"像不像专业片"）
 
@@ -104,12 +141,149 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 - **调色**：整片一个主色 + 一个强调色，别超过 4 个色相。
 - **音频**：母带 -16 LUFS / 真峰 ≤ -1 dBTP；旁白比间隙响 12 dB 以上；AAC 前留 1.4 dB 余量。
 
-## 5. 质检门禁（交付前必过）
+## 5. 声音：配乐 + 音效 + 提示点（v0.3.0）
+
+> 这一节的思路来自一部真实成片（`ai-history-film`）的复盘：**声音不好不是"混得不够响"，而是"声音不认识画面"**。
+> 解决顺序永远是：先让声音知道画面上发生了什么（提示点），再谈音色，最后才是母带。
+
+### 5.1 三层声音
+
+| 层 | 谁做 | 落盘 | 说明 |
+|---|---|---|---|
+| 旁白 | `filmkit.tts`（edge-tts） | `work/tts/*.mp3` | **唯一的时长权威**：时间轴由它反推 |
+| 配乐 | `scorekit.py`（程序化） | `work/music.wav` | 和弦表 + 律动层 + 分段能量；段落边界对齐小节线 |
+| 音效 | `sfxkit.py`（物理建模） | `work/sfx.wav` | 按 `cues.json` 里登记的提示点逐条合成 |
+
+三条总线在 `--stage audio` 里合成：**音效响起时配乐自动让位**（`duck_db`，默认 3 dB），
+最后交给 ffmpeg 两遍 loudnorm 到 -16 LUFS / 真峰 ≤ -1 dBTP。**不要**自己在 numpy 里做最终响度标准化——
+你有 `loudnorm`，它比手写归一化准得多，而且真峰才是门禁。
+
+### 5.2 提示点：让声音跟着画面走
+
+**这是 v0.3 最重要的一个概念。** 画面在该响一下的地方登记一个提示点，音频阶段按提示点合成音效：
+
+```python
+# 方式一：写在 film.json 里（好改，适合少量关键音效）
+"sfx": {"cues": [
+  {"at": "l03+0.05", "type": "impact", "size": 1.1},
+  {"at": "abs:12.5", "type": "whoosh", "dur": 0.9}
+]}
+
+# 方式二：写在 scenes.py 的 cues() 钩子里（推荐——画面改了声音自动跟着改）
+def cues(tl, script):
+    out = []
+    for s in tl["scenes"]:
+        for i, _it in enumerate(s.get("items") or []):
+            out.append({"at": "%s+%.2f" % (s["id"], 0.48 + 0.32 * i), "type": "ui_blip"})
+    return out
+
+# 方式三：web 引擎里由页面导出（提示点跟着动画代码走）
+S.cue(t, 'impact', {size: 1.1});   // 页面里的时刻是"本幕局部秒"
+python render.py ... --engine web --stage cues   # 自动导出 work/cues.json
+```
+
+`at` 有三种写法：`"abs:12.5"`（绝对秒）、`12.5`（数字同义）、`"l03+0.35"` / `"l03-0.2"`（段 id ± 偏移）。
+
+**为什么值得多写这一层**：改一句台词、加一个停留窗口、把 BPM 从 120 改成 100，
+所有音效仍然贴着画面，不需要重新对时间。纯手工"在 12.5 秒放一声"的方案，改一次节奏就全废。
+
+### 5.3 配乐（scorekit）
+
+```json
+"bpm": 120,
+"music": {"enabled": true, "mode": "score", "key": "Dm", "gain_db": -1.5, "duck_db": 3.0,
+          "sections": [{"at": "l01", "name": "intro", "energy": 0.3},
+                       {"at": "l03", "name": "drive", "energy": 0.8}]}
+```
+
+- **一张和弦表贯穿全片**，段落之间只换"色彩与能量"，不换调——这是"听起来像一首曲子"而不是"一堆配乐"的关键。
+- `energy` 控制律动层数（pad / bass / kick / hat / arp）与亮度；安静段比律动段低 4–8 dB。
+- 段落边界**对齐小节线**（按 `bpm` 算），画面重音才落在拍点上。
+- 重击前用 `Score.suck()` 让配乐"吸一口气"（压低 3–8 dB、0.2 s 内恢复），落差立刻出来——
+  **不要**用静音断层，那会让声音像断了。
+- `"mode": "bed"` 是 v0.2 的和弦床兜底；`"mode": "off"` 不要配乐。
+
+### 5.4 音效（sfxkit）
+
+`sfxkit` 是**物理建模**而不是"画波形"：撞击 = 材质（衰减率）× 形状（模态比）× 敲击位置 × 接触时间；
+风 = 噪声 + 时变滤波（参数由慢变控制曲线驱动）；雨/火 = 泊松事件 + 幂律幅度 + 多核散布。
 
 ```bash
-python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数
-python selfcheck.py                 # 技能自身回归（14 条曾真的坏过的点）
+python sfxkit.py --list                      # 全部配方与参数
+python sfxkit.py --render impact --seed 3 --set size=1.2 --out /tmp/i.wav
+python -c "import sfxkit; print(sfxkit.render('whoosh', dur=1.2).shape)"
 ```
+
+常用配方（**cue 的 `type` 就是这些名字**）：
+
+| 用途 | 配方 |
+|---|---|
+| 界面/提示 | `ui_blip` `ui_click` `relay_click` `roulette_tick` `answer_chime` |
+| 文字 | `typing` `typing_at`（逐字对齐，`times` 是相对提示点的秒数组） `text_stream` |
+| 转场 | `whoosh` `riser` `impact` `sub_drop` `reverse_swell` `glitch` `tape_rewind` |
+| 环境 | `wind` `rain` `campfire` |
+| 撞击 | `knock_wood` `metal_hit` `glass_clink` `go_stone` |
+
+**音效设计的三条经验**（都是踩过坑才写下的）：
+
+1. **"叮叮咚咚"是头号污染源**：有音高的小提示音多了就变成八音盒。全片只留几个**关键**的叮
+   （开场任务完成、认出猫、片尾），其余换成不带音高的"咔嗒"。
+2. **"嗖"要从物理出发**：多普勒 + 1/r 音量钟形 + 越远越闷 + 地面反射的梳状相位。
+   合成器式的扫频"咻"听起来像电子音，物理飞过模型才像"有东西飞过去"。
+   它的定位是**环境声**：基准电平要比同刻配乐低 10 dB 以上。
+3. **音量一律在成片混音里量**，不要按配方内部音量推断——混音时每个音效会先按峰值归一，配方里的"响"是没用的。
+
+### 5.5 混音链（照着做，别自创）
+
+```
+旁白(单声道, 居中) ─┐
+配乐(立体声) ───────┼─> duck(音效包络, -3dB) ─> 求和 ─> 峰值保护(0.89) ─> ffmpeg loudnorm 两遍 ─> -16 LUFS / TP<=-1
+音效(立体声) ───────┘
+```
+
+- 旁白比配乐高 12 dB 以上（听清台词是第一优先）。
+- 配乐比音效低 1.5 dB 左右；音效响时配乐最多让 3 dB（让得太多会"音乐一抖一抖"）。
+- 母带压缩要**轻**（threshold -9 / ratio 1.5 量级）：重击前后必须有能量差，压太狠就"一直很吵、没有高潮"。
+- 成片音轨必须 48 kHz（`mux` 已显式 `-ar 48000`，selfcheck 第 12 条守着）。
+
+## 6. 停留窗口：让观众看清楚，而不是整片放慢（v0.3.0）
+
+> 来自同一部成片的复盘："部分画面没看清就被切走了"。**解决办法不是把整片放慢，而是按内容加停留。**
+
+```jsonc
+"hold": 0.4,                 // 每句语音结束后统一多停 0.4 s
+"lines": [{"id": "l03", "hold": 1.2, ...}]   // 这一句单独停 1.2 s
+```
+
+- `hold` 只加在**语音结束后**，不影响旁白节奏；句子读得还是那么快，只是停在画面上的时间变长。
+- 加长量取 `0.5 s`（120 BPM 的八分音符）的整数倍，画面重音仍落在拍点上。
+- 配乐 `sections` 用 `at: "l03"` 而不是绝对秒——停留窗口一改，段落边界自动跟着走。
+- `bar` 字段可以让每段时长自动对齐小节（`"bar": 2.0` = 120 BPM 一小节），**代价是段落时长不再精确等于
+  语音+停留**，只在对齐更重要时才用。
+
+**判断哪里需要停留**（按顺序看这三条）：
+1. 画面上出现了**要读的字**（数字滚完、卡片落定、字幕出齐）→ 至少留 `0.5 s + 字数/9`。
+2. 出现了**要理解的结构**（网络层次、坐标轴、流程图）→ 留到能扫一眼看完。
+3. 两个镜头之间**没有内容连续性**（黑一下、空一拍）→ 让下一幕提前开始，而不是加长黑场。
+
+## 7. 质检门禁（交付前必过）
+
+```bash
+python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
+python selfcheck.py                 # 技能自身回归（23 条曾真的坏过的点）
+python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
+```
+
+**质检分三层**，一层比一层更接近"观众真的看到了什么"：
+
+| 层 | 查什么 | 工具 | 抓得住什么 |
+|---|---|---|---|
+| 容器层 | 分辨率/帧率/音轨/时长/码率 | `ffprobe`（`filmkit.probe`） | 参数写错、音轨丢了 |
+| 信号层 | 响度/真峰/锐度比/黑帧/静音/字幕条数 | `filmkit.qa_report` | 像草稿、文字发虚、静默丢字幕 |
+| **时间层（v0.3）** | **单帧闪烁 / 画面空窗 / 音画同步 / 响度曲线** | `qa_frames.py` | **"一帧白闪""两秒没东西看""重击没声音"** |
+| 页面层（web 引擎） | 文字重叠/出画/一闪而过/从没露面 | `webengine.py textqa` | 页面里被别的元素压住的字 |
+
+时间层需要单独说，因为它是**唯一靠"看完全片"才能发现**的一类问题：单看任何一帧都正常。
 
 | 判据 | 阈值 | 失败怎么办 |
 |---|---|---|
@@ -120,6 +294,9 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 | **真峰** | **≤ -1 dBTP** | 混流前目标设 -1.5（AAC 会把真峰抬高 ~0.9 dB） |
 | **编码锐度比** | **≥ 0.85** | 降 CRF 或提 preset |
 | 长黑帧 | 首尾以外 0 段 | 检查素材/淡入淡出 |
+| **单帧闪烁（v0.3）** | **0 条** | 位移/推力没归零、粒子贴镜头过曝、转速突变；见 §8 故障速查 |
+| **画面空窗（v0.3）** | 首尾以外 0 段（≥0.8 s 近黑） | 转场之间没有内容连续性：让下一幕提前开始 |
+| **音画同步（v0.3）** | 视觉事件与提示点 `dt ≤ 60 ms` | 提示点挂在"动画时刻"上，别挂在字幕时刻上 |
 | 字幕安全区 | `qa_text_safe` 无警告（≤2 行、不越界、不触底） | 缩短字幕或调 SUB_BAND |
 | **字幕条数** | **= 剧本句数** | 少一条就是静默丢字幕，查 `sub_window` 与 `write_srt` |
 | 缺字形 | `check_glyphs` 无警告 | 改文字或用矢量线条画（msyhbd 缺 ✓ × ↵ 等） |
@@ -134,7 +311,48 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 
 **"不能有"和"必须有"两类都要查**：闪烁/重叠/出画/削波是"不能有"；图名框/淡入/字幕/每段至少一个动态元素是"必须有"——后者最容易静默失效。
 
-## 6. 常见故障速查
+**时间层门禁怎么读**（`work/qa/deep.json`）：
+
+| 字段 | 意义 | 判据 |
+|---|---|---|
+| `flicker[]` | 只亮一帧的格子：`|F[t]-(F[t-1]+F[t+1])/2|` 分块超阈值 **且** `|F[t+1]-F[t-1]|` 很小（"回到原位"——加速运动不满足这条） | 0 条；有的话 `bbox` 告诉你在画面哪个位置 |
+| `black_windows[]` | ≥0.8 s 近黑（片头片尾不算） | 0 段；有就补内容连续性 |
+| `sync[]` | cue 与视觉事件的时间差 | 全部 `|dt| ≤ 0.06 s` |
+| `luma[]` / `loudness[]` | 逐帧亮度 / 短时响度曲线 | 看形状：有没有"该有起伏的地方一条直线" |
+
+**别把"重击"当闪烁**：设计好的闪白/震屏会出现在 `events` 里（web 引擎由页面导出，pil 引擎写进 `cues.json`），
+`qa_frames` 会先排除它们再报 `flicker`。没登记却又闪的，才是 bug。
+
+**也别把"运动最快的一帧"当闪烁**：二阶差分对加速运动天生过敏（逐字入场、缓动推近、
+交界黑场的起坡帧）。所以判据还有第三道闸——**单帧事件必须"回到原位"**：
+`|F[t+1] - F[t-1]|` 要远小于中间帧的偏离量（`FLICKER_RETURN_RATIO = 1.6`）。
+高分（≥10）但被判成运动的候选**会进 warning**（"高分异常被判为运动，建议人工复核"）——
+**门禁可以保守，但不能静默**。
+
+实测反例（本技能自带的 web 模板片）：报了 3 处闪烁，逐一逐帧查下来**全部是**
+"最后一个字入场"和"交界黑场起坡"这两类加速运动；加上这道闸后归零，
+而 selftest 里注入的单帧白闪仍然能被检出——**没被削弱的门禁才叫门禁**。
+调阈值之前先确认这条闸在不在：没有它，你会把正常运动当 bug，改到死。
+
+### 音画同步的命名约定（门禁会不会静默失效就看这条）
+
+`sync_check` **先按 `events.kind == cue 的配方名` 配对**。所以画面里"该响一下"的事件，
+kind 要写成**同一个配方名**：
+
+```js
+S.cue(0.62, 'impact', {size: 1.15});   // 音频：配方名 impact
+S.event(0.62, 'impact', {});           // 画面：同名的 visual event
+S.event(0.62, 'ring',   {});           // 纯装饰事件：用通用名，不参与配对
+```
+
+**不这么写会怎样**：页面只导出 `flash / shake / ring` 而 cue 是 `impact / whoosh` 时，
+同 kind 永远配不上、跨 kind 又只做确认，`sync` 会恒为空 —— **看起来"零超差"，其实一条都没在查**。
+
+两道保护：
+1. `qa_frames` 发现"cues 与 events 没有任何同名项"时**主动给 warning**（"音画同步检查可能没生效"）；
+2. 自查：故意把某个 cue 的时刻改错 0.3 s 重跑，**必须**能报出超差。不报就是没配上。
+
+## 8. 常见故障速查
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
@@ -164,23 +382,31 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 | 混音偶发爆表 | 归一化分支没执行 / 叠加峰值 >1 | `AudioBus.mix()` 会打印叠加峰值并软限幅，峰值 >0.97 报警 |
 | **成片音轨变成 96kHz** | mux 没指定 `-ar`，loudnorm 内部升到 192kHz 后 AAC 取了 96k | mux 显式 `-ar 48000`（v0.2 已内置，selfcheck 第 12 条守着） |
 
-## 7. 参考资料（按需加载）
+## 9. 参考资料（按需加载）
 
 - `references/pipeline.md` — 八阶段详细规格、契约 JSON 格式、目录约定、并行分工
 - `references/scene-authoring.md` — 场景函数写法、构图规则、Canvas/CDP 方案、超采样与后处理
-- `references/audio.md` — 采样级混音、程序化配乐/音效、响度链路、循环环境音
+- `references/audio.md` — 采样级混音、程序化配乐/音效、响度链路、循环环境音、提示点系统
+- `references/sfx-design.md` — **（v0.3）音效设计**：物理拆解流程、配方表、听感诊断表、QC 规则
+- `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
+- `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
 - `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
 
-## 8. 脚本资产
+## 10. 脚本资产
 
 | 文件 | 作用 |
 |---|---|
-| `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/TTS/时间轴/FrameSink/合成/质检 |
-| `scripts/render.py` | 编排器：7 个独立 stage、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
-| `scripts/selfcheck.py` | 回归自检：14 条"曾真的坏过"的断言，不联网 10 秒出结论 |
-| `assets/scenes.py` | 场景模板（3 种示范：开场/正文卡片/收尾），含缓存排版与预烘焙背景的正确写法 |
-| `assets/film.json` | 剧本模板（含 `trim_silence`/`tts_workers`/`sub_max_hold`/`chunk_frames` 等新字段） |
+| `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
+| `scripts/render.py` | 编排器：**10 个独立 stage**、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
+| `scripts/selfcheck.py` | 回归自检：**23 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
+| `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
+| `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
+| `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
+| `scripts/qa_frames.py` | **（v0.3）帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
+| `assets/scenes.py` | 场景模板（开场/正文卡片/收尾 + **`cues()` 提示点钩子示范**），含缓存排版与预烘焙背景的正确写法 |
+| `assets/film.json` | 剧本模板（含 `hold`/`bpm`/`music`/`sfx.cues`/`engine` 等新字段） |
+| `assets/web/` | **（v0.3）浏览器页面模板**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本 |
 
 ### 关键内置能力（v0.2）
 
@@ -196,7 +422,7 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 | `K.write_ass(...)` | 直接输出 ASS，头里声明 PlayResX/Y=1920/1080 |
 | `K.encode_quality(film, ref_img=...)` | 锐度比；参考帧必须来自场景函数，不能是成片抽帧 |
 
-## 9. 验收话术（不要自我宣称"做好了"）
+## 11. 验收话术（不要自我宣称"做好了"）
 
 交付时必须能贴出：
 1. `ffprobe` 的时长/分辨率/码率
@@ -205,10 +431,22 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 4. 联系表路径 + "已用 read_image 亲眼确认"的**具体观察**（不是"看起来不错"）
 5. 字幕条目数 = 剧本句数（无静默丢失）
 6. `python selfcheck.py` 的 PASS 计数
+7. **（v0.3）帧级深检的三个数**：单帧闪烁 N 条 / 画面空窗 N 段 / 音画同步超差 N 条
+   （有 web 引擎时再加页面层的 文字重叠 / 出画 / 一闪而过 / 从没露面 四项）
+
+> 完整示例（本技能自带模板片的实测，可以照这个格式抄）：
+> ```
+> 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
+> 信号：-16.0 LUFS / 真峰 -1.3 dBTP / 锐度比 0.93 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
+> 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步最大偏差 0 ms
+> 自检：selfcheck PASS 23 / FAIL 0 / SKIP 0
+> 目检：work/qa/sheet.png，四帧分别为开场星射线、两栏卡片正文、收尾居中大字；
+>       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
+> ```
 
 > 自查口令：如果一条门禁从来没失败过，先确认它是不是根本测不到。
 
-## 10. 作者机器已验证的环境事实（2026-11-06 实测）
+## 12. 作者机器已验证的环境事实（2026-11-07 实测）
 
 > **本节是作者机器（Windows 11 + Ryzen AI 9 HX 370 + OSGeo4W Python 3.12）的实测基准，不是跨机器承诺。**
 > 换机后请先用 5 分钟重测：`ffmpeg -version`（是否有 libx264/aac/loudnorm）、
@@ -232,8 +470,19 @@ python selfcheck.py                 # 技能自身回归（14 条曾真的坏过
 | 编码速度 | x264 `-preset medium -crf 17` = **141 fps（4.7× 实时）**；x265 94 fps；vp9 65 fps |
 | 硬件编码 | h264_amf 127 fps —— **不比 x264 快，体积大 2.5 倍，不用** |
 | 端到端 | 17.47 s 成片（524 帧 + 3 句旁白）编码 4.99 s = **3.5× 实时** |
-| 实测渲染 | PIL 中等复杂度场景 **40–54 fps**（1080p30） |
+| 实测渲染 | PIL 中等复杂度场景 **40–54 fps**（1080p30）；v0.3 模板片实测 **75 fps** |
 | 磁盘 | C 剩 307 GB / D 剩 521 GB |
+
+### v0.3.0 各模块实测（同机，2026-11-07）
+
+| 模块 | 实测数据 |
+|---|---|
+| `sfxkit` | 24 配方单次渲染 ≤ 0.85 s；**389 s 长环境声** wind 5.95 s / rain 7.36 s / campfire 6.25 s；真峰与 ffmpeg 差 **0.05 dB**；响度与 ebur128 差 **0.01 LU** |
+| `scorekit` | 389 s 全片 **6.7–8.2 s**（预算 60 s）；60 s 实测 3.2 s；输出 -18.5 LUFS / -1.44 dBTP（母带交给 loudnorm） |
+| `webengine` | **82 ms/帧**（1080p30，Edge 无头，软件渲染路径）；12 s / 360 帧 **29.9 s**；同帧两次截图 **byte 完全一致** |
+| `qa_frames` | 30 s 片全量深检 **约 2 s**（160×90 流式解码 903 帧）；闪烁/空窗/同步三项 |
+| 端到端 | 30.10 s 模板片：TTS 4 句 → cues 13 条 → 配乐 3.3 s → 音效 13 条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
+| Python 依赖 | **playwright 已装**（chromium + msedge 均可用）；scipy 1.18 已装（sfxkit 可选，缺了走 FFT 兜底）；`soundfile` **没装**（本技能不依赖它） |
 
 ### 排期公式（保守）
 
@@ -249,9 +498,26 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 2. **`-stream_loop -1` 让 `-shortest` 失效**：会产生 13 小时的怪物文件。循环输入必须配显式 `-t`。
 3. **`amix` 默认 `normalize=1`**：按输入数均分，2 路输入直接掉 6 dB。要么 `normalize=0`，要么走 numpy 总线（推荐）。
 
-## 11. v0.2 升级须知（从 v0.1 迁移要动的地方）
+## 13. 升级须知（从旧版迁移要动的地方）
 
-v0.2 修的全是"v0.1 的承诺没有兑现"的地方，因此有不兼容变更：
+### 13.1 v0.2 → v0.3.0
+
+**兼容性优先：老项目不做任何改动也能跑**（`engine` 默认 `pil`、`music.mode` 缺省时按老的和弦床走、`whoosh` 行为保留）。
+
+| 变更 | v0.2 | v0.3.0 | 你要做什么 |
+|---|---|---|---|
+| stage 列表 | 7 个 | **10 个**（+cues/score/sfx） | `--stage all` 顺序变了；单独跑多阶段时补 `--stage cues sfx` |
+| 渲染引擎 | 只有 PIL | `--engine pil\|web` | 想用浏览器就拷 `assets/web/` 并装 playwright |
+| 配乐 | 只有和弦床 | 有 `bpm` 时用 scorekit | 想保留旧声音：`"music": {"mode": "bed"}` 或不写 `bpm` |
+| 音效 | 每段一声 whoosh | 按 `cues.json` 合成 | 想保留旧行为：不写 `sfx.cues`、不写 `scenes.cues()`，且不跑 `--stage cues` |
+| 混音 | 旁白+配乐两路 | 旁白+配乐+音效三路（带 duck） | 无（自动） |
+| 时间轴 | lead/tail/min_dur | + `hold` / `bar` | 想加停留就写 `hold` |
+| 质检 | 成片级 | + 帧级深检（有 `qa_frames.py` 时） | 无（自动；没这个文件就跳过） |
+| qa 退出码 | 恒 0 | **有 FAIL 就返回 1** | CI 里会开始真的失败——这是故意的 |
+
+**新增文件**：`sfxkit.py` / `scorekit.py` / `webengine.py` / `qa_frames.py` / `assets/web/`（都是可选，缺失时对应能力自动降级并打印 WARN）。
+
+### 13.2 v0.1 → v0.2（历史）
 
 | 变更 | v0.1 | v0.2 | 迁移动作 |
 |---|---|---|---|
@@ -265,18 +531,21 @@ v0.2 修的全是"v0.1 的承诺没有兑现"的地方，因此有不兼容变�
 | 锐度比 | 参考帧用成片抽帧 → 恒 ≈1.0 | 参考帧由场景函数重新渲染 | 无（`st_qa` 已改） |
 | TTS 音频 | 保留 edge-tts 尾部 ~0.95s 静音 | 默认裁掉首尾静音 | 想保留：`"trim_silence": false` |
 
-**新增文件**：`scripts/selfcheck.py`（14 条回归）、`work/sub.ass`（ASS 字幕，PlayRes 正确）。
-
-## 12. 换机 60 秒自检（比读文档快）
+## 14. 换机 60 秒自检（比读文档快）
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py          # 14 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 23 条断言；FAIL 就照提示修环境
+python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
+python scorekit.py --selftest        # 配乐
+python webengine.py --selftest       # 浏览器引擎（会真起一次无头浏览器，约 3 秒）
+python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
 ```
 
 selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依赖任何成片**。
-每条 FAIL 都对应一个具体环境缺口（缺字体 / ffmpeg 无 libx264 / 无 numpy），
-报错信息直接写该改哪里。
+每条 FAIL 都对应一个具体环境缺口（缺字体 / ffmpeg 无 libx264 / 无 numpy / 缺 sfxkit），
+报错信息直接写该改哪里。可选模块缺失时 selfcheck 标 `SKIP` 而不是 FAIL——
+**别把"没装可选件"和"坏了"混为一谈**。
 
 ### v0.2 在本机实测（2026-11-07，同一台机器）
 

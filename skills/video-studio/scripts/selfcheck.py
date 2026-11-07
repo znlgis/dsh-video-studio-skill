@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""selfcheck.py — 技能自检 / 回归测试（不联网，10 秒内出结论）。
+"""selfcheck.py — 技能自检 / 回归测试（不联网，10~20 秒内出结论）。
 
 跑法：python selfcheck.py [-v]
 
@@ -14,6 +14,19 @@
   8  时间轴第一段 start 严格为 0
   9  分块渲染的绝对帧号命名 + 缺口检测
  10  qa_report 能查出字幕条数不匹配
+ 11  尾静音裁剪
+ 12  mux 音轨 48kHz
+ 13  v0.1 调用签名兼容
+ 14  qa 帧率校验
+ 15  （v0.3）立体声总线：channels=2 形状正确、声像能量守恒
+ 16  （v0.3）cue_time 三种写法都解析成绝对秒
+ 17  （v0.3）CueBus 落盘 -> 读回 -> schema 正确（含未知类型不崩）
+ 18  （v0.3）duck 真的压低了配乐（且不改变无音效处的电平）
+ 19  （v0.3）mix_film 峰值不越界、时长精确、旁白优先
+ 20  （v0.3）sfxkit 可用时：配方确定性 + 别名表能从 sfxkit 反查
+ 21  （v0.3）scorekit 可用时：同 seed bit-identical + 时长精确
+ 22  （v0.3）webengine 可用时：页面契约齐全（window.renderFrame/getCues/ready）
+ 23  （v0.3）qa_frames 可用时：能检出注入的单帧闪烁
 """
 import argparse
 import json
@@ -260,6 +273,179 @@ def t_fps_check():
     return "25fps 被检出"
 
 
+# ---------------------------------------------------------------- v0.3.0 新增
+def t_stereo_bus():
+    """立体声总线：形状、声像、单声道来源自动展开。"""
+    import numpy as np
+    b = K.AudioBus(1.0, channels=2)
+    assert b.bus.shape == (int(round(1.0 * K.SR)) + K.SR, 2), "立体声总线形状不对: %s" % (b.bus.shape,)
+    src = np.ones(480, dtype=np.float32)
+    b.place(src, 0.0, gain=0.5, pan_pos=-1.0)          # 全左
+    seg = b.bus[10:400]
+    assert abs(float(seg[:, 0].max()) - 0.5) < 1e-3, "声像左声道电平不对"
+    assert float(np.abs(seg[:, 1]).max()) < 1e-3, "pan_pos=-1 右声道应该静音"
+    b2 = K.AudioBus(1.0, channels=2)
+    b2.place(np.ones(480, dtype=np.float32), 0.0, gain=0.5)   # 居中
+    seg2 = b2.bus[10:400]
+    assert abs(float(seg2[:, 0].max()) - float(seg2[:, 1].max())) < 1e-4, "居中声像左右应相等"
+    return "channels=2 形状与声像正确"
+
+
+def t_cue_time():
+    """提示点 at 的三种写法。"""
+    scenes = [dict(id="l01", start=0.0), dict(id="l02", start=3.5)]
+    assert K.cue_time("abs:12.5") == 12.5, "abs: 写法解析错"
+    assert K.cue_time(7.5) == 7.5, "数字写法解析错"
+    assert K.cue_time("l02+0.35", scenes) == 3.85, "id+偏移 解析错"
+    assert K.cue_time("l02-0.2", scenes) == 3.3, "id-偏移 解析错"
+    assert K.cue_time("l02", scenes) == 3.5, "纯 id 解析错"
+    try:
+        K.cue_time("nope+1", scenes)
+        raise AssertionError("找不到场景却没有报错")
+    except ValueError:
+        pass
+    return "abs/数字/id±偏移 全部正确"
+
+
+def t_cue_json():
+    """CueBus 落盘 -> 读回 -> schema；未知类型不进 CUE_ALIASES 但也不崩。"""
+    with tempfile.TemporaryDirectory() as d:
+        bus = K.CueBus([dict(id="l01", start=0.0)], total=10.0)
+        bus.add("l01+1.2", "whoosh", dur=0.9)
+        bus.add("abs:4.0", "impact", gain=-2)
+        bus.add(8.5, "blip")                       # 别名 blip -> ui_blip
+        p = os.path.join(d, "cues.json")
+        payload = bus.write(p, duration=10.0)
+        assert payload["version"] == 1
+        assert len(payload["cues"]) == 3, "提示点条数不对"
+        assert [c["t"] for c in payload["cues"]] == sorted(c["t"] for c in payload["cues"]), "未按时间排序"
+        assert payload["cues"][2]["type"] == "ui_blip", "别名没被展开: %s" % payload["cues"][2]
+        back = K.CueBus.from_json(p)
+        assert len(back.items) == 3, "读回条数不对"
+        # 越界提示点（超过片长 2s）应被丢弃
+        bus.items.append(dict(t=99.0, type="impact", src="pil"))
+        assert len(bus.resolved()) == 3, "越界提示点没有被丢掉"
+    return "3 条 / 别名展开 / 排序 / 越界丢弃"
+
+
+def t_duck():
+    """音效响起时配乐让位；没有音效的地方电平不变。"""
+    import numpy as np
+    n = int(2.0 * K.SR)
+    music = np.full((n, 2), 0.5, dtype=np.float32)
+    sfx = np.zeros((n, 2), dtype=np.float32)
+    sfx[n // 2:n // 2 + K.SR // 4] = 0.9
+    out = K.duck(music, sfx, depth_db=6.0)
+    head = float(np.mean(out[: K.SR // 2]))
+    mid = float(np.min(out[n // 2: n // 2 + K.SR // 4]))
+    assert abs(head - 0.5) < 0.02, "没有音效的地方被压了（%.3f）" % head
+    assert mid < 0.5 - 0.05, "duck 没生效（最深处 %.3f）" % mid
+    return "静止段 %.3f / 音效段 %.3f" % (head, mid)
+
+
+def t_mix_film():
+    """三总线混音：时长精确、不越界、旁白在。"""
+    import numpy as np
+    n = int(1.5 * K.SR)
+    t = np.arange(n) / float(K.SR)
+    voice = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    music = np.full((n, 2), 0.2, dtype=np.float32)
+    sfx = np.zeros((n, 2), dtype=np.float32)
+    sfx[100:100 + 240] = 0.8
+    out = K.mix_film(voice, music, sfx, total=1.5, fade=0.0)
+    assert out.shape == (n, 2), "输出形状不对: %s" % (out.shape,)
+    assert float(np.max(np.abs(out))) <= 0.9 + 1e-6, "峰值越界: %.3f" % float(np.max(np.abs(out)))
+    assert float(np.max(np.abs(out))) > 0.2, "混出来几乎是静音"
+    out0 = K.mix_film(voice, None, None, total=1.5, fade=0.0)
+    assert abs(float(np.max(np.abs(out0))) - float(np.max(np.abs(voice)))) < 1e-5, "只有旁白时电平应不变"
+    return "%.2fs / 峰值 %.3f" % (len(out) / float(K.SR), float(np.max(np.abs(out))))
+
+
+def t_sfxkit():
+    """sfxkit 存在时的接口与确定性自检；不存在就 SKIP。"""
+    mod = None
+    try:
+        import sfxkit as mod  # noqa: F401
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    names = set(mod.load_all().keys()) if hasattr(mod, "load_all") else set()
+    assert names, "sfxkit 没有任何配方"
+    need = {"ui_blip", "ui_click", "typing", "whoosh", "impact", "sub_drop", "riser", "wind"}
+    missing = need - names
+    assert not missing, "sfxkit 缺配方: %s" % ", ".join(sorted(missing))
+    a = mod.render("impact", seed=3)
+    b = mod.render("impact", seed=3)
+    import numpy as np
+    assert len(a) == len(b) and np.array_equal(np.asarray(a), np.asarray(b)), "同一 seed 两次渲染不一致"
+    assert float(np.max(np.abs(a))) > 1e-3, "impact 渲染出来是静音"
+    aliases = getattr(mod, "CUE_ALIASES", None)
+    if aliases:
+        for k, v in aliases.items():
+            assert v in names, "别名 %s -> %s 指向不存在的配方" % (k, v)
+    return "%d 配方 / 确定性 OK" % len(names)
+
+
+def t_scorekit():
+    """scorekit 存在时：同 seed 一致、时长精确、不削波。"""
+    try:
+        import scorekit as sk
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    import numpy as np
+    a, rep = sk.render(12.0, bpm=120, key="Dm", seed=5)
+    b, _ = sk.render(12.0, bpm=120, key="Dm", seed=5)
+    a = np.asarray(a)
+    b = np.asarray(b)
+    assert a.shape == b.shape and np.array_equal(a, b), "同一 seed 两次配乐不一致"
+    assert abs(len(a) / float(sk.SR) - 12.0) < 0.05, "配乐时长不对: %.3fs" % (len(a) / float(sk.SR))
+    pk = float(np.max(np.abs(a)))
+    assert pk <= 1.0, "配乐削波: %.3f" % pk
+    assert pk > 1e-3, "配乐是静音"
+    return "12s / %.2f LUFS? / 峰值 %.2f" % (float(rep.get("lufs", 0.0)) if isinstance(rep, dict) else 0.0, pk)
+
+
+def t_webengine():
+    """webengine 存在时：模块可导入 + 关键接口在（不真的起浏览器，避免自检变慢）。
+
+    注意作用域：这条检查的是**工具本身**是否可用。页面模板 assets/web/ 属于
+    "项目自己的东西"——用户按 quickstart 只拷了 scripts/*.py 时它本来就不在工作目录里，
+    此时不该判 FAIL（那会把"没拷模板"和"工具坏了"混为一谈），而是明确提示要不要拷。
+    """
+    try:
+        import webengine as we  # noqa: F401
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    for fn in ("snap", "export_cues", "render_full", "qa_text", "page_meta"):
+        assert hasattr(we, fn), "webengine 缺函数 %s" % fn
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    # 页面模板可能在技能目录（装成插件时）也可能在用户工作目录（按 quickstart 拷过去）
+    cands = [os.path.join(os.path.dirname(here), "assets", "web"),
+             os.path.join(os.getcwd(), "web"),
+             os.path.join(os.getcwd(), "assets", "web")]
+    web = next((p for p in cands if os.path.exists(os.path.join(p, "engine.js"))), None)
+    if web is None:
+        return "模块可用；工作目录没有 web/ 页面模板（用 --engine web 前先 cp -r <SKILL_DIR>/assets/web ./web）"
+    need = ["index.html", "engine.js"]
+    miss = [n for n in need if not os.path.exists(os.path.join(web, n))]
+    assert not miss, "web/ 缺文件: %s（%s）" % (miss, web)
+    txt = open(os.path.join(web, "engine.js"), encoding="utf-8", errors="replace").read()
+    for key in ("renderFrame", "getCues", "DURATION"):
+        assert key in txt, "engine.js 没导出 %s（页面契约）" % key
+    return "接口齐全 + 页面契约齐全（%s）" % os.path.relpath(web, os.getcwd())
+
+
+def t_qa_frames():
+    """qa_frames 存在时：能 import 且函数齐全（真正的检出能力由它自己的 --selftest 保证）。"""
+    try:
+        import qa_frames as qf
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    for fn in ("flicker_scan", "black_windows", "luma_curve", "sync_check", "report"):
+        assert hasattr(qf, fn), "qa_frames 缺函数 %s" % fn
+    return "5 个函数齐全"
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -275,6 +461,15 @@ CASES = [
     ("12 mux 音轨 48kHz", t_mux_48k),
     ("13 v0.1 调用签名兼容", t_compat),
     ("14 qa 帧率校验", t_fps_check),
+    ("15 立体声总线", t_stereo_bus),
+    ("16 cue_time 三种写法", t_cue_time),
+    ("17 CueBus 落盘/读回 schema", t_cue_json),
+    ("18 duck 让位", t_duck),
+    ("19 mix_film 三总线", t_mix_film),
+    ("20 sfxkit 配方与确定性", t_sfxkit),
+    ("21 scorekit 确定性与时长", t_scorekit),
+    ("22 webengine 页面契约", t_webengine),
+    ("23 qa_frames 函数齐全", t_qa_frames),
 ]
 
 

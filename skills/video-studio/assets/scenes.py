@@ -200,3 +200,26 @@ DRAWERS = {"hook": scene_hook, "body": scene_body, "outro": scene_outro}
 def draw_frame(scene, t_local, dur, t_global, script, frame):
     fn = DRAWERS.get(scene.get("kind") or "body", scene_body)
     return fn(scene, t_local, dur, t_global, script, frame)
+
+
+# ---------------- 提示点（v0.3.0，可选） ----------------
+def cues(tl, script):
+    """画面提示点钩子：render.py --stage cues 会调它（没有这个函数就不调）。
+
+    好处是"声音跟着画面的像素走"：这里算的是卡片落位、数字滚完的时刻，
+    画面一改，声音自动跟着改，不用回来手工对时间。
+
+    返回 [{"at": 时刻, "type": 配方名, ...参数}]；
+      at 可以写 "abs:12.5" / 12.5 / "l03+0.35"（相对该段 start）/"l03"
+      type 见 references/sfx-design.md 的配方表，或 sfxkit.list_recipes()
+    """
+    out = []
+    for s in tl["scenes"]:
+        if s.get("kind") == "body":
+            # 条目逐条落位：第一项在 0.45s 出现，之后每 0.32s 一个（和场景里 _soft_dot 的节拍一致）
+            for i, _it in enumerate(s.get("items") or []):
+                out.append({"at": "%s+%.2f" % (s["id"], 0.48 + 0.32 * i),
+                            "type": "ui_blip", "pitch": 1760.0 + 110.0 * i, "gain": -6})
+        if s.get("kind") == "outro":
+            out.append({"at": "%s+0.35" % s["id"], "type": "answer_chime", "gain": -4})
+    return out

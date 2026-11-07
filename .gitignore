@@ -5,9 +5,12 @@ node_modules/
 Thumbs.db
 
 # 本地试跑产物
-myfilm/
+myfilm*/
+myfil*/
 out/
 work/
+tmp_scratch_*/
+.team/
 
 # Python
 __pycache__/

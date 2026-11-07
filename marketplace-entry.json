@@ -8,6 +8,8 @@
     "ffmpeg",
     "edge-tts",
     "rendering",
+    "playwright",
+    "sfx",
     "subtitles",
     "Chinese narration",
     "视频",
@@ -16,8 +18,8 @@
     "宣传片"
   ],
   "description": {
-    "en": "Code-generated Chinese video skill plugin: script, edge-tts narration, measured timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and automated QA gates.",
-    "zh": "中文视频生成技能插件：写剧本 → edge-tts 旁白 → 实测时长排轴 → 逐帧渲染 → ffmpeg 编码 → 采样级混音 → 自动质检，可做宣传片、报告转视频、配音配字幕。"
+    "en": "Code-generated Chinese video skill plugin: script, measured TTS timeline, cue-driven programmatic SFX and score, deterministic PIL/browser frame rendering, ffmpeg encoding, sample-level mixing, and four-layer QA gates (container / signal / temporal / page).",
+    "zh": "中文视频生成技能插件：写剧本 → 实测时长排轴 → 提示点驱动配乐与音效 → PIL 或浏览器逐帧渲染 → ffmpeg 编码 → 采样级混音 → 四层质检（容器 / 信号 / 时间 / 页面）。可做宣传片、报告转视频、配音配字幕。"
   },
   "install": "dsh plugin --profile desktop add @dsh-gis/dsh-video-studio-skill",
   "added": "2026-11-06"

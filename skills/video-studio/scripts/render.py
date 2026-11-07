@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
-"""render.py — 一条命令从剧本到成片（v0.2.0）。
+"""render.py — 一条命令从剧本到成片（v0.3.0）。
 
     python render.py --script film.json --scenes scenes.py --out out/film.mp4 [--stage all]
 
-阶段（v0.2 起真正互相独立——只做该阶段的事，不顺手重渲全片）：
+阶段（每个 stage 只做自己的事，不顺手重渲全片）：
     tts     逐句合成旁白 + 实测时长（带输入校验的缓存）
-    layout  由实测时长排时间轴 -> timeline.json / sub.srt / sub.ass
-    audio   采样级混音 -> audio.wav
-    frames  逐帧渲染 -> silent.mp4（--jobs N 分块并行、--resume 断点续跑）
+    layout  由实测时长排时间轴 -> timeline.json / sub.srt / sub.ass（含停留窗口 hold）
+    cues    画面提示点 -> work/cues.json（web 引擎从页面导出，pil 引擎从 film.json 生成）
+    score   程序化配乐 -> work/music.wav（scorekit；无则跳过）
+    sfx     按提示点合成音效轨 -> work/sfx.wav（sfxkit；无则跳过）
+    audio   三总线混音（旁白 + 配乐 + 音效，音效响起时配乐让位）-> audio.wav
+    frames  逐帧渲染 -> silent.mp4（--engine pil|web；分块并行、断点续跑）
     mux     合成（视频流 copy，两遍 loudnorm）
-    qa      质检 + 抽帧 + 联系表
+    qa      质检 + 抽帧 + 联系表 + 帧级深检（闪烁/空窗/音画同步）
     stills  只渲染若干关键帧做母版预览（不生成视频）
 
-依赖顺序：tts -> layout -> audio -> frames -> mux -> qa。
+依赖顺序：tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa。
 --stage all 按顺序跑完；单跑某个 stage 时，若前置产物缺失会明确报错并提示先跑哪个。
+--engine 覆盖 film.json 的 engine：pil = Pillow 逐帧（默认，依赖最少）；web = 无头浏览器逐帧。
 """
 from __future__ import annotations
 
@@ -26,11 +30,53 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import filmkit as K
 
-STAGES = ("tts", "layout", "audio", "frames", "mux", "qa", "stills", "all")
+STAGES = ("tts", "layout", "cues", "score", "sfx", "audio", "frames", "mux", "qa", "stills", "all")
+
+# 可选模块（v0.3.0）：缺哪个就明确报错/跳过，不影响老流程
+HERE_SCRIPTS = str(HERE)
+
+
+def _opt_module(name, hint):
+    """按需 import 同目录的可选模块；缺了给一句能照着做的提示。"""
+    if HERE_SCRIPTS not in sys.path:
+        sys.path.insert(0, HERE_SCRIPTS)
+    try:
+        return __import__(name)
+    except Exception as e:                                  # noqa: BLE001
+        raise SystemExit("[缺少 %s.py] %s（%s）" % (name, hint, e)) from e
+
+
+def _try_module(name):
+    """尽力 import 可选模块；缺了返回 None（用于"有就多做一步"的增强，不阻断主流程）。"""
+    if HERE_SCRIPTS not in sys.path:
+        sys.path.insert(0, HERE_SCRIPTS)
+    try:
+        return __import__(name)
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _engine(script, override=None):
+    return (override or script.get("engine") or "pil").lower()
+
+
+def _web_entry(script):
+    """浏览器渲染的入口 HTML：film.json 的 web.entry，或项目目录下 web/index.html。"""
+    web = script.get("web") or {}
+    entry = web.get("entry") or os.path.join(script.get("_dir", "."), "web", "index.html")
+    entry = str(Path(entry).resolve())
+    if not os.path.exists(entry):
+        raise SystemExit(
+            "[缺少 web 页面] %s\n"
+            "  把 <SKILL_DIR>/assets/web/ 整个目录拷到项目里（cp -r <SKILL_DIR>/assets/web ./web），"
+            "或在 film.json 里写 web.entry 指向你自己的页面。" % entry)
+    return entry
 
 
 # ---------------------------------------------------------------- 装载
@@ -117,35 +163,245 @@ def st_layout(script, work, lines=None):
     return tl
 
 
-# ---------------------------------------------------------------- 混音
-def st_audio(tl, work, script):
-    print("== Audio")
-    total = tl["total"]
-    bus = K.AudioBus(total)
-    # 1) 旁白
+# ---------------------------------------------------------------- 提示点
+def st_cues(script, work, tl, engine="pil"):
+    """画面提示点 -> work/cues.json。
+
+    三个来源按顺序合并（后写的覆盖同类型同时间的项不做去重，音效叠加是合理行为）：
+      1. film.json 的 sfx.cues（与引擎无关，手写最直观）
+      2. scenes.py 的可选钩子 cues(tl, script)（代码里登记：画面算到哪就响到哪）
+      3. web 引擎：页面的 window.getCues()（提示点跟着动画代码走，改动画不用改 JSON）
+    """
+    print("== Cues")
+    bus = K.CueBus(tl["scenes"], tl["total"])
+    sfx_cfg = script.get("sfx") or {}
+    skipped = []
+
+    def _extend_safe(items, src):
+        """逐条登记；某条写错了（场景 id 不存在）只跳过它并记下来，不炸掉整个 stage。
+
+        全部跳过时报错——"提示点一个都没落上"和"少了两个提示点"是两回事，
+        前者说明剧本/分段对不上，不能静默出无声片。
+        """
+        n = 0
+        for it in items or []:
+            try:
+                bus.extend([it])
+                n += 1
+            except Exception as e:                          # noqa: BLE001
+                skipped.append((src, it, str(e)))
+        return n
+
+    n_json = 0
+    if sfx_cfg.get("enabled", True):
+        n_json = _extend_safe(sfx_cfg.get("cues"), "film.json")
+
+    # scenes.py 里的 cues() 钩子：允许直接返回 [{at,type,...}] 或调用 bus.add(...)
+    n_hook = 0
+    mod = None
+    if script.get("_scenes") and os.path.exists(script["_scenes"]):
+        try:
+            mod = load_module(script["_scenes"])
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] 加载 scenes.py 失败，跳过 cues 钩子:", e)
+            mod = None
+    if mod is not None and hasattr(mod, "cues"):
+        try:
+            got = mod.cues(tl, script) or []
+        except Exception as e:                              # noqa: BLE001
+            raise SystemExit("scenes.py 的 cues() 钩子报错：%s" % e) from e
+        n_hook = _extend_safe(got, "scenes.py")
+
+    # web 引擎：从页面导出（需要浏览器）
+    n_web = 0
+    events = []
+    if engine == "web":
+        from_web = _st_cues_web(script, work)
+        for it in from_web.get("cues") or []:
+            row = dict(it)
+            row["src"] = "web"
+            bus.items.append(row)
+            n_web += 1
+        events = from_web.get("events") or []
+        print("   页面导出 %d 个提示点 / %d 个视觉事件" % (n_web, len(events)))
+
+    if skipped:
+        print("   [WARN] %d 条提示点被跳过（场景 id 对不上，通常是改了剧本没同步 film.json）：" % len(skipped))
+        for src, it, err in skipped[:6]:
+            print("     %-10s %s  ->  %s" % (src, it, err.split("（")[0][:90]))
+        if not bus.items and (sfx_cfg.get("cues") or n_hook):
+            raise SystemExit("[cues] 所有提示点都落位失败：上面的 id 一个都没在 timeline 里。"
+                             "先跑 --stage layout，再核对 film.json 的 sfx.cues 用的是当前场景 id。")
+
+    payload = bus.write(os.path.join(work, "cues.json"), duration=tl["total"], events=events)
+    print("   cues.json: %d 条（film.json %d / scenes.py %d / 页面 %d）"
+          % (len(payload["cues"]), n_json, n_hook, n_web))
+    kinds = {}
+    for c in payload["cues"]:
+        kinds[c["type"]] = kinds.get(c["type"], 0) + 1
+    if kinds:
+        print("   类型:", ", ".join("%s×%d" % (k, v) for k, v in sorted(kinds.items())))
+    return payload
+
+
+def _st_cues_web(script, work):
+    """调用 webengine.export_cues 导出页面提示点（engine=web 时）。"""
+    we = _opt_module("webengine", "浏览器逐帧渲染需要 webengine.py；只用 PIL 路线可以不改 engine")
+    entry = _web_entry(script)
+    data = we.export_cues(entry)
+    return data or {}
+
+
+# ---------------------------------------------------------------- 配乐 / 音效
+def st_score(script, work, tl):
+    """程序化配乐 -> work/music.wav（scorekit 不在就跳过，不阻断出片）。"""
+    print("== Score")
+    mus = script.get("music") or {}
+    mode = str(mus.get("mode") or ("score" if mus.get("enabled", True) else "off")).lower()
+    if mode in ("off", "bed", "none") or not script.get("bpm"):
+        path = os.path.join(work, "music.wav")
+        if os.path.exists(path) and mode == "off":
+            print("   music.mode=off，沿用已有 music.wav（不重出配乐）")
+        else:
+            print("   music.mode=%s / bpm=%s -> 本次不生成程序化配乐" % (mode, script.get("bpm")))
+            if os.path.exists(path):
+                os.remove(path)
+        return None
+    sk = _try_module("scorekit")
+    if sk is None:
+        print("   [WARN] 没有 scorekit.py，跳过配乐（audio 阶段会退回和弦床）")
+        return None
+    anchors = K.scenes_anchors(tl["scenes"])
+    sections = mus.get("sections")
+    if sections:
+        # film.json 允许用 id 表述分段起点，换成绝对秒
+        fixed = []
+        for s in sections:
+            s2 = dict(s)
+            if "at" in s2:
+                s2["start"] = K.cue_time(s2.pop("at"), tl["scenes"])
+            fixed.append(s2)
+        sections = fixed
+    t0 = time.time()
+    samples, report = sk.render(float(tl["total"]), bpm=float(script["bpm"]),
+                                key=str(mus.get("key") or "Dm"), anchors=anchors,
+                                sections=sections, seed=int(mus.get("seed", 7)))
+    out = os.path.join(work, "music.wav")
+    sk.save(out, samples)
+    if report:
+        json.dump(report, open(os.path.join(work, "score.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+    samples_read, _sr = K.wav_read(out)
+    print("   music.wav %.2fs  峰值 %.3f  %.1fs" % (
+        K.wav_dur(out), float(np.max(np.abs(samples_read))), time.time() - t0))
+    return out
+
+
+def st_sfx(script, work, tl):
+    """按提示点合成音效轨 -> work/sfx.wav。没有 cues.json 就跳过。"""
+    print("== SFX")
+    cues_path = os.path.join(work, "cues.json")
+    if not os.path.exists(cues_path):
+        print("   没有 cues.json（先跑 --stage cues），本次不出音效轨")
+        return None
+    bus = K.CueBus.from_json(cues_path)
+    bus.total = float(tl["total"])
+    if not bus.items:
+        print("   cues.json 里没有提示点，跳过")
+        return None
+    sfx_cfg = script.get("sfx") or {}
+    try:
+        samples = bus.build_audio(total=tl["total"],
+                                  base_db=sfx_cfg.get("base_db"),
+                                  default_gain_db=float(sfx_cfg.get("gain_db", 0.0)))
+    except Exception as e:                                  # noqa: BLE001
+        # 音效轨是"增强"不是"必需"：sfxkit 缺失/配方不全时不要拖死整片，
+        # 但必须把原因喊出来（静默降级比报错更危险）。
+        print("   [WARN] 音效轨合成失败，本片只有一个旁白+配乐的混音：%s" % e)
+        stale = os.path.join(work, "sfx.wav")
+        if os.path.exists(stale):
+            os.remove(stale)
+        return None
+    out = os.path.join(work, "sfx.wav")
+    peak = K.wav_write(out, samples)
+    print("   sfx.wav %.2fs  峰值 %.3f  声道 %d" % (
+        K.wav_dur(out), peak, 2 if samples.ndim == 2 else 1))
+    return out
+
+
+def _voice_track(tl, script):
+    """把逐句旁白铺成一条总线，返回 (n,) 单声道。"""
+    bus = K.AudioBus(tl["total"])
     for s in tl["scenes"]:
         pcm = K.decode_pcm(s["path"])
         bus.place(pcm, s["voice_start"], gain=script.get("voice_gain", 1.0),
                   fade_in=0.02, fade_out=0.06)
-    # 2) 配乐：连续床（交叉淡化），不用逐段硬拼
+        # 记录真实语音范围，给后续"停顿处补呼吸"之类的处理用
+    return bus.bus[: int(round(float(tl["total"]) * K.SR))].copy()
+
+
+def _legacy_music(tl, script):
+    """v0.2 的和弦床（没有 scorekit / music.wav 时的兜底）。"""
     mus = script.get("music") or {}
-    if mus.get("enabled", True) and mus.get("chords"):
-        bus.music_bed(mus["chords"],
-                      seg=float(mus.get("seg", 4.0)),
-                      gain=float(mus.get("gain", 0.9)),
-                      amp=float(mus.get("amp", 0.055)),
-                      xfade=float(mus.get("xfade", 1.2)))
-    # 3) 转场音效
-    if script.get("whoosh", True):
+    if not (mus.get("enabled", True) and mus.get("chords")):
+        return None
+    bus = K.AudioBus(tl["total"], channels=2)
+    bus.music_bed(mus["chords"], seg=float(mus.get("seg", 4.0)),
+                  gain=float(mus.get("gain", 0.9)),
+                  amp=float(mus.get("amp", 0.055)),
+                  xfade=float(mus.get("xfade", 1.2)))
+    return bus.bus[: int(round(float(tl["total"]) * K.SR))].copy()
+
+
+# ---------------------------------------------------------------- 混音
+def st_audio(tl, work, script):
+    """三总线混音：旁白 + 配乐 + 音效 -> audio.wav（立体声）。
+
+    v0.3.0 起把三条总线分开处理再合：
+      - 旁白：单声道，居中（voice_gain 可调）
+      - 配乐：work/music.wav（scorekit 产出）优先；没有就用 music.mode=bed 的和弦床
+      - 音效：work/sfx.wav（按 cues.json 合成）；没有 cues 时退回 v0.2 的转场 whoosh
+    音效响起时配乐自动让位（duck_db），避免重击被配乐吃掉。
+    """
+    print("== Audio")
+    total = float(tl["total"])
+    voice = _voice_track(tl, script)
+
+    mus = script.get("music") or {}
+    music = None
+    music_path = os.path.join(work, "music.wav")
+    if os.path.exists(music_path):
+        music, _ = K.wav_read(music_path)
+        print("   配乐: music.wav（%s）" % ("scorekit" if script.get("bpm") else "外部文件"))
+    elif str(mus.get("mode") or "").lower() != "off":
+        music = _legacy_music(tl, script)
+        if music is not None:
+            print("   配乐: 和弦床（music.mode=bed 兜底；要程序化配乐请设 bpm 并跑 --stage score）")
+
+    sfx = None
+    sfx_path = os.path.join(work, "sfx.wav")
+    if os.path.exists(sfx_path):
+        sfx, _ = K.wav_read(sfx_path)
+        print("   音效: sfx.wav（按 cues.json 合成）")
+    elif script.get("whoosh", True) and not os.path.exists(os.path.join(work, "cues.json")):
+        # v0.2 兼容：没有提示点时才用"每段开头一声 whoosh"的旧行为
+        bus = K.AudioBus(total, channels=2)
         for s in tl["scenes"][1:]:
             if float(s["start"]) < 0.2:
                 continue
             bus.place(K.whoosh(0.45, amp=float(script.get("whoosh_amp", 0.06))),
                       max(0.0, s["start"] - 0.12), gain=0.7)
+        sfx = bus.bus[: int(round(total * K.SR))].copy()
+        print("   音效: 旧版转场 whoosh（没有 cues.json）")
+
+    samples = K.mix_film(voice, music, sfx, total=total,
+                         voice_gain=float(script.get("voice_gain", 1.0)),
+                         music_gain_db=float(mus.get("gain_db", -1.5)),
+                         sfx_gain_db=float((script.get("sfx") or {}).get("mix_gain_db", 0.0)),
+                         duck_db=float(mus.get("duck_db", 3.0)))
     out = os.path.join(work, "audio.wav")
-    samples = bus.mix()
     peak = K.wav_write(out, samples)
-    print("   audio.wav %.2fs  峰值 %.3f" % (K.wav_dur(out), peak))
+    print("   audio.wav %.2fs  峰值 %.3f  声道 %d" % (K.wav_dur(out), peak, 2))
     return out
 
 
@@ -196,8 +452,10 @@ def _render_chunk_worker(args):
     return _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=False)
 
 
-def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True):
-    print("== Frames")
+def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
+    print("== Frames（engine=%s）" % engine)
+    if engine == "web":
+        return _st_frames_web(tl, work, script, jobs=jobs, resume=resume)
     script = dict(script)
     script["_total"] = tl["total"]           # 场景算全局进度条要用
     crf = int(script.get("crf", 18))
@@ -272,6 +530,45 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True):
     return silent
 
 
+def _st_frames_web(tl, work, script, jobs=1, resume=True):
+    """浏览器逐帧渲染：交给 webengine.render_full（分块并行 + 断点续跑 + 缺口检测）。
+
+    页面的 window.DURATION / window.FPS 是切块与校验的唯一真值来源：
+    和 timeline.json 对不上就直接报错（十有八九是改了剧本没重新 layout）。
+    """
+    we = _opt_module("webengine",
+                     "浏览器渲染需要 webengine.py（本技能 scripts/ 里自带；还需要 pip install playwright）")
+    entry = _web_entry(script)
+    silent = os.path.join(work, "silent.mp4")
+    web = script.get("web") or {}
+
+    page_dur, page_fps = we.page_meta(entry)
+    if abs(float(page_fps) - float(tl["fps"])) > 1e-6:
+        raise RuntimeError(
+            "页面 FPS=%s 与 timeline fps=%s 不一致。浏览器逐帧渲染的帧号就是 f/FPS，"
+            "两边必须同帧率：改页面 window.FPS，或重新 --stage layout。"
+            % (page_fps, tl["fps"]))
+    if abs(float(page_dur) - float(tl["total"])) > 0.05:
+        raise RuntimeError(
+            "页面 DURATION=%.3fs 与 timeline 总时长 %.3fs 不一致（差 %.3fs）。\n"
+            "  页面里的时长必须等于 timeline.total；跑 --stage layout 后把新的 total 写进页面。"
+            % (float(page_dur), float(tl["total"]), abs(float(page_dur) - float(tl["total"]))))
+
+    out = we.render_full(entry, silent, float(tl["total"]),
+                         workers=max(1, int(jobs)),
+                         chunk_s=float(web.get("chunk_s", 30.0)),
+                         resume=bool(resume),
+                         crf=int(script.get("crf", 17)),
+                         preset=str(script.get("preset", "slow")))
+    got = K.media_dur(str(out) if out else silent)
+    want = float(tl["frames"]) / float(tl["fps"])
+    if abs(got - want) > 0.5:
+        raise RuntimeError("浏览器渲染时长 %.2fs != 预期 %.2fs（检查分块缺口/页面 DURATION）"
+                           % (got, want))
+    print("   silent.mp4 %.2fs（浏览器逐帧，%s→%s 分块）" % (got, page_dur, page_fps))
+    return str(out) if out else silent
+
+
 # ---------------------------------------------------------------- 合成 / 质检
 def st_mux(silent, audio, out, script):
     print("== Mux")
@@ -322,15 +619,49 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
     sheet = K.contact_sheet(shots, os.path.join(work, "qa", "sheet.png"))
     if sheet:
         print("   联系表:", sheet, "  <- 必须亲眼看")
+    # ---- 帧级深检（v0.3.0）：单帧闪烁 / 画面空窗 / 音画同步 / 响度曲线 ----
+    deep = _qa_deep(film, work, tl, script)
+    if deep:
+        for w in deep.get("warnings") or []:
+            print("   [WARN][deep]", w)
+        for e in deep.get("errors") or []:
+            print("   [FAIL][deep]", e)
+
     for w in rep["warnings"]:
         print("   [WARN]", w)
-    if rep["errors"]:
+    errors = list(rep["errors"])
+    if deep:
+        errors += list(deep.get("errors") or [])
+    if errors:
         print("   [FAIL]")
-        for e in rep["errors"]:
+        for e in errors:
             print("     -", e)
     else:
         print("   [PASS] 质检通过")
-    return rep["errors"]
+    return errors
+
+
+def _qa_deep(film, work, tl, script):
+    """调用 qa_frames.py 做帧级/时间轴级深检；没有这个模块就跳过（不阻断）。"""
+    qf = _try_module("qa_frames")
+    if qf is None:
+        print("   [deep] 没有 qa_frames.py，跳过帧级深检")
+        return None
+    qa_dir = os.path.join(work, "qa")
+    os.makedirs(qa_dir, exist_ok=True)
+    cues_path = os.path.join(work, "cues.json")
+    try:
+        deep = qf.report(film, cues_json=cues_path if os.path.exists(cues_path) else None,
+                         expect_duration=float(tl["total"]),
+                         out_json=os.path.join(qa_dir, "deep.json"),
+                         out_png=os.path.join(qa_dir, "deep.png"))
+    except Exception as e:                                  # noqa: BLE001
+        print("   [WARN][deep] 帧级深检失败（不影响成片）:", e)
+        return None
+    print("   [deep] 闪烁 %d / 空窗 %d / 同步超差 %d  -> %s"
+          % (len(deep.get("flicker") or []), len(deep.get("black_windows") or []),
+             len(deep.get("sync") or []), os.path.join(qa_dir, "deep.json")))
+    return deep
 
 
 # ---------------------------------------------------------------- 母版预览
@@ -381,15 +712,27 @@ def main():
     ap.add_argument("--out", default="out/film.mp4")
     ap.add_argument("--work", default="work")
     ap.add_argument("--stage", default="all", choices=STAGES)
+    ap.add_argument("--engine", default="", choices=("", "pil", "web"),
+                    help="渲染引擎：pil=逐帧 Pillow（默认）；web=无头浏览器（需 webengine.py + 页面）")
     ap.add_argument("--jobs", type=int, default=1, help="分块并行渲染进程数（frames 阶段）")
     ap.add_argument("--resume", action="store_true", help="复用已存在的分块")
     ap.add_argument("--force-tts", action="store_true", help="丢弃 TTS 缓存重新合成")
+    ap.add_argument("--force-music", action="store_true", help="丢弃配乐重出（score 阶段）")
     ap.add_argument("--stills", default="", help="stills 阶段用：逗号分隔的 id:秒")
     a = ap.parse_args()
 
     os.makedirs(a.work, exist_ok=True)
     script = load_script(a.script)
+    engine = _engine(script, a.engine or None)
+    if engine not in ("pil", "web"):
+        raise SystemExit("engine 只能是 pil 或 web，收到 %r" % engine)
+    script["_engine"] = engine
     script["_scenes"] = str(Path(a.scenes).resolve())
+    if a.force_music:
+        for name in ("music.wav", "score.json"):
+            p = os.path.join(a.work, name)
+            if os.path.exists(p):
+                os.remove(p)
     tl_p = os.path.join(a.work, "timeline.json")
     tts_p = os.path.join(a.work, "tts.json")
 
@@ -406,6 +749,15 @@ def main():
         if stage != "all":
             _need(os.path.exists(tts_p), "没有 tts.json，先跑 --stage tts")
             tl = st_layout(script, a.work)
+    if stage in ("all", "cues"):
+        tl = tl if stage == "all" else ensure_tl()
+        st_cues(script, a.work, tl, engine=engine)
+    if stage in ("all", "score"):
+        tl = tl if stage == "all" else ensure_tl()
+        st_score(script, a.work, tl)
+    if stage in ("all", "sfx"):
+        tl = tl if stage == "all" else ensure_tl()
+        st_sfx(script, a.work, tl)
     if stage in ("all", "audio"):
         tl = tl if stage == "all" else ensure_tl()
         _need(all(s.get("path") for s in tl["scenes"]), "timeline 里没有旁白路径，先跑 --stage tts")
@@ -422,27 +774,31 @@ def main():
         # qa 只读：绝不重渲、也不重新合成。缺成片就直接报错。
         tl = ensure_tl()
         _need(os.path.exists(a.out), "没有成片 %s，先跑 --stage mux" % a.out)
-        mod = load_module(a.scenes)
-        st_qa(a.out, tl, a.work, scenes_mod=mod, script=script)
-        return 0
+        mod = load_module(a.scenes) if engine == "pil" else None
+        errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script)
+        return 1 if errs else 0
 
     if stage in ("all", "frames", "mux"):
         tl = tl if stage == "all" else ensure_tl()
         audio = os.path.join(a.work, "audio.wav")
         silent = os.path.join(a.work, "silent.mp4")
-        mod = load_module(a.scenes)
+        mod = load_module(a.scenes) if engine == "pil" else None
         if stage in ("all", "frames"):
             # 渲染帧本身不需要音频（silent.mp4 是无声的）。只有 --stage all 才要求
             # audio.wav 已经在前面阶段生成——否则 --stage frames 在空 work 目录会白渲全片再挂掉。
             if stage == "all":
                 _need(os.path.exists(audio), "混音阶段异常：audio.wav 未生成")
-            silent = st_frames(tl, a.work, mod, script, jobs=a.jobs, resume=a.resume)
+            silent = st_frames(tl, a.work, mod, script, jobs=a.jobs, resume=a.resume,
+                               engine=engine)
         if stage in ("all", "mux"):
             _need(os.path.exists(silent), "没有 silent.mp4，先跑 --stage frames")
             _need(os.path.exists(audio), "没有 audio.wav，先跑 --stage audio")
             film = st_mux(silent, audio, a.out, script)
             if stage == "all":
-                st_qa(film, tl, a.work, scenes_mod=mod, script=script)
+                errs = st_qa(film, tl, a.work, scenes_mod=mod, script=script)
+                if errs:
+                    print("\n[质检未过] 成片已生成但没有通过门禁，按上面 [FAIL] 逐条修。")
+                    return 1
     return 0
 
 

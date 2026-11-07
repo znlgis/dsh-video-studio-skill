@@ -1,7 +1,7 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "0.2.0",
-  "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic frame rendering, ffmpeg encoding, sample-level mixing and QA gates.",
+  "version": "0.3.0",
+  "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic PIL/browser frame rendering, programmatic SFX and score, cue-driven sound sync, ffmpeg encoding, sample-level mixing and multi-layer QA gates.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -22,6 +22,8 @@
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
+    "docs/demo-pil-sheet.png",
+    "THIRD_PARTY_NOTICES.md",
     "skills"
   ],
   "keywords": [
@@ -31,6 +33,9 @@
     "video",
     "ffmpeg",
     "edge-tts",
+    "playwright",
+    "sfx",
+    "score",
     "字幕",
     "视频",
     "配音"

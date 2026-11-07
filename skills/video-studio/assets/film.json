@@ -6,19 +6,41 @@
  "lead": 0.62,
  "tail": 0.92,
  "min_dur": 3.2,
+ "hold": 0.0,
+ "bar": 0.0,
  "sub_max_hold": null,
  "trim_silence": true,
  "tts_workers": 4,
  "chunk_frames": 0,
  "crf": 17,
  "preset": "medium",
+ "engine": "pil",
+ "bpm": 120,
  "music": {
   "enabled": true,
+  "mode": "score",
+  "key": "Dm",
+  "seed": 7,
+  "gain_db": -1.5,
+  "duck_db": 3.0,
   "seg": 4.0,
   "amp": 0.05,
   "gain": 0.9,
   "xfade": 1.2,
   "chords": [[220, 261.63, 329.63], [174.61, 220, 261.63], [196, 246.94, 293.66]]
+ },
+ "sfx": {
+  "enabled": true,
+  "gain_db": 0.0,
+  "cues": [
+   {"at": "l02-0.15", "type": "whoosh", "dur": 0.9, "gain": -2},
+   {"at": "l03", "type": "riser", "dur": 2.0, "gain": -4},
+   {"at": "l03+0.05", "type": "impact", "size": 1.0, "gain": -3}
+  ]
+ },
+ "web": {
+  "entry": "",
+  "chunk_s": 30.0
  },
  "whoosh": true,
  "whoosh_amp": 0.055,
@@ -39,6 +61,7 @@
    "text": "整条管线只有五步：写剧本、生成旁白、排时间轴、逐帧渲染、混音合成。",
    "sub": "五步成片，每步落盘",
    "big": "五步成片",
+   "hold": 0.6,
    "items": [
     {"text": "剧本 film.json", "ok": true},
     {"text": "旁白 edge-tts 实测时长", "ok": true},

@@ -1,0 +1,306 @@
+{
+ "version": 1,
+ "generator": "scorekit 0.3.0",
+ "note": "scorekit 演示配乐（48 s，4 段，120 BPM，D 小调）。anchors 自动分段：段落边界吸附小节线，交界处 1 小节过门（鼓加花/反向镲/上升音/重击）+ 自动吸气；峰值 -1.5 dBFS、结尾 2 s 淡出；同一 seed 逐采样一致（无采样、全合成）。",
+ "reproduce": {
+  "json": "python - <<PY\nimport json, scorekit as K\nanchors = [{\"id\": \"d01\", \"kind\": \"hook\", \"start\": 0.0, \"end\": 8.0}, {\"id\": \"d02\", \"kind\": \"body\", \"start\": 8.0, \"end\": 24.0}, {\"id\": \"d03\", \"kind\": \"drive\", \"start\": 24.0, \"end\": 40.0}, {\"id\": \"d04\", \"kind\": \"outro\", \"start\": 40.0, \"end\": 48.0}]\nx, rep = K.render(48.0, bpm=120, key='Dm', anchors=anchors, seed=7)\nK.save('work/score_demo.wav', x)\nPY",
+  "cli": "cd skills/video-studio/scripts && python scorekit.py --duration 48 --bpm 120 --key Dm --seed 7 --anchors work/score_demo_anchors.json --out work/score_demo.wav --report work/score_demo.json",
+  "anchors_file_example": [
+   {
+    "id": "d01",
+    "kind": "hook",
+    "start": 0.0,
+    "end": 8.0
+   },
+   {
+    "id": "d02",
+    "kind": "body",
+    "start": 8.0,
+    "end": 24.0
+   },
+   {
+    "id": "d03",
+    "kind": "drive",
+    "start": 24.0,
+    "end": 40.0
+   },
+   {
+    "id": "d04",
+    "kind": "outro",
+    "start": 40.0,
+    "end": 48.0
+   }
+  ]
+ },
+ "meas": {
+  "wav": "tmp_scratch_score-writer/score_demo.wav",
+  "peak_dbfs": -1.5,
+  "lufs_approx": -19.8,
+  "true_peak_dbtp": -1.4,
+  "real_lufs_ffmpeg_demo48": -18.45,
+  "real_lufs_ffmpeg_60s": -19.09,
+  "real_lufs_ffmpeg_389s": -18.52,
+  "real_true_peak_60s_dbtp": -1.4,
+  "real_true_peak_389s_dbtp": -1.44,
+  "lra_389s_lu": 4.9,
+  "render_s": 5.115,
+  "render_389s_s": 8.18,
+  "note": "389 s 实测：渲染 8.18 s（含并行负载；空载 6.7 s）、峰值 -1.5 dBFS、ffmpeg loudnorm -18.52 LUFS / -1.44 dBTP；48 s demo 实测 -18.45 LUFS。"
+ },
+ "bpm": 120.0,
+ "key": "Dm",
+ "key_name": "D 小调",
+ "sr": 48000,
+ "duration": 48.0,
+ "seed": 7,
+ "bar_s": 2.0,
+ "beat_s": 0.5,
+ "sections": [
+  {
+   "name": "d01",
+   "start": 0.0,
+   "end": 8.0,
+   "energy": 0.3,
+   "bars": 4,
+   "target_db": -5.95,
+   "target_lufs": -21.9,
+   "layers": [
+    "pad",
+    "bass"
+   ],
+   "chords": [
+    "i",
+    "VI",
+    "iv",
+    "v"
+   ]
+  },
+  {
+   "name": "d02",
+   "start": 8.0,
+   "end": 24.0,
+   "energy": 0.55,
+   "bars": 8,
+   "target_db": -3.82,
+   "target_lufs": -19.8,
+   "layers": [
+    "pad",
+    "bass",
+    "kick",
+    "hat",
+    "arp"
+   ],
+   "chords": [
+    "i",
+    "VI",
+    "III",
+    "VII",
+    "i",
+    "VI",
+    "III",
+    "V"
+   ]
+  },
+  {
+   "name": "d03",
+   "start": 24.0,
+   "end": 40.0,
+   "energy": 0.8,
+   "bars": 8,
+   "target_db": -1.7,
+   "target_lufs": -17.7,
+   "layers": [
+    "pad",
+    "bass",
+    "kick",
+    "hat",
+    "arp",
+    "melody"
+   ],
+   "chords": [
+    "i",
+    "VII",
+    "VI",
+    "V",
+    "i",
+    "VII",
+    "VI",
+    "V"
+   ]
+  },
+  {
+   "name": "d04",
+   "start": 40.0,
+   "end": 48.0,
+   "energy": 0.35,
+   "bars": 4,
+   "target_db": -5.53,
+   "target_lufs": -21.5,
+   "layers": [
+    "pad",
+    "bass",
+    "kick"
+   ],
+   "chords": [
+    "i",
+    "VI",
+    "I",
+    "I"
+   ]
+  }
+ ],
+ "transitions": [
+  {
+   "t": 8.0,
+   "from": "d01",
+   "to": "d02",
+   "fill_start": 6.0,
+   "fill_s": 2.0,
+   "kinds": [
+    "鼓加花",
+    "反向镲",
+    "上升音"
+   ],
+   "suck_db": -4.75
+  },
+  {
+   "t": 24.0,
+   "from": "d02",
+   "to": "d03",
+   "fill_start": 22.0,
+   "fill_s": 2.0,
+   "kinds": [
+    "鼓加花",
+    "反向镲",
+    "上升音",
+    "重击"
+   ],
+   "suck_db": -4.75
+  },
+  {
+   "t": 40.0,
+   "from": "d03",
+   "to": "d04",
+   "fill_start": 38.0,
+   "fill_s": 2.0,
+   "kinds": [
+    "鼓加花",
+    "反向镲"
+   ],
+   "suck_db": null
+  }
+ ],
+ "sucks": [
+  {
+   "t": 8.0,
+   "db": -4.75,
+   "dur": 0.24,
+   "source": "过渡吸气"
+  },
+  {
+   "t": 24.0,
+   "db": -4.75,
+   "dur": 0.24,
+   "source": "过渡吸气"
+  }
+ ],
+ "beats": [
+  0.0,
+  0.5,
+  1.0,
+  1.5,
+  2.0,
+  2.5,
+  3.0,
+  3.5,
+  4.0,
+  4.5,
+  5.0,
+  5.5,
+  6.0,
+  6.5,
+  7.0,
+  7.5,
+  8.0,
+  8.5,
+  9.0,
+  9.5,
+  10.0,
+  10.5,
+  11.0,
+  11.5,
+  12.0,
+  12.5,
+  13.0,
+  13.5,
+  14.0,
+  14.5,
+  15.0,
+  15.5,
+  16.0,
+  16.5,
+  17.0,
+  17.5,
+  18.0,
+  18.5,
+  19.0,
+  19.5,
+  20.0,
+  20.5,
+  21.0,
+  21.5,
+  22.0,
+  22.5,
+  23.0,
+  23.5,
+  24.0,
+  24.5,
+  25.0,
+  25.5,
+  26.0,
+  26.5,
+  27.0,
+  27.5,
+  28.0,
+  28.5,
+  29.0,
+  29.5,
+  30.0,
+  30.5,
+  31.0,
+  31.5,
+  32.0,
+  32.5,
+  33.0,
+  33.5,
+  34.0,
+  34.5,
+  35.0,
+  35.5,
+  36.0,
+  36.5,
+  37.0,
+  37.5,
+  38.0,
+  38.5,
+  39.0,
+  39.5,
+  40.0,
+  40.5,
+  41.0,
+  41.5,
+  42.0,
+  42.5,
+  43.0,
+  43.5,
+  44.0,
+  44.5,
+  45.0,
+  45.5,
+  46.0,
+  46.5,
+  47.0,
+  47.5,
+  48.0
+ ]
+}

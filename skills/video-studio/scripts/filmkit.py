@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
-"""filmkit.py — DeepSeek 4.1 Flash + DSH 视频生产内核（v0.2.0）。
+"""filmkit.py — DeepSeek 4.1 Flash + DSH 视频生产内核（v0.3.0）。
 
 设计原则（v0.2.0 起，全部来自一次 11 分钟真实成片的复盘）：
 1. 质检门禁必须真的会失败。门禁失效比没有门禁更危险。
 2. 缓存必须校验输入。只判断"文件存在"会让"改一句台词不生效"静默发生。
 3. 失败要报错，不要静默降级。尺寸不符、缺字形、峰值爆表都要看得见。
 4. 公共函数可独立测试：不依赖当前目录、不依赖上一次调用留下的状态。
+
+v0.3.0 新增（声音与提示点，借鉴 ai-history-film）：
+5. CueBus：画面登记提示点 -> work/cues.json -> 按提示点合成音效轨（声音跟着画面走，不靠"对齐猜"）。
+6. 立体声总线：AudioBus(channels=2) / wav_write 自动识别单双声道；配乐与音效可以声像。
+7. hold：每句语音结束后额外停留秒数（"让观众看清楚"的停留窗口，不用整片放慢）。
+8. mix_film / duck：旁白 + 配乐 + 音效三总线混音，音效响起时配乐自动让位。
 """
 from __future__ import annotations
+
+__version__ = "0.3.0"
 
 import hashlib
 import json
@@ -29,6 +37,13 @@ SAFE = (64, 58, 1856, 974)
 SUB_BAND = (180, 872, 1740, 1030)   # 字幕带：两行 + 距画面底部 50px，永不被裁
 SUB_MAX_CHARS = 24                  # 单行字幕中文字数上限
 SUB_MAX_HOLD = None                 # None = 字幕覆盖整句（v0.2.0 默认）；设数字则钳住最大停留秒数
+
+# v0.3.0：提示点里好写的语义别名 -> sfxkit 配方名（sfxkit 自己也有同一张表，两边保持一致）
+CUE_ALIASES = {
+    "blip": "ui_blip", "click": "ui_click", "relay": "relay_click", "chirp": "data_chirp",
+    "sub": "sub_drop", "reverse": "reverse_swell", "rewind": "tape_rewind",
+    "stone": "go_stone", "typing": "typing", "stream": "text_stream", "wind": "wind",
+}
 
 
 # ---------------------------------------------------------------- ffmpeg
@@ -327,27 +342,74 @@ def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None):
 
 
 # ---------------------------------------------------------------- WAV / PCM
-def wav_write(path, samples, sr=SR, channels=1):
-    a = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
-    peak = float(np.max(np.abs(a))) if a.size else 0.0
-    pcm = (a * 32767.0).astype(np.int16)
+def wav_write(path, samples, sr=SR, channels=None):
+    """写 16-bit PCM WAV。channels=None 时按数组形状自动判断（二维 = 立体声）。
+
+    v0.3.0：支持立体声（配乐/音效要声像）。老调用 wav_write(p, mono) 行为不变。
+    """
+    a = np.asarray(samples, dtype=np.float32)
+    if a.ndim == 2:
+        n_ch = a.shape[1]
+        if channels is None:
+            channels = n_ch
+        elif int(channels) != n_ch:
+            raise ValueError("wav_write: 数组有 %d 列，但 channels=%s" % (n_ch, channels))
+        a = np.clip(a, -1.0, 1.0)
+        inter = a.reshape(-1)                       # 交错排列（WAV 要求）
+    else:
+        a = np.clip(np.ravel(a), -1.0, 1.0)
+        inter = a
+        if channels is None:
+            channels = 1
+    peak = float(np.max(np.abs(inter))) if inter.size else 0.0
+    pcm = (inter * 32767.0).astype(np.int16)
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
-    with wave.open(path, "wb") as w:
-        w.setnchannels(channels)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(int(channels))
         w.setsampwidth(2)
-        w.setframerate(sr)
+        w.setframerate(int(sr))
         w.writeframes(pcm.tobytes())
     return peak
 
 
-def decode_pcm(path, sr=SR):
+def wav_read(path):
+    """读 PCM WAV（16 / 24 / 32-bit），返回 float32 数组：单声道 (n,) / 立体声 (n,2)。
+
+    v0.3.0 起支持 24-bit：scorekit 落盘默认 PCM_24（多 8 dB 动态余量），
+    而 v0.2 的 wav_write 只写 16-bit。读取端必须两种都吃。
+    """
+    with wave.open(str(path), "rb") as w:
+        n_ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+        raw = w.readframes(n)
+    if sw == 2:
+        a = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+    elif sw == 3:
+        b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        v = (b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)).astype(np.int32)
+        v = np.where(v >= 0x800000, v - 0x1000000, v)          # 24-bit 符号扩展
+        a = (v.astype(np.float32) / 8388607.0)
+    elif sw == 4:
+        a = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483647.0
+    else:
+        raise ValueError("wav_read 只支持 16/24/32-bit PCM（%s 是 %d 字节）" % (path, sw))
+    if n_ch > 1:
+        a = a.reshape(-1, n_ch)
+    return a, sr
+
+
+def decode_pcm(path, sr=SR, channels=1):
+    """解码成 float32 PCM：channels=1 -> (n,)，channels=2 -> (n,2)。"""
+    ch = max(1, int(channels))
     p = _run([FFMPEG, "-v", "error", "-i", str(path), "-f", "f32le",
-              "-ac", "1", "-ar", str(sr), "-"])
+              "-ac", str(ch), "-ar", str(sr), "-"])
     if p.returncode != 0 or not p.stdout:
         raise RuntimeError("解码失败 %s: %s" % (path, p.stderr.decode("utf-8", "replace")[:300]))
-    return np.frombuffer(p.stdout, dtype=np.float32).copy()
+    a = np.frombuffer(p.stdout, dtype=np.float32).copy()
+    if ch > 1:
+        a = a[: (len(a) // ch) * ch].reshape(-1, ch)
+    return a
 
 
 def audio_dur(path, sr=SR):
@@ -381,30 +443,57 @@ def trim_silence_edges(pcm, sr=SR, thresh_db=-42.0, keep_ms=80):
 
 # ---------------------------------------------------------------- 音频总线
 class AudioBus:
-    """采样级音频总线：确定性、1/SR 精度、可单层重放、可中途打印峰值。"""
+    """采样级音频总线：确定性、1/SR 精度、可单层重放、可中途打印峰值。
 
-    def __init__(self, total, sr=SR):
+    channels=1 为单声道（v0.2 默认行为，向后兼容）；channels=2 时每个来源自动展开成
+    立体声：单声道来源用 pan 定位，立体声来源原样保留。配乐/音效要做声像时必须用 2。
+    """
+
+    def __init__(self, total, sr=SR, channels=1):
         self.sr = int(sr)
         self.total = float(total)
-        self.bus = np.zeros(int(round(self.total * self.sr)) + self.sr, dtype=np.float32)
+        self.channels = max(1, int(channels))
+        n = int(round(self.total * self.sr)) + self.sr
+        self.bus = np.zeros(n if self.channels == 1 else (n, self.channels), dtype=np.float32)
         self.log = []
 
-    def place(self, src, at, gain=1.0, loop=False, fade_in=0.0, fade_out=0.0):
+    def _fit(self, src):
+        """把任意来源变成总线的采样形状（单声道 / 立体声）。"""
+        s = np.asarray(src, dtype=np.float32)
+        if s.ndim == 0:
+            s = s.reshape(1)
+        if self.channels == 1:
+            return s if s.ndim == 1 else s.mean(axis=1)
+        if s.ndim == 1:
+            return np.stack([s, s], axis=1)      # 单声道来源：等功率复制，保持能量
+        if s.shape[1] == 1:
+            return np.concatenate([s, s], axis=1)
+        if s.shape[1] > 2:
+            return s[:, :2]
+        return s
+
+    def place(self, src, at, gain=1.0, loop=False, fade_in=0.0, fade_out=0.0, pan_pos=None):
         if src is None or len(src) == 0:
             return self
         i0 = int(round(float(at) * self.sr))
         if i0 >= len(self.bus):
             return self
-        s = np.asarray(src, dtype=np.float32).copy()
+        s = np.asarray(src, dtype=np.float32)
+        if pan_pos is not None and self.channels == 2 and s.ndim == 1:
+            theta = (float(np.clip(pan_pos, -1.0, 1.0)) + 1.0) * np.pi / 4.0
+            s = np.stack([s * np.cos(theta), s * np.sin(theta)], axis=1)
+        s = np.array(self._fit(s), dtype=np.float32, copy=True)
         if fade_in > 0:
             n = min(len(s), max(1, int(fade_in * self.sr)))
-            s[:n] *= np.linspace(0, 1, n, dtype=np.float32)
+            g = np.linspace(0, 1, n, dtype=np.float32)
+            s[:n] *= g if s.ndim == 1 else g[:, None]
         if fade_out > 0:
             n = min(len(s), max(1, int(fade_out * self.sr)))
-            s[len(s) - n:] *= np.linspace(1, 0, n, dtype=np.float32)
+            g = np.linspace(1, 0, n, dtype=np.float32)
+            s[len(s) - n:] *= g if s.ndim == 1 else g[:, None]
         if loop and i0 + len(s) < len(self.bus):
             reps = int(np.ceil((len(self.bus) - i0) / max(1, len(s))))
-            s = np.tile(s, reps)
+            s = np.tile(s, (reps, 1)) if s.ndim == 2 else np.tile(s, reps)
         n = min(len(s), len(self.bus) - i0)
         self.bus[i0:i0 + n] += s[:n] * gain
         self.log.append(dict(kind="place", at=round(float(at), 3),
@@ -435,8 +524,14 @@ class AudioBus:
         raw_peak = float(np.max(np.abs(out)))
         if fade > 0:
             n = min(len(out), max(1, int(fade * self.sr)))
-            out[:n] *= np.linspace(0, 1, n, dtype=np.float32)
-            out[-n:] *= np.linspace(1, 0, n, dtype=np.float32)
+            g_in = np.linspace(0, 1, n, dtype=np.float32)
+            g_out = np.linspace(1, 0, n, dtype=np.float32)
+            if out.ndim == 1:
+                out[:n] *= g_in
+                out[-n:] *= g_out
+            else:
+                out[:n] *= g_in[:, None]
+                out[-n:] *= g_out[:, None]
         if normalize and raw_peak > 1e-6:
             out = out / raw_peak * 0.89
         out = np.tanh(out * 1.02).astype(np.float32) * 0.98
@@ -448,6 +543,281 @@ class AudioBus:
             print("   [WARN] 混音峰值 %.3f 接近满刻度，建议降低 voice_gain / music.gain" % final_peak,
                   flush=True)
         return out
+
+
+# ---------------------------------------------------------------- 提示点（v0.3.0）
+# 思路来自 ai-history-film：画面在"该响一下"的地方登记一个提示点，音频阶段按提示点合成音效轨。
+# 这样声音跟着画面走，不需要人肉对时间；换 BPM/改停留窗口后，提示点仍然对得上。
+
+CUE_BASE_DB = {
+    "ui_blip": -10, "ui_click": -10, "relay_click": -8, "typing": -10, "typing_at": -10,
+    "text_stream": -13, "data_chirp": -12, "whoosh": -13, "impact": -5, "sub_drop": -8,
+    "riser": -9, "reverse_swell": -9, "glitch": -10, "tape_rewind": -6, "worldline_shift": -9,
+    "wind": -12, "rain": -12, "campfire": -12, "go_stone": -8, "roulette_tick": -10,
+    "answer_chime": -10, "knock_wood": -8, "metal_hit": -8, "glass_clink": -10,
+}
+
+
+def cue_time(at, scenes=None, total=None):
+    """把提示点的 at 解析成成片绝对秒。
+
+    支持三种写法（CONTRACT.md §4.1）：
+      "abs:12.5" / 12.5      -> 绝对秒
+      "l03+0.35" / "l03-0.2" -> 场景 id 加/减偏移（相对场景 start）
+      "l03"                  -> 场景起点
+    """
+    if isinstance(at, (int, float)):
+        return round(float(at), 3)
+    s = str(at).strip()
+    if not s:
+        raise ValueError("cue at 为空")
+    if s.startswith("abs:"):
+        return round(float(s[4:]), 3)
+    try:
+        return round(float(s), 3)
+    except ValueError:
+        pass
+    # 形如 <id>[+-]<offset>
+    cut = len(s)
+    for i, ch in enumerate(s):
+        if ch in "+-" and i > 0:
+            cut = i
+            break
+    sid = s[:cut]
+    off = float(s[cut:] or 0.0) if cut < len(s) else 0.0
+    if scenes:
+        for sc in scenes:
+            if str(sc.get("id")) == sid:
+                return round(float(sc["start"]) + off, 3)
+    raise ValueError("cue at=%r：找不到场景 %r（先跑 layout，或改用 abs:秒）" % (at, sid))
+
+
+def scenes_anchors(scenes):
+    """给 scorekit 分段用的锚点：[{id, kind, start, end}]。"""
+    return [dict(id=s.get("id"), kind=s.get("kind") or "body",
+                 start=float(s["start"]), end=float(s["end"])) for s in scenes]
+
+
+class CueBus:
+    """提示点登记表：画面侧登记 -> 落盘 cues.json -> 音频侧按它合成音效。
+
+    film.json 的 sfx.cues 与 scenes.py 的可选 cues() 钩子统一走这里；
+    浏览器引擎则由页面 window.getCues() 导出同 schema 的 JSON（CONTRACT.md §4.2）。
+    """
+
+    def __init__(self, scenes=None, total=None):
+        self.scenes = scenes or []
+        self.total = None if total is None else float(total)
+        self.items = []
+
+    # -- 登记 --
+    def add(self, at, type, **params):
+        t = cue_time(at, self.scenes, self.total)
+        kind = CUE_ALIASES.get(str(type), str(type))
+        row = dict(params)
+        row.update(t=round(t, 3), type=kind)
+        if "src" not in row:
+            row["src"] = "pil"
+        self.items.append(row)
+        return self
+
+    def extend(self, items):
+        for it in items or []:
+            if not it:
+                continue
+            row = dict(it)
+            at = row.pop("at", row.pop("t", None))
+            if at is None:
+                raise ValueError("提示点缺少 at/t：%r" % (it,))
+            self.add(at, row.pop("type"), **row)
+        return self
+
+    # -- 解析 --
+    def resolved(self):
+        """按时间排序、去掉明显无效项（超过片长 2 秒的丢弃并告警）。"""
+        out = []
+        for row in self.items:
+            t = float(row["t"])
+            if t < -0.05:
+                continue
+            if self.total is not None and t > self.total + 2.0:
+                continue
+            out.append(row)
+        return sorted(out, key=lambda r: float(r["t"]))
+
+    def to_json(self, duration=None, fps=None, width=None, height=None, events=None):
+        dur = self.total if duration is None else float(duration)
+        return dict(version=1, duration=round(dur, 3),
+                    fps=int(FPS if fps is None else fps),
+                    width=int(W if width is None else width),
+                    height=int(H if height is None else height),
+                    cues=self.resolved(), events=list(events or []))
+
+    def write(self, path, duration=None, events=None, **kw):
+        payload = self.to_json(duration=duration, events=events, **kw)
+        d = os.path.dirname(os.path.abspath(str(path)))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(str(path), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+        return payload
+
+    @classmethod
+    def from_json(cls, path):
+        with open(str(path), encoding="utf-8") as fh:
+            d = json.load(fh)
+        bus = cls(total=d.get("duration"))
+        for c in d.get("cues") or []:
+            row = dict(c)
+            row.setdefault("src", "file")
+            bus.items.append(row)
+        return bus
+
+    # -- 合成 --
+    def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
+                    seed_base=1000, verbose=True):
+        """按提示点合成音效轨 -> (n,2) float32。
+
+        依赖 scripts/sfxkit.py（v0.3.0 新增）。缺 sfxkit 时直接报错，不静默出哑片。
+        未知提示点类型：告警一次并跳过（不 crash 整片混音）。
+        """
+        try:
+            import sfxkit as SX
+        except Exception as e:                              # noqa: BLE001
+            raise RuntimeError(
+                "合成音效轨需要 sfxkit.py（应与 filmkit.py 同目录）：%s" % e) from e
+        dur = float(self.total if total is None else total)
+        base = dict(CUE_BASE_DB)
+        if base_db:
+            base.update(base_db)
+        reg = SX.load_all() if hasattr(SX, "load_all") else {}
+        n = int(round(dur * sr)) + int(sr * 0.5)
+        bus = np.zeros((n, 2), dtype=np.float32)
+        unknown, placed = set(), 0
+        for i, c in enumerate(self.resolved()):
+            kind = str(c.get("type"))
+            if kind not in reg:
+                unknown.add(kind)
+                continue
+            params = {k: v for k, v in c.items()
+                      if k not in ("t", "type", "src", "gain", "pan", "base_db")}
+            params.pop("dur_hint", None)
+            try:
+                x = SX.render(kind, seed=int(seed_base) + i, **params)
+            except TypeError:
+                # 兼容严格签名的配方：退化成只传 seed
+                x = SX.render(kind, seed=int(seed_base) + i)
+            if x is None or len(x) == 0:
+                continue
+            x = np.asarray(x, dtype=np.float32)
+            if x.ndim == 1:
+                p = c.get("pan")
+                theta = ((float(np.clip(p, -1, 1)) if p is not None else 0.0) + 1.0) * np.pi / 4.0
+                x = np.stack([x * np.cos(theta), x * np.sin(theta)], axis=1)
+            if x.shape[1] > 2:
+                x = x[:, :2]
+            g = float(base.get(kind, -10.0)) + float(c.get("gain", 0.0) or 0.0) + default_gain_db
+            s = int(round(float(c["t"]) * sr))
+            if s < 0 or s >= n:
+                continue
+            e = min(n, s + len(x))
+            bus[s:e] += (10.0 ** (g / 20.0)) * x[: e - s]
+            placed += 1
+        if unknown and verbose:
+            print("   [WARN] 未知提示点类型（已跳过）: %s" % ", ".join(sorted(unknown)))
+        if verbose:
+            print("   音效轨：%d 个提示点落位 / %d 个登记（%.2fs）"
+                  % (placed, len(self.items), dur))
+        return bus[: int(round(dur * sr))]
+
+
+def duck(music, sfx, depth_db=4.0, attack=0.03, release=0.35, sr=SR):
+    """音效响起时配乐自动让位（最多 depth_db），避免重击被配乐吃掉。
+
+    用分块包络实现（向量化），不做逐采样循环：块内线性插值出增益曲线。
+    """
+    m = np.asarray(music, dtype=np.float32)
+    s = np.asarray(sfx, dtype=np.float32)
+    if m.ndim == 1:
+        m2 = np.stack([m, m], axis=1)
+    else:
+        m2 = m
+    env = np.abs(s).max(axis=1) if s.ndim == 2 else np.abs(s)
+    n = len(m2)
+    env = env[:n]
+    if env.size == 0 or float(env.max()) <= 1e-9:
+        return m2
+    block = max(1, int(sr * 0.01))
+    nb = max(1, n // block)
+    e = env[: nb * block].reshape(nb, block).max(axis=1)
+    e = e / (float(np.percentile(e, 99.5)) + 1e-9)
+    e = np.clip(e, 0.0, 1.0)
+    # 单向平滑：起音快、释放慢（对包络做两次不同时间常数的指数平滑，仍保持向量化）
+    def _smooth(x, tau_s):
+        k = max(1, int(sr * tau_s / block))
+        w = np.ones(k, dtype=np.float32) / k
+        return np.convolve(x, w, mode="same")
+    e = np.maximum(_smooth(e, attack), _smooth(e, release) * 0.7)
+    gains = 10.0 ** (-float(depth_db) * np.clip(e, 0, 1) / 20.0)
+    curve = np.interp(np.arange(n), np.arange(nb) * block + block / 2.0, gains).astype(np.float32)
+    return (m2 * curve[:, None]).astype(np.float32)
+
+
+def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
+             voice_gain=1.0, music_gain_db=0.0, sfx_gain_db=0.0,
+             duck_db=3.0, peak_target=0.89, fade=0.4, verbose=True):
+    """三总线混音：旁白 + 配乐 + 音效 -> 立体声 float32。
+
+    顺序照 ai-history-film 的成片混音：音乐比音效低一点，音效响时音乐让位，
+    最后统一做峰值保护（真正的响度标准化交给 ffmpeg 的 loudnorm）。
+    """
+    def _to_stereo(x):
+        a = np.asarray(x, dtype=np.float32)
+        if a.ndim == 1:
+            return np.stack([a, a], axis=1)
+        return a if a.shape[1] >= 2 else np.concatenate([a, a], axis=1)
+
+    n = None
+    v = None if voice is None else _to_stereo(voice)
+    m = None if music is None else _to_stereo(music)
+    s = None if sfx is None else _to_stereo(sfx)
+    for x in (v, m, s):
+        if x is not None:
+            n = len(x) if n is None else min(n, len(x))
+    if total is not None:
+        want = int(round(float(total) * sr))
+        n = want if n is None else min(n, want)
+    if not n:
+        return np.zeros((0, 2), dtype=np.float32)
+
+    out = np.zeros((n, 2), dtype=np.float32)
+    if s is not None:
+        out += s[:n] * (10.0 ** (float(sfx_gain_db) / 20.0))
+    if m is not None:
+        mm = m[:n] * (10.0 ** (float(music_gain_db) / 20.0))
+        if s is not None:
+            mm = duck(mm, s[:n], depth_db=duck_db, sr=sr)
+        else:
+            mm = _to_stereo(mm)
+        out += mm
+    if v is not None:
+        out += v[:n] * float(voice_gain)
+
+    raw = float(np.max(np.abs(out))) if out.size else 0.0
+    if fade > 0:
+        k = min(n, max(1, int(fade * sr)))
+        g_in = np.linspace(0, 1, k, dtype=np.float32)[:, None]
+        g_out = np.linspace(1, 0, k, dtype=np.float32)[:, None]
+        out[:k] *= g_in
+        out[-k:] *= g_out
+    if raw > 1e-9 and raw > peak_target:
+        out *= peak_target / raw
+    if verbose:
+        print("   混音: 叠加峰值 %.2f -> 输出峰值 %.3f（旁白%s 配乐%s 音效%s）"
+              % (raw, float(np.max(np.abs(out))) if out.size else 0.0,
+                 "有" if v is not None else "无", "有" if m is not None else "无",
+                 "有" if s is not None else "无"))
+    return out
 
 
 # ---------------------------------------------------------------- 程序化音源
@@ -599,14 +969,24 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
 
 
 # ---------------------------------------------------------------- 时间轴
-def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_dur=None):
-    """由实测语音时长反推时间轴。第一段 start 必须严格为 0。"""
+def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_dur=None,
+                   hold=0.0, hold_map=None, bar=0.0):
+    """由实测语音时长反推时间轴。第一段 start 必须严格为 0。
+
+    hold / hold_map（v0.3.0）：语音结束后额外停留的秒数——这就是 ai-history-film 的"停留窗口"：
+      观众没看清的地方加停留，而不是把整片放慢。hold 为全局默认，hold_map 按 id 覆盖，
+      行内 `hold` 字段优先级最高。bar > 0 时把每段时长向上取整到 bar 的整数倍
+      （配乐小节对齐用，例如 bar=2.0 = 120 BPM 的一小节）。
+    """
     scenes, t = [], 0.0
     for ln in lines:
         voice = float(ln.get("dur") or 0.0)
-        d = max(float(min_dur), float(lead) + voice + float((tail_map or {}).get(ln["id"], tail)))
+        extra = float(ln.get("hold", (hold_map or {}).get(ln["id"], hold)) or 0.0)
+        d = max(float(min_dur), float(lead) + voice + float((tail_map or {}).get(ln["id"], tail)) + extra)
         if max_dur and d > float(max_dur):
             d = float(max_dur)
+        if bar and float(bar) > 0:
+            d = math.ceil(d / float(bar) - 1e-9) * float(bar)
         scenes.append(dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
                            voice_start=round(t + float(lead), 3),
                            voice_end=round(t + float(lead) + voice, 3)))
