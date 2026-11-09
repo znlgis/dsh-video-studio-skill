@@ -15,10 +15,17 @@
     mux     合成（视频流 copy，两遍 loudnorm）
     qa      质检 + 抽帧 + 联系表 + 帧级深检（闪烁/空窗/音画同步）
     stills  只渲染若干关键帧做母版预览（不生成视频）
+    accept  人工签核一道闸（--gate style|stills|facts|release），写 work/signoff.json
+    explain 打印"现在哪些 stage 是旧的、为什么、该跑什么"（--explain-stale 的入口）
 
 依赖顺序：style -> tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa。
 --stage all 按顺序跑完；单跑某个 stage 时，若前置产物缺失会明确报错并提示先跑哪个。
 --engine 覆盖 film.json 的 engine：pil = Pillow 逐帧（默认，依赖最少）；web = 无头浏览器逐帧。
+
+v0.6.0 起每个 stage 都往「门禁账本」记结论（pass / fail / skipped 三档），并在
+--stage qa（或 --stage all 收尾）写出 out/QC-REPORT.md：这是**机器可读的交付结论**，
+取代"agent 在对话里复述质检结果"。人工签核走 --stage accept，绑内容指纹——
+改了剧本 / scenes.py / 引擎，旧签核自动失效。
 """
 from __future__ import annotations
 
@@ -37,12 +44,22 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import filmkit as K
+import gates as GT
+import stagewatch as SW
 
 STAGES = ("style", "tts", "layout", "cues", "score", "sfx", "audio", "frames",
-          "mux", "qa", "stills", "all")
+          "mux", "qa", "stills", "accept", "explain", "all")
 
 # _render_range 每帧都要主题：按 script 对象缓存一次，避免每帧重新解析（几百毫秒的浪费）
 _THEME_CACHE = {}
+
+# 本次运行的门禁账本（main() 里建；stage 函数通过它记账）
+_LEDGER = None
+
+
+def _gate():
+    """取当前账本；被单测直接调用 stage 函数时返回 None（不记账，照常打印）。"""
+    return _LEDGER
 
 
 def _setup_stdio():
@@ -721,6 +738,16 @@ def _render_chunk_worker(args):
     tl = json.load(open(tl_path, encoding="utf-8"))
     script = json.load(open(script_path, encoding="utf-8"))
     script["_total"] = tl["total"]
+    # v0.6.0 修：JSON 快照会把元组变成 list（主题色是 (r,g,b) 元组），子进程里
+    # scenes._bg() 拿 th["bg"] 当缓存键 -> TypeError: unhashable type: "list"，
+    # 于是 --jobs >1 整条并行路径直接崩。计划是**纯函数**，这里按剧本重新解一次，
+    # 既拿回元组，也保证子进程的主题与父进程逐字段一致。
+    script.pop("_style", None)
+    try:
+        script["_style"] = resolve_style(script, verbose=False)
+    except Exception as e:                                  # noqa: BLE001
+        print("   [WARN] 子进程重解风格失败，回退到快照里的 _style：%s" % e)
+        script["_style"] = json.load(open(script_path, encoding="utf-8")).get("_style")
     mod = load_module(scenes_path, "film_scenes_chunk_%d" % f0)
     return _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=False)
 
@@ -883,6 +910,96 @@ def st_mux(silent, audio, out, script):
     return out
 
 
+def _qa_gates(lg, rep, deep, tl, work):
+    """把 qa_report / 深检的结论拆成逐条门禁记进账本（pass / fail / skipped）。
+
+    为什么拆：只有一个"质检通过/失败"的总结论，读报告的人看不出"哪几项其实没执行"。
+    这里每条都带实测值，skipped 必须写明"为什么没执行"。
+    """
+    pr = rep.get("probe") or {}
+    streams = pr.get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fmt = pr.get("format") or {}
+    W, H, FPS = K.W, K.H, K.FPS
+
+    # ---- G4 容器：分辨率 / 帧率 / 音轨 / 时长 ----
+    try:
+        rate = str(v.get("r_frame_rate") or "")
+        num, _, den = rate.partition("/")
+        got_fps = (float(num) / float(den or 1)) if num and den else 0.0
+    except Exception:                                       # noqa: BLE001
+        got_fps = 0.0
+    dur = float(fmt.get("duration") or 0)
+    want_dur = float(tl["frames"]) / float(tl["fps"])
+    detail = "%sx%s@%.3g / %s%s / %.2fs" % (
+        v.get("width"), v.get("height"), got_fps,
+        ("h264" if v.get("codec_name") == "h264" else str(v.get("codec_name") or "?")),
+        ("+aac" if a else "（无音轨）"),
+        dur)
+    ok4 = (v.get("width") == W and v.get("height") == H
+           and abs(got_fps - float(FPS)) <= 0.05 and a is not None
+           and abs(dur - want_dur) <= 0.5)
+    (lg.ok if ok4 else lg.fail)("G4", "容器层（分辨率/帧率/音轨/时长）", detail)
+
+    # ---- G5 响度 / 真峰 ----
+    lo = rep.get("loudness") or {}
+    if "I" in lo and "TP" in lo:
+        i_l, tp = float(lo["I"]), float(lo["TP"])
+        ok5 = (-19 <= i_l <= -12) and tp <= -1.0
+        (lg.ok if ok5 else lg.fail)("G5", "响度 / 真峰（-16 LUFS / ≤ -1 dBTP）",
+                                    "%.1f LUFS · %.1f dBTP" % (i_l, tp))
+    else:
+        lg.skip("G5", "响度 / 真峰", "ebur128 没测到 %s" % ("I" if "I" not in lo else "TP"))
+
+    # ---- G6 编码锐度比 ----
+    q = rep.get("quality")
+    if q and "ratio" in q:
+        (lg.ok if q["ratio"] >= 0.85 else lg.fail)(
+            "G6", "编码锐度比（文字发虚）", "%.3f（阈值 0.85）" % q["ratio"])
+    else:
+        why = "没装 cv2" if K._cv2() is None else "没有参考帧（scenes.py 缺失 / web 引擎）"
+        lg.skip("G6", "编码锐度比（文字发虚）", why + "，本次没查")
+
+    # ---- G7 字幕条数（静默丢字幕的唯一检查点）----
+    srt = os.path.join(str(work), "sub.srt")
+    got = 0
+    if os.path.exists(srt):
+        got = len([b for b in open(srt, encoding="utf-8").read().strip().split("\n\n") if b.strip()])
+    want = len(tl["scenes"])
+    if got:
+        (lg.ok if got == want else lg.fail)("G7", "字幕条数 = 剧本句数",
+                                            "%d / %d" % (got, want))
+    else:
+        lg.skip("G7", "字幕条数 = 剧本句数", "没找到 sub.srt")
+
+    # ---- G8 黑帧 ----
+    black_msgs = [w for w in (rep.get("warnings") or []) if "黑帧" in w]
+    if black_msgs:
+        # qa_report 只在"首尾之外有长黑帧"时写 warning，本身是 warning 级
+        lg.skip("G8", "首尾之外无长黑帧", "检测到：" + black_msgs[0])
+    else:
+        lg.ok("G8", "首尾之外无长黑帧", "0 段")
+
+    # ---- G9 帧级深检（闪烁 / 空窗 / 音画同步）----
+    if deep is None:
+        lg.skip("G9", "帧级深检（闪烁/空窗/同步）", "没有 qa_frames.py 或深检失败")
+    else:
+        nf = len(deep.get("flicker") or [])
+        nb = len(deep.get("black_windows") or [])
+        ns = len(deep.get("sync") or [])
+        judged = (deep.get("sync_info") or {}).get("judged")
+        sync_note = ("同步查了 %s 条" % judged) if judged is not None else "同步未判（没写 visual_at）"
+        ok9 = nf == 0 and nb == 0 and ns == 0
+        detail9 = "闪烁 %d · 空窗 %d · 同步超差 %d（%s）" % (nf, nb, ns, sync_note)
+        if ok9 and not judged and os.environ.get("QA_REQUIRE_SYNC"):
+            # 与 SKILL 的 QA_REQUIRE_SYNC 同义：要求"真的查过"，而不是"没报错"
+            lg.fail("G9", "帧级深检（闪烁/空窗/同步超差）",
+                    detail9 + "；QA_REQUIRE_SYNC=1 要求同步必须被判过")
+        else:
+            (lg.ok if ok9 else lg.fail)("G9", "帧级深检（闪烁/空窗/同步超差）", detail9)
+
+
 def st_qa(film, tl, work, scenes_mod=None, script=None):
     print("== QA")
     th = _theme_for(script) if script is not None else None
@@ -970,6 +1087,9 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
             print("     -", e)
     else:
         print("   [PASS] 质检通过")
+    lg = _gate()
+    if lg is not None:
+        _qa_gates(lg, rep, deep, tl, work)
     return errors
 
 
@@ -1044,6 +1164,42 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
     return made
 
 
+def _finish_gates(a):
+    """一次运行收尾：落 gates.json + 写 out/QC-REPORT.md + 统一退出码。"""
+    lg = _LEDGER
+    if lg is None:
+        return 0
+    errs = lg.exit_errors(strict=bool(getattr(a, "strict_gates", False)))
+    try:
+        gj = lg.write_json()
+    except Exception as e:                                  # noqa: BLE001
+        print("[WARN] gates.json 写入失败:", e)
+        gj = ""
+    try:
+        rep = GT.write_report(a.work, os.path.join(
+            os.path.dirname(os.path.abspath(a.out)), "QC-REPORT.md"))
+    except Exception as e:                                  # noqa: BLE001
+        print("[WARN] QC 报告写入失败:", e)
+        rep = ""
+    c = lg.counts()
+    print("")
+    print("== 门禁汇总：pass %d · fail %d · skipped %d%s"
+          % (c[GT.OK], c[GT.FAIL], c[GT.SKIP],
+             "（--strict-gates：skipped 也算失败）" if getattr(a, "strict_gates", False) else ""))
+    if gj:
+        print("   账本:", gj)
+    if rep:
+        print("   报告:", rep, " <- 交付时把这个文件一起给出")
+    if c[GT.SKIP]:
+        print("   注意：有 %d 项本次**没有执行**（skipped != 通过）" % c[GT.SKIP])
+    if errs:
+        print("   [FAIL]")
+        for e in errs:
+            print("     -", e)
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------- main
 def main():
     _setup_stdio()
@@ -1060,6 +1216,22 @@ def main():
     ap.add_argument("--force-tts", action="store_true", help="丢弃 TTS 缓存重新合成")
     ap.add_argument("--force-music", action="store_true", help="丢弃配乐重出（score 阶段）")
     ap.add_argument("--stills", default="", help="stills 阶段用：逗号分隔的 id:秒")
+    ap.add_argument("--gate", default="", choices=("",) + GT.GATE_ORDER,
+                    help="accept 阶段用：要签核哪一道闸（%s）" % " / ".join(GT.GATE_ORDER))
+    ap.add_argument("--verdict", default="approved", choices=("approved", "rejected"),
+                    help="accept 阶段用：签核结论（rejected 视为没签）")
+    ap.add_argument("--note", default="", help="accept 阶段用：签核备注（写进报告）")
+    ap.add_argument("--by", default="", help="accept 阶段用：签核人（缺省 user）")
+    ap.add_argument("--strict-gates", action="store_true",
+                    help="把 skipped 门禁也算失败（对齐 QA_REQUIRE_SYNC 语义）")
+    ap.add_argument("--strict-stale", action="store_true",
+                    help="上游产物过时算失败（默认只告警）")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="过时也照跑（会在 QC 报告里留痕）")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="跳过人工签核检查（会在 QC 报告里留痕，不算通过）")
+    ap.add_argument("--cost", action="store_true",
+                    help="每个 stage 往 work/cost.jsonl 记一行实测耗时")
     a = ap.parse_args()
 
     try:
@@ -1072,6 +1244,62 @@ def main():
         raise SystemExit("engine 只能是 pil 或 web，收到 %r" % engine)
     script["_engine"] = engine
     script["_scenes"] = str(Path(a.scenes).resolve())
+
+    # ---- 门禁账本（v0.6.0）----
+    global _LEDGER
+    _LEDGER = GT.GateLedger(a.work, script, scenes_path=a.scenes,
+                            script_path=a.script, engine=engine)
+    if a.no_gate:
+        _LEDGER.bypass("人工签核检查（--no-gate）", "本条不算通过，只记录")
+        print("[gate] --no-gate：跳过人工签核检查（会在 QC 报告里留痕）")
+
+    def _sources():
+        """源头输入：剧本与 scenes.py（改它们等于改了所有下游的依据）。"""
+        return {"script": a.script, "scenes": a.scenes}
+
+    def _stage_begin(name):
+        """stage 开始时查新鲜度并计时。返回 t0。"""
+        if name and not a.allow_stale:
+            SW.report(a.work, [name], strict=a.strict_stale, allow_stale=False,
+                      ledger=_LEDGER, sources=_sources())
+        return time.time()
+
+    def _stage_end(name, t0, **extra):
+        """stage 结束时落盘：manifest 快照 + 耗时台账。"""
+        if not name:
+            return
+        try:
+            SW.snapshot(a.work, name, _sources())
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] manifest 快照失败:", e)
+        wall = time.time() - t0
+        if a.cost:
+            try:
+                GT.append_cost(a.work, name, wall, **extra)
+            except Exception as e:                          # noqa: BLE001
+                print("   [WARN] cost.jsonl 写入失败:", e)
+        print("   [time] %s 用时 %.1fs%s" % (name, wall, "（已记 work/cost.jsonl）" if a.cost else ""))
+
+    def _check_signoff(where):
+        """交付前的签核检查：缺签只告警，--strict-gates 下算失败。"""
+        if a.no_gate:
+            return
+        state, stale = GT.signoff_state(a.work, _LEDGER.content_hash)
+        bad = [g for g, v in state.items() if v["status"] == GT.SKIP]
+        rejected = [g for g, v in state.items() if v["status"] == GT.FAIL]
+        for g in rejected:
+            _LEDGER.fail("signoff:" + g, "人工签核：" + GT.GATES[g], state[g]["detail"])
+        if bad:
+            _LEDGER.skip("signoff", "人工签核（--stage accept 签核）",
+                         "未签/已失效：%s%s"
+                         % ("、".join(bad), ("（内容已变：%s）" % "、".join(stale)) if stale else ""))
+            print("   [WARN] 人工签核未完成：%s" % "、".join(bad))
+            print("          交付前请 --stage accept --gate <名字>；"
+                  "--strict-gates 会把它算作失败")
+            for g in bad:
+                print("              %-8s %s" % (g, GT.GATES[g]))
+        elif not rejected:
+            _LEDGER.ok("signoff", "人工签核", "%d/4 道闸已签" % len(GT.GATE_ORDER))
     if a.force_music:
         plan, _why = K.music_plan(script, has_music_file=os.path.exists(os.path.join(a.work, "music.wav")))
         if plan in ("off", "bed", "file"):
@@ -1112,37 +1340,114 @@ def main():
         return mod
 
     stage = a.stage
+
+    # ---- explain：只报"哪些阶段过时了"，不跑任何 stage ----
+    if stage == "explain":
+        rows = SW.explain(a.work, sources=_sources())
+        bad = 0
+        for r in rows:
+            if r["issues"]:
+                bad += 1
+            print("%s%-8s %s" % ("!! " if r["issues"] else "OK ", r["stage"],
+                                 r["at"] or "（无记录）"))
+            for it in r["issues"]:
+                print("     -", it["reason"])
+                if it.get("rerun"):
+                    print("       最小重跑:", it["rerun"])
+        print()
+        if bad:
+            print("%d 个阶段过时。默认只告警；--strict-stale 让它失败。" % bad)
+            return 1 if a.strict_stale else 0
+        print("没有发现过时的阶段（按 work/manifest.json 判断）。")
+        return 0
+
+    # ---- accept：人工签核一道闸（写 work/signoff.json，绑内容指纹）----
+    if stage == "accept":
+        if not a.gate:
+            raise SystemExit("[accept] 必须指定要签哪一道闸：--gate %s"
+                             % " / ".join(GT.GATE_ORDER))
+        if a.verdict == "approved":
+            # 签核前必须能证明"真的看过了"：证据产物不在就拒绝签（不然签核是橡皮图章）。
+            # 证据可能在 work/（渲染产物），也可能在项目根（FACTS.md 是人写的输入），两处都找。
+            proj = os.path.dirname(os.path.abspath(a.script))
+            want = {"style": [os.path.join(a.work, "style.json"),
+                              os.path.join(a.work, "voice_plan.json")],
+                    "stills": [os.path.join(a.work, "qa", "sheet.png")],
+                    "facts": [os.path.join(proj, "FACTS.md"), os.path.join(a.work, "FACTS.md")],
+                    "release": [a.out]}.get(a.gate, [])
+            # 每一组是"多选一"：任一条路径存在就算有证据。
+            missing = None
+            if want and not any(os.path.exists(str(w)) for w in want):
+                missing = "、".join(os.path.relpath(w, proj) if os.path.isabs(w) else w
+                                   for w in want)
+            if missing:
+                raise SystemExit("[accept] 证据不存在，拒绝签核：先跑出要看的东西（缺 %s）"
+                                 % missing)
+        rec = GT.write_signoff(a.work, a.gate, _LEDGER.content_hash,
+                               verdict=a.verdict, by=a.by or "user",
+                               note=a.note,
+                               artifacts=[os.path.join(a.work, "gates.json")])
+        print("[accept] %s = %s（内容指纹 %s，%s）"
+              % (a.gate, rec["verdict"], _LEDGER.content_hash, rec["atText"]))
+        if a.verdict == "rejected":
+            print("[accept] 已记「否决」（不算签核通过）；改了内容后需重新签。")
+        p_rep = GT.write_report(a.work, os.path.join(
+            os.path.dirname(os.path.abspath(a.work)), "out", "QC-REPORT.md"))
+        print("[accept] QC 报告已更新:", p_rep)
+        return 0
+
     if stage in ("all", "style"):
+        _nm = "style" if stage == "style" else None
+        _t0 = _stage_begin(_nm)
         resolve_style(script, a.work)
+        _stage_end(_nm, _t0, n_tts=None)
         if stage == "style":
             print("== Style")
             _print_style(script["_style"])
             _need(os.path.exists(os.path.join(a.work, "style.json")), "style.json 没写出来")
+            _LEDGER.ok("style", "风格包解析", str(script["_style"].get("style")))
+            _LEDGER.write_json()
+            _finish_gates(a)
             return 0
 
     if stage in ("all", "tts"):
+        _t0 = _stage_begin("tts")
         lines = st_tts(script, a.work, force=a.force_tts)
+        _stage_end("tts", _t0, n_tts=len(lines) if isinstance(lines, list) else None)
+        # 既有行为：单跑 tts 也会排一次轴（tts.json 的时长信息要用），这里一并计时。
+        _t0 = _stage_begin("layout")
         tl = st_layout(script, a.work, lines)
-    if stage in ("all", "layout"):
-        if stage != "all":
-            _need(os.path.exists(tts_p), "没有 tts.json，先跑 --stage tts")
-            tl = st_layout(script, a.work)
+        _stage_end("layout", _t0)
+    if stage == "layout":
+        _t0 = _stage_begin("layout")
+        _need(os.path.exists(tts_p), "没有 tts.json，先跑 --stage tts")
+        tl = st_layout(script, a.work)
+        _stage_end("layout", _t0)
     if stage in ("all", "cues"):
         tl = tl if stage == "all" else ensure_tl()
-        st_cues(script, a.work, tl, engine=engine)
+        _t0 = _stage_begin("cues")
+        cues = st_cues(script, a.work, tl, engine=engine)
+        _stage_end("cues", _t0,
+                   n_cues=(len((cues or {}).get("cues") or []) if isinstance(cues, dict) else None))
     if stage in ("all", "score"):
         tl = tl if stage == "all" else ensure_tl()
+        _t0 = _stage_begin("score")
         st_score(script, a.work, tl)
+        _stage_end("score", _t0)
     if stage in ("all", "sfx"):
         tl = tl if stage == "all" else ensure_tl()
+        _t0 = _stage_begin("sfx")
         st_sfx(script, a.work, tl)
+        _stage_end("sfx", _t0)
     if stage in ("all", "audio"):
         tl = tl if stage == "all" else ensure_tl()
         _need(all(s.get("path") for s in tl["scenes"]), "timeline 里没有旁白路径，先跑 --stage tts")
         missing = [s.get("id") for s in tl["scenes"] if not os.path.exists(str(s.get("path") or ""))]
         _need(not missing, "旁白文件不存在：%s（tts 目录被删/挪过？重新跑 --stage tts）"
               % (missing[:6],))
+        _t0 = _stage_begin("audio")
         st_audio(tl, a.work, script)
+        _stage_end("audio", _t0)
 
     if stage == "stills":
         # 母版预览是"上手第一件事"，可它需要 timeline。以前干净目录直接 SystemExit，
@@ -1161,7 +1466,12 @@ def main():
             tl = ensure_tl()
         mod = load_scenes()
         specs = [x.strip() for x in a.stills.split(",") if x.strip()] if a.stills else None
-        st_stills(tl, a.work, mod, script, specs)
+        _t0 = _stage_begin("stills")
+        made = st_stills(tl, a.work, mod, script, specs)
+        _stage_end("stills", _t0)
+        _LEDGER.add("stills", "母版静帧已产出", GT.OK if made else GT.FAIL,
+                    "%d 张（要人看过才算过：--stage accept --gate stills）" % len(made or []))
+        _finish_gates(a)
         return 0
 
     if stage == "qa":
@@ -1169,8 +1479,12 @@ def main():
         tl = ensure_tl()
         _need(os.path.exists(a.out), "没有成片 %s，先跑 --stage mux" % a.out)
         mod = load_scenes(strict=False) if engine == "pil" else None
+        _t0 = _stage_begin("qa")
         errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script)
-        return 1 if errs else 0
+        _stage_end("qa", _t0)
+        _check_signoff("qa")
+        rc = _finish_gates(a)
+        return 1 if (errs or rc) else 0
 
     if stage in ("all", "frames", "mux"):
         tl = tl if stage == "all" else ensure_tl()
@@ -1184,19 +1498,37 @@ def main():
                 _need(os.path.exists(audio), "混音阶段异常：audio.wav 未生成")
             if engine == "pil":
                 mod = load_scenes()
+            _t0 = _stage_begin("frames")
             silent = st_frames(tl, a.work, mod, script, jobs=a.jobs, resume=a.resume,
                                engine=engine)
+            _stage_end("frames", _t0, frames=int(tl["frames"]))
+            if stage == "frames":
+                _LEDGER.ok("frames", "逐帧渲染", "%d 帧（%s）" % (int(tl["frames"]), engine))
+                _finish_gates(a)
+                return 0 if not _LEDGER.fails() else 1
         if stage in ("all", "mux"):
             # mux 只需要 silent.mp4 + audio.wav：不加载 scenes.py（缺场景模块也能合成）
             _need(os.path.exists(silent), "没有 silent.mp4，先跑 --stage frames")
             _need(os.path.exists(audio), "没有 audio.wav，先跑 --stage audio")
+            _t0 = _stage_begin("mux")
             film = st_mux(silent, audio, a.out, script)
+            _stage_end("mux", _t0)
+            _check_signoff("mux")
+            if stage == "mux":
+                _LEDGER.ok("mux", "合成（视频流 copy + loudnorm）", a.out)
+                _finish_gates(a)
+                return 0 if not _LEDGER.fails() else 1
             if stage == "all":
+                _t0 = _stage_begin("qa")
                 errs = st_qa(film, tl, a.work, scenes_mod=mod, script=script)
-                if errs:
+                _stage_end("qa", _t0)
+                rc = _finish_gates(a)
+                if errs or rc:
                     print("\n[质检未过] 成片已生成但没有通过门禁，按上面 [FAIL] 逐条修。")
                     return 1
-    return 0
+                return 0
+    rc = _finish_gates(a) if stage == "all" else 0
+    return rc
 
 
 if __name__ == "__main__":

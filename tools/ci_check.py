@@ -41,7 +41,9 @@ REFS = SKILL / "references"
 ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
-                 "stylekit", "voicekit", "scenes", "scenes_demo"}
+                 "stylekit", "voicekit", "scenes", "scenes_demo",
+                 # v0.6.0：门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
+                 "gates", "stagewatch", "filmcheck"}
 MAX_FILE_BYTES = 400 * 1024
 
 _results: list[tuple[bool, str, str]] = []
@@ -266,6 +268,34 @@ def t_ci_workflow():
     assert not bad, "；".join(bad[:4])
     return "%d 个 workflow 的 step 名没有裸冒号" % len(files)
 
+# ---------------------------------------------------------------- 12 film.json 契约
+def t_film_contract():
+    """用技能自带的 filmcheck.py 校验模板，并把 schema 与脚本对齐成回归。
+
+    为什么要进 CI：film.json 是唯一内容真源，而未知键以前是**静默忽略**的
+    （hold 写成 holds、kind 拼错、cue 的 at 指向不存在的句子，全都"跑得通但效果没了"）。
+    这里不重写校验逻辑，直接调技能里的 filmcheck.py——校验规则只允许有一份。
+    """
+    import subprocess
+    scripts = ROOT / "skills" / "video-studio" / "scripts"
+    film = ROOT / "skills" / "video-studio" / "assets" / "film.json"
+    schema = ROOT / "schemas" / "film.schema.json"
+    assert schema.exists(), "缺 schemas/film.schema.json（film.json 的契约）"
+    try:
+        json.loads(schema.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise AssertionError("schemas/film.schema.json 不是合法 JSON：%s" % e) from e
+    checker = scripts / "filmcheck.py"
+    if not checker.exists():
+        raise AssertionError("缺 skills/video-studio/scripts/filmcheck.py")
+    p = subprocess.run([sys.executable, str(checker), str(film)],
+                       cwd=str(scripts), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120)
+    out = (p.stdout or "") + (p.stderr or "")
+    assert p.returncode == 0, ("模板 film.json 没过契约校验（exit=%d）：\n%s"
+                               % (p.returncode, out.strip()[-600:]))
+    return "模板 film.json 通过契约校验；schema %d 字节" % len(schema.read_text(encoding="utf-8"))
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印每一节的详细证据")
@@ -287,6 +317,7 @@ def main(argv=None) -> int:
         ("9  Markdown 围栏平衡", t_md_fences),
         ("10 CI workflow 语法", t_ci_workflow),
         ("11 单文件体积", t_size),
+        ("12 film.json 契约", t_film_contract),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)

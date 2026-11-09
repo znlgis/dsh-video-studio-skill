@@ -688,6 +688,170 @@ def t_font_family():
     return detail
 
 
+def t_gates():
+    """30 门禁账本 / 签核 / QC 报告：三档状态必须能区分"没查"和"通过"。
+
+    这一条防的是 v0.6.0 自己最容易犯的错——把 skipped 混进 pass。
+    用户看到的"质检通过"必须能区分"我查了 9 项"和"我只查了 3 项"：
+    前者是真知情，后者是假安全感。顺带验签核绑内容指纹：改了剧本旧签核必须失效。
+    """
+    import tempfile
+    import gates as GT
+    w = tempfile.mkdtemp(prefix="sc_gates_")
+    lg = GT.GateLedger(w, {"title": "t", "lines": [{"text": "x"}]}, engine="pil")
+    lg.ok("A", "通过项", "1")
+    lg.fail("B", "失败项", "2")
+    lg.skip("C", "没执行项", "3")
+    c = lg.counts()
+    assert c == {"pass": 1, "fail": 1, "skipped": 1}, c
+    # 三档语义：fail 一定失败；skipped 只在 --strict-gates 下失败
+    assert len(lg.exit_errors()) == 1, "fail 没被算成失败"
+    assert len(lg.exit_errors(strict=True)) == 2, "--strict-gates 没把 skipped 升级成失败"
+    lg.write_json()
+    assert os.path.exists(os.path.join(w, "gates.json")), "gates.json 没落盘"
+    # 签核：没签 = skipped；签了 = pass；内容指纹变了 = skipped（不是 pass！）
+    ch = lg.content_hash
+    st0, _ = GT.signoff_state(w, ch)
+    assert all(v["status"] == "skipped" for v in st0.values()), st0
+    GT.write_signoff(w, "stills", ch, note="看过 sheet")
+    st1, _ = GT.signoff_state(w, ch)
+    assert st1["stills"]["status"] == "pass", st1["stills"]
+    st2, stale = GT.signoff_state(w, "别的指纹")
+    assert st2["stills"]["status"] == "skipped" and "stills" in stale, (st2, stale)
+    # 内容指纹：改剧本 / 换引擎必须变，渲染期私有键（_path/_style）不许影响
+    h1 = GT.content_hash({"title": "a", "lines": []}, engine="pil")
+    h2 = GT.content_hash({"_path": "/x", "title": "a", "lines": []}, engine="pil")
+    h3 = GT.content_hash({"title": "a", "lines": []}, engine="web")
+    assert h1 == h2, "渲染期私有键影响了内容指纹（会导致假失效）"
+    assert h1 != h3, "换引擎了内容指纹却没变（旧签核会错误地继续有效）"
+    # QC 报告：三档都要出现在矩阵里，且 skipped 不能被渲染成"通过"
+    GT.append_cost(w, "frames", 1.5, frames=30)
+    p = GT.write_report(w, os.path.join(w, "out", "QC-REPORT.md"))
+    txt = open(p, encoding="utf-8").read()
+    for must in ("门禁矩阵", "人工签核", "耗时台账", "**skipped**", "**fail**"):
+        assert must in txt, "报告里缺 %r" % must
+    assert "未通过" in txt and "通过" in txt, "报告结论段没区分通过/未通过"
+    # 原子写：不留 .tmp 尾巴
+    assert not [f for f in os.listdir(w) if f.endswith(".tmp")], os.listdir(w)
+    return "三档 1/1/1 + 签核 4 道闸 + 指纹失效 + 报告矩阵"
+
+
+def t_stagewatch():
+    """31 阶段新鲜度：改上游 -> 下游必须报过时；首跑不刷噪声；产物丢失要报。
+
+    这一条防的是 v0.6.0 前的老问题：frames 有分块指纹，其余 stage 全是裸奔
+    （改 style 后 audio 仍读旧 music.wav、改 hold 后 frames 仍用旧 cues.json，都不报错）。
+    """
+    import tempfile
+    import stagewatch as SW
+    w = tempfile.mkdtemp(prefix="sc_sw_")
+    assert all(not r["issues"] for r in SW.explain(w)), "空目录不该报过时"
+
+    def _wf(name, text):
+        p = os.path.join(w, name)
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        open(p, "w", encoding="utf-8").write(text)
+
+    _wf("style.json", "s1")
+    _wf("voice_plan.json", "v1")
+    SW.snapshot(w, "style")
+    assert not [i for r in SW.explain(w, ["style"]) for i in r["issues"]], "刚跑完就报过时"
+    _wf("tts.json", "t1")
+    SW.snapshot(w, "tts")
+    # 改 tts 的上游（style.json）-> tts 必须报 input-changed
+    _wf("style.json", "s2")
+    issues = [i for r in SW.explain(w, ["tts"]) for i in r["issues"]]
+    assert any(i["kind"] == "input-changed" for i in issues), issues
+    assert any("render.py" in (i.get("rerun") or "") for i in issues), "过时了却没给重跑命令"
+    # 产物被删 -> 必须报 output-missing
+    os.remove(os.path.join(w, "tts.json"))
+    issues = [i for r in SW.explain(w, ["tts"]) for i in r["issues"]]
+    assert any(i["kind"] == "output-missing" for i in issues), issues
+    # 默认只告警；--strict-stale 才失败
+    errs, warns = SW.report(w, ["tts"], write=lambda lv, m: None)
+    assert not errs and warns, (errs, warns)
+    errs_strict, _ = SW.report(w, ["tts"], strict=True, write=lambda lv, m: None)
+    assert errs_strict, "--strict-stale 没有让过时变成失败"
+    # **源头输入**（剧本 / scenes.py）改了但没重跑 -> 必须报 source-changed。
+    # 这条是 v0.6.0 补的洞：早期只跟踪 stage 之间的产物，"改了台词没重跑 tts" 查不出来，
+    # 而那正是最需要报警的场景（旧 tts 配新剧本 = 配音字幕全错位）。
+    w2 = tempfile.mkdtemp(prefix="sc_sw2_")
+    film = os.path.join(w2, "film.json")
+    scenes = os.path.join(w2, "scenes.py")
+    open(film, "w", encoding="utf-8").write("{\"title\":\"a\"}")
+    open(scenes, "w", encoding="utf-8").write("# v1")
+    src = {"script": film, "scenes": scenes}
+    _wf2 = lambda n, t: open(os.path.join(w2, n), "w", encoding="utf-8").write(t)
+    _wf2("tts.json", "t1")
+    SW.snapshot(w2, "tts", src)
+    issues = [i for r in SW.explain(w2, ["tts"], src) for i in r["issues"]]
+    assert not issues, "刚跑完就报过时：%s" % issues
+    open(film, "w", encoding="utf-8").write("{\"title\":\"b\"}")   # 改剧本
+    issues = [i for r in SW.explain(w2, ["tts"], src) for i in r["issues"]]
+    assert any(i["kind"] == "source-changed" for i in issues), (
+        "改了剧本却没报过时（这正是 v0.6.0 要堵的洞）：%s" % issues)
+    assert any("film.json" in i["reason"] for i in issues), issues
+    # 坏 manifest 不许崩（用户手改坏一个 json 不该让整片跑不动）
+    open(os.path.join(w, "manifest.json"), "w", encoding="utf-8").write("{broken")
+    SW.explain(w)
+    return "改上游/改源头即报过时 + 产物丢失 + strict 升级 + 坏 manifest 不崩"
+
+
+def t_parallel_frames():
+    """32 --jobs >1 的并行路径能真的跑（v0.6.0 修的 pre-existing bug）。
+
+    bug 形状：worker 从 _script_snapshot.json 读剧本，JSON 把主题色元组变成 list，
+    scenes._bg() 拿它当缓存键 -> TypeError: unhashable type: "list"，
+    于是 SKILL 里教的 --stage frames --jobs 4 直接崩。
+    这里**不跑整片**（太慢），只验两条防线：① 主题色能过 JSON 往返当缓存键；
+    ② worker 反序列化后会重解风格（_style 里的颜色回到 tuple）。
+    """
+    import json as _json
+    import tempfile
+    import stylekit as ST
+    th = dict(ST.THEMES["tech-deep"])
+    # ① 防御层：scenes._hashable 把 list 冻结成 tuple
+    scenes = _load_scenes_mod()
+    if scenes is not None and hasattr(scenes, "_hashable"):
+        frozen = scenes._hashable(("baked", th["bg"], th["bg2"]))
+        hash(frozen)                       # 不能抛 unhashable
+        assert isinstance(frozen[1], tuple), "主题色没被冻结成 tuple：%r" % (frozen[1],)
+    # ② 根因层：JSON 往返后，_render_chunk_worker 里必须能拿到 tuple 的 bg
+    round_trip = _json.loads(_json.dumps({"bg": th["bg"]}, ensure_ascii=False))
+    assert isinstance(round_trip["bg"], list), "前提变了：JSON 居然保住了 tuple"
+    w = tempfile.mkdtemp(prefix="sc_par_")
+    snap = os.path.join(w, "snap.json")
+    script = {"title": "t", "style": "tech-deep", "lines": [{"text": "x"}]}
+    script["_style"] = ST.resolve_script_style(script)
+    with open(snap, "w", encoding="utf-8") as fh:
+        _json.dump(script, fh, ensure_ascii=False)
+    back = _json.load(open(snap, encoding="utf-8"))
+    assert isinstance(back["_style"]["theme"]["bg"], list), "前提变了"
+    # 重解风格（render.resolve_style 的纯函数部分）：必须回到 tuple
+    again = ST.resolve_script_style(back)
+    assert isinstance(again["theme"]["bg"], tuple), (
+        "--jobs >1 时主题色仍是 list，_bg() 会 TypeError（这正是被修的 bug）：%r"
+        % (again["theme"]["bg"],))
+    return "主题标量可哈希 + 反序列化后重解回 tuple"
+
+
+def _load_scenes_mod():
+    """加载 assets/scenes.py 模板（找不到就返回 None：CI 里可能只拷 scripts/）。"""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "..", "assets", "scenes.py")
+    if not os.path.exists(cand):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("sc_assets_scenes", cand)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:                                       # noqa: BLE001
+        return None
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -718,6 +882,9 @@ CASES = [
     ("27 内容指纹确定性", t_style_determinism),
     ("28 声线计划", t_voice_plan),
     ("29 字体族与主题字幕", t_font_family),
+    ("30 门禁账本与签核", t_gates),
+    ("31 阶段新鲜度守卫", t_stagewatch),
+    ("32 并行渲染主题序列化", t_parallel_frames),
 ]
 
 

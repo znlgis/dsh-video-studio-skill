@@ -528,10 +528,25 @@ def _vignette_layer(th, yy, xx):
     return m
 
 
+def _hashable(v):
+    """把 list 递归转成 tuple：主题从 JSON 读回来时元组会变成 list，而 list 不能当 dict 键。
+
+    为什么需要它：--jobs >1 时 render.py 的 worker 从剧本快照读 script，主题色的
+    (r,g,b) 元组变成 [r,g,b]，于是下面 _bg 的缓存键抛 unhashable type: "list"。
+    render.py 已按剧本重解风格，但这层防御留着——scenes.py 是用户会拷走改的模板。
+    """
+    if isinstance(v, (list, tuple)):
+        return tuple(_hashable(x) for x in v)
+    if isinstance(v, dict):
+        return tuple(sorted((k, _hashable(x)) for k, x in v.items()))
+    return v
+
+
 def _bg(th):
     """预烘焙背景：主题色渐变 + 材质 + 颗粒 + 暗角，一次算好，逐帧只 copy / 变换。"""
-    key = ("baked", th.get("id"), th["bg"], th["bg2"], th["texture"], th["grain"],
-           th["vignette"], th["vignette_tint"], th["texture_alpha"], th["grain_freq"])
+    key = _hashable(("baked", th.get("id"), th["bg"], th["bg2"], th["texture"], th["grain"],
+                     th["vignette"], th["vignette_tint"], th["texture_alpha"],
+                     th["grain_freq"]))
     got = _CACHE.get(key)
     if got is not None:
         return got

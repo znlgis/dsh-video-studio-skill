@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.5.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -20,7 +20,14 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 3 种版式）、配乐（8 套风格：调池/BPM 梯度/进行/动机/配器/鼓型）、旁白（9 个声线 × 6 档语气）
 > 与节奏；`"style": "auto"` 按内容自动选，三级内容指纹保证"改错别字不换整首曲子"。
 > 不写 `style` 字段 = v0.4 行为（配乐 PCM 逐样本一致，selfcheck 有断言）。
-> 详见 [CHANGELOG.md](CHANGELOG.md)、SKILL.md §5.5 与 references/style-packs.md。
+> **v0.6.0（交付可信化）**：解决"**质检结论只活在控制台里**"。新增门禁账本与机读交付报告
+> `out/QC-REPORT.md`（gate matrix 分 **pass / fail / skipped 三档**——"没执行"不再冒充"通过"）、
+> 人工签核 `--stage accept`（绑内容指纹，改了剧本旧签核自动失效）、阶段新鲜度 `--stage explain`
+> （改上游后哪些产物还是旧的、最小重跑什么）、开渲前成本预演 `tools/estimate.py`、
+> `film.json` 契约校验 `filmcheck.py`（改成 `holds` 这种拼写错误不再静默失效）。
+> 顺手修掉一个**已发布版本里的真 bug**：`--jobs >1` 并行渲染因主题色元组被 JSON 变成 list 而直接崩溃
+> ——也就是 README 下面教的"长片分块并行"此前根本跑不通。
+> 详见 [CHANGELOG.md](CHANGELOG.md)、SKILL.md §7.0 与 references/change-impact.md。
 
 ## 安装
 
@@ -89,9 +96,12 @@ cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
 cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 29 条环境/回归断言（20 秒，不联网）
+python selfcheck.py                                     # 32 条环境/回归断言（20 秒，不联网）
+python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
+cat out/QC-REPORT.md                                    # v0.6：机器可读交付结论（pass/fail/skipped）
+python render.py --stage accept --gate release          # v0.6：人工签核（绑内容指纹）
 ```
 
 分阶段（每步落盘、可单独重跑）：
@@ -117,7 +127,15 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 
 `<SKILL_DIR>` 是 `skill` 工具加载时回报的 resourceBase 目录（`.../skills/video-studio/`）。
 
-分阶段（v0.2 起**每个 stage 只做自己的事**；完整 10 个 stage 见上）：`--stage tts | layout | cues | score | sfx | audio | frames | mux | qa | stills`。
+分阶段（v0.2 起**每个 stage 只做自己的事**）：`--stage style | tts | layout | cues | score | sfx | audio | frames | mux | qa | stills | accept | explain`。
+
+**v0.6 的三个新开关**（都是"让结论可追责"，不是新玩具）：
+
+| 想要 | 怎么做 |
+|---|---|
+| 交付前把"没执行"也算失败 | `--stage qa --strict-gates`（对齐 `QA_REQUIRE_SYNC` 语义） |
+| 改完东西不知道要重跑什么 | `--stage explain`（机器判断过时阶段 + 给最小重跑命令），表见 [references/change-impact.md](skills/video-studio/references/change-impact.md) |
+| 规整 `film.json` 避免静默失效 | `python skills/video-studio/scripts/filmcheck.py film.json`（`holds`→提示写成 `hold`） |
 
 长片：`--stage frames --jobs 4`（按绝对帧号分块并行）+ `--resume`（中断只补缺块）。
 
@@ -133,6 +151,10 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 | **声音和画面对不上（v0.3）** | **提示点系统**：画面登记 cue → 音效按 cue 合成，改节奏不用重新对时间 |
 | **声音单薄、只有"叮叮咚咚"（v0.3）** | `sfxkit` 物理建模音效 + `scorekit` 一张和弦表贯穿全片 |
 | **一帧白闪/两秒空窗没人发现（v0.3）** | `qa_frames` 帧级深检：单帧闪烁、画面空窗、音画同步 |
+| **"我查过了"无法复现（v0.6）** | `out/QC-REPORT.md` + `work/gates.json`：三档 gate matrix，"没执行"独立成 `skipped` |
+| **"我签过了"变成空头支票（v0.6）** | 签核绑内容指纹：改剧本 / `scenes.py` / 引擎，旧签核自动失效 |
+| **改一句台词不知道要重跑什么（v0.6）** | `work/manifest.json` 记每阶段输入/输出指纹，`--stage explain` 直接给最小重跑命令 |
+| **`holds` 写成拼写错误却静默失效（v0.6）** | `schemas/film.schema.json` + `filmcheck.py`，并接进 `ci_check` 第 12 项 |
 
 ## 文件结构
 
@@ -143,10 +165,13 @@ icon.svg / locale/*.json     插件页展示元数据
 skills/video-studio/
   SKILL.md                   主线：上手 / 八阶段 / 引擎选型 / 画质 / 声音 / 提示点 / 停留窗口 / 质检 / 故障速查
   references/                pipeline · scene-authoring · audio · sfx-design · web-engine · frame-qa
-                             quality-gates · pitfalls
+                             quality-gates · change-impact · style-packs · pitfalls
   scripts/filmkit.py         生产内核（字体/排版/字幕/音频总线/CueBus/TTS/时间轴/编码/质检）
-  scripts/render.py          编排器（10 个独立 stage、pil|web 双引擎、分块并行、断点续跑、母版预览）
-  scripts/selfcheck.py       回归自检（29 条"曾真的坏过"的断言）
+  scripts/gates.py           v0.6 门禁账本 / QC 报告渲染 / 人工签核（绑内容指纹）
+  scripts/stagewatch.py      v0.6 阶段新鲜度（work/manifest.json + --stage explain）
+  scripts/filmcheck.py       v0.6 film.json 契约校验（未知键/枚举/跨字段）
+  scripts/render.py          编排器（13 个 stage、pil|web 双引擎、分块并行、断点续跑、母版预览、门禁账本）
+  scripts/selfcheck.py       回归自检（32 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
@@ -155,7 +180,9 @@ skills/video-studio/
   assets/film.json           剧本模板（含 hold / bpm / music / sfx.cues）
   assets/scenes.py           场景模板（开场 / 正文卡片 / 收尾 + cues() 钩子）
   assets/web/                浏览器页面模板（原生 Canvas2D 确定性时间轴）
-tools/ci_check.py            仓库级体检（语法/JSON/依赖白名单/打包卫生/文档引用，不需 ffmpeg）
+tools/ci_check.py            仓库级体检（12 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约，不需 ffmpeg）
+tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读）
+schemas/film.schema.json     film.json 的契约（draft-07 子集）
 .github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu）
 ```
 
@@ -192,9 +219,10 @@ peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 D
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 11 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
+python tools/ci_check.py -v     # 12 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
                                 #         npm pack 打包卫生 / 文档路径引用 / Python 3.9 语法 /
-                                #         Markdown 围栏平衡 / CI workflow 语法 / 单文件体积
+                                #         Markdown 围栏平衡 / CI workflow 语法 / 单文件体积 /
+                                #         film.json 契约（调 filmcheck.py，规则只留一份）
 ```
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。

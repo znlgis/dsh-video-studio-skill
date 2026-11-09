@@ -2,6 +2,98 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.6.0 — 交付可信化：让"我查过了 / 我签过了 / 改一句要重跑什么"都能拿证据
+
+> 这一版不加生成能力，加的是**可追责性**。起因是一次对照：把本项目与另一个成熟插件
+> （本地 ComfyUI 短剧工作室）逐项对比，发现对方的执行层本机完全跑不动，
+> 但它的**编排层**——"人怎么被叫住""改一句要重跑什么""这笔账记在哪"——写得极细，
+> 而这三件事在本项目里全是散文承诺。
+> 对照后确认了五处"文档承诺了、代码没做"，本版全部补上并补了回归断言。
+
+### 修掉的五处「承诺 vs 实际」
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `out/QC-REPORT.md` 在 G6 交付清单里被点名，**全仓 grep 只有那一处命中，没有任何代码写它** | 质检结论只活在 stdout | 新增 `gates.py` 门禁账本 + 报告渲染，`--stage qa` / `--stage all` 收尾自动写 |
+| "先确认风格""亲眼看 3 张静帧"全是散文，**换会话就无法证明看过哪一版** | 没有签核账本 | `--stage accept --gate style\|stills\|facts\|release` 写 `work/signoff.json`，绑内容指纹 |
+| 除了 `frames` 的分块指纹，**其余 stage 全裸奔**：改 `style` 后 audio 仍读旧 `music.wav`、改 `hold` 后 frames 仍用旧 `cues.json`，且都不报错 | 只修过一个点 | 新增 `stagewatch.py`：每 stage 记输入/输出指纹，`--stage explain` 报过时 + 给最小重跑命令 |
+| `SUB_MAX_CHARS = 24` 定义后**零引用**（SKILL `4 自己承认"别指望它拦你"） | 常量接了没人调 | 由 `filmcheck` 与报告矩阵接管超长字幕/契约类判据（见下） |
+| `film.json` 未知键**静默忽略**：`hold→holds` / `kind` 拼错 / `cues[].at→time` 全都"跑得通但效果没了" | 只有 Python traceback 兜底 | 新增 `schemas/film.schema.json` + `filmcheck.py`（未知键给"是不是想写 X"），接进 `ci_check` 第 12 项 |
+
+### 修掉一个**已发布版本里的功能性 bug**
+
+`--jobs >1` 的并行渲染**一直是崩的**——而 SKILL/README 都在教用户用它。
+
+- **形状**：worker 从 `work/_script_snapshot.json` 读剧本，JSON 把主题色的 `(r,g,b)` 元组变成 `list`；
+  `scenes._bg()` 拿 `th["bg"]` 当缓存键 → `TypeError: unhashable type: "list"`。
+- **为什么一直没被发现**：默认 `--jobs 1` 在父进程内渲染，不经过快照反序列化，所以单进程永远正常。
+- **修法**（根因 + 防御）：worker 反序列化后**按剧本重解风格**（纯函数，拿回元组，也保证父子主题逐字段一致）；
+  `scenes.py` 的 `_bg` 缓存键加 `_hashable()` 冻结兜底（它是用户会拷走改的模板）。
+- **回归**：`selfcheck` 第 32 条断言"JSON 往返后重解必须回到 tuple"，并验 `_hashable` 可哈希。
+
+### 新增
+
+- **`scripts/gates.py`（约 440 行，纯标准库）**：`GateLedger`（pass / fail / skipped 三档）、
+  `out/QC-REPORT.md` 渲染（gate matrix + 实测值 + 签核 + 耗时台账 + 结论话术）、
+  `signoff` 读写与内容指纹校验、`append_cost` / `read_cost` 耗时台账、`atomic_write_json`。
+- **`scripts/stagewatch.py`（约 260 行）**：`STAGE_IO` 依赖表、指纹（小文件 sha1 / >8 MB 走 size+mtime）、
+  快照、`check` / `explain` / `report`。
+- **`scripts/filmcheck.py`（656 行）** + **`schemas/film.schema.json`（528 行）**：draft-07 子集手写校验，
+  未知键 WARN 带拼写建议、枚举/范围 ERROR、跨字段（cue 引用的 `l0x` 必须存在、hold+语音预估与 timeline 对账）。
+  `style` 枚举从 `stylekit.STYLE_IDS` **单向读取，不复制**；stylekit 缺失时降级 WARN 不报错。
+- **`tools/estimate.py`（578 行，纯标准库）**：开渲前算帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，
+  `--json` 可机读。基准常量集中在文件顶部，换机请重测回填。
+- **`references/change-impact.md`**：改了 `text` / `sub` / `hold` / `kind` / `style` / `scenes.py` / `crf` / `engine`
+  分别失效什么、最小重跑什么、成本量级，外加三个真实犯过的错误做法。
+
+### 命令面变化（全部向后兼容，老项目不用改）
+
+| 新增 | 作用 |
+|---|---|
+| `--stage accept --gate <闸> [--note] [--by]` | 人工签核一道闸（`style / stills / facts / release`） |
+| `--stage explain [--json]` | 哪些阶段过时了、为什么、最小重跑命令 |
+| `--strict-gates` | 把 `skipped` 升级为失败（对齐 `QA_REQUIRE_SYNC` 语义） |
+| `--strict-stale` / `--allow-stale` | 阶段过时：失败 / 显式放行（放行会留痕） |
+| `--no-gate` | 跳过签核检查（**会在 QC 报告里留痕，不算通过**） |
+| `--cost` | 每个 stage 往 `work/cost.jsonl` 记一行实测墙钟 |
+
+### 门禁与回归
+
+- **selfcheck 29 → 32**：新增「30 门禁账本与签核」「31 阶段新鲜度守卫」「32 并行渲染主题序列化」。
+- **三个变异测试确认断言真的会失败**（不是橡皮图章）：
+  把 `skipped` 当通过 → 第 30 条红；签核不绑指纹 → 第 30 条红；`stagewatch` 永不报过时 → 第 31 条红。
+- **ci_check 11 → 12**：新增「film.json 契约」，直接调 `filmcheck.py`（校验规则只留一份，不在 CI 里重写）。
+- 依赖白名单补 `gates / stagewatch / filmcheck`（同目录本地模块，不是三方依赖）。
+
+### 实测（本机，2026-11-09）
+
+- 模板片全链 `--stage all --jobs 2 --cost`：**门禁 pass 7 / fail 0 / skipped 1**（skipped = 人工签核未做），
+  `work/manifest.json` 记录 9 个阶段，`--stage explain` 干净，`out/QC-REPORT.md` 正常生成。
+- `--jobs 2` 修复前后：修前 `TypeError: unhashable type: "list"` 直接崩；修后 870 帧两段并行正常出片。
+- `python selfcheck.py` → PASS 32 / FAIL 0 / SKIP 0；`python tools/ci_check.py` → PASS 12 / FAIL 0。
+
+### 已知限制
+
+1. `estimate.py` 是**预演**不是实测：没有 `work/timeline.json` 时按 4.2 字/秒粗估（±10–20%），
+   `layout/cues/audio/sfx` 四行是经验模型；`--jobs` 按 12 核封顶线性折算。
+2. `stagewatch` 的大文件（>8 MB）走 size+mtime 快路径，**内容变了但大小与 mtime 都没变**的情况查不出
+   （代价考量：1080p 的 `audio.wav` 每 stage 算 sha1 会让 QA 慢一倍）。
+3. `filmcheck` 的 cue `type` 不校验 sfxkit 配方名（配方表会演进，硬编码会误杀），
+   timeline 对账是启发式，只 WARN。
+4. 签核的证据检查是**"产物存在"级别**（如 `stills` 要求 `work/qa/sheet.png`），
+   无法证明人真的看了——本会话拿不到会话记录钩子，退化方案到此为止。
+5. `ffmpeg -version` 只能证明"能跑"，不能证明有 `xfade` / `drawtext`；
+   缓解是把来源写进 `ffmpeg_source()` 并在探测顺序里把便携/WinGet 排到 PATH 之前。
+
+### 升级须知（v0.5 → v0.6）
+
+1. **必需**多拷两个文件：`scripts/gates.py`、`scripts/stagewatch.py`——
+   `render.py` 直接 import 它们，少一个就是 `ModuleNotFoundError`。
+2. 老项目照旧能跑：不写新字段、不加新开关 = v0.5 行为。首次跑会多出
+   `work/manifest.json` / `work/gates.json` / `out/QC-REPORT.md`，都是新增文件。
+3. `--stage qa` 的退出码语义不变（仍按 error 判定）；只有显式加 `--strict-gates` 才会因 `skipped` 失败。
+4. 想用长片并行：现在可以真的用 `--stage frames --jobs 4` 了（修之前会崩）。
+
 ## 0.5.1 — 修 CI：selfcheck 第 29 条把"系统装了几族字体"当成产品缺陷
 
 > 症状：`skill selfcheck (Linux)` 红，Windows 的 repo check 绿。

@@ -1,0 +1,528 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/znlgis/dsh-video-studio-skill/schemas/film.schema.json",
+  "title": "video-studio film.json（剧本契约）",
+  "description": "video-studio 的剧本契约（唯一内容真源）。这是 JSON Schema draft-07 的**子集**：\n只用到 type / enum / required / properties / additionalProperties / items / minimum / maximum / pattern。\n\n为什么不写死 additionalProperties:false：draft-07 子集里没有 patternProperties，\n表达不了“下划线开头的扩展键豁免”这条规则，硬写 false 会把 _comment 这类注释键判死。\n所以未知键**不在 schema 层判死**，而是由 skills/video-studio/scripts/filmcheck.py 报 WARN\n（并给出“是不是想写 X”的建议）——schema 负责文档与 IDE 补全，filmcheck 负责执行。\n\n与 render.py 的 load_script() 的关系：load_script 是权威硬校验（title/lines 必填、lines 非空、\n每条有 text、id 不重复、bpm >0 或 auto）。本 schema 是它的补强（枚举/范围/嵌套键），不与之矛盾；\n两者都允许的脚本才能跑通。范围类约束以本文件为准，跨字段约束（cue 的 at 引用、hold 与 timeline\n对账）只有 filmcheck.py 能查。",
+  "type": "object",
+  "required": [
+    "title",
+    "lines"
+  ],
+  "properties": {
+    "_comment": {
+      "type": "string",
+      "description": "下划线开头的键是扩展位：schema 与 filmcheck 都不检查，渲染器也不读（模板用它写迁移说明）"
+    },
+    "title": {
+      "type": "string",
+      "description": "片名（必填）：顶栏常驻，也参与风格/配乐种子指纹"
+    },
+    "end_text": {
+      "type": "string",
+      "description": "片尾结束字（模板写“完”）；scenes.py 用来画收尾大字，可留空"
+    },
+    "style": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "tech-deep",
+        "magazine",
+        "paper",
+        "vivid",
+        "mono",
+        "cinema",
+        "lo-fi",
+        "epic"
+      ],
+      "description": "风格包 id：一套决定画风+配乐+旁白+节奏。“auto”= 按内容自动选；不写这个键 = v0.4 legacy 行为（逐样本兼容）。枚举真值来自 stylekit.STYLES，新增风格时先改那边再改这里"
+    },
+    "engine": {
+      "type": "string",
+      "enum": [
+        "pil",
+        "web"
+      ],
+      "description": "渲染引擎：pil = Pillow 逐帧（默认，40–80 fps）；web = 无头浏览器逐帧（80–130 ms/帧，需要 playwright + assets/web/）"
+    },
+    "voice": {
+      "type": [
+        "string",
+        "object"
+      ],
+      "description": "字符串 = edge-tts voice id（如 zh-CN-YunxiNeural，legacy 单声线路径）；对象 = v0.5 声线策略（map 按 kind 映射 persona、auto、jitter、max_distinct、rate_range、cps_band），此时忽略 rate/pitch 的单值覆盖语义"
+    },
+    "rate": {
+      "type": "string",
+      "pattern": "^\\s*[+-]?\\d+\\s*%\\s*$",
+      "description": "语速，如 \"+6%\" / \"-2%\"（edge-tts 只接受整数）；超过 +15% 会有机械感"
+    },
+    "pitch": {
+      "type": "string",
+      "pattern": "^\\s*[+-]?\\d+\\s*Hz\\s*$",
+      "description": "音高，如 \"+0Hz\" / \"-2Hz\""
+    },
+    "bpm": {
+      "type": [
+        "number",
+        "string"
+      ],
+      "minimum": 0,
+      "description": "配乐 BPM：数字必须 > 0（这里是 ≥0 的宽松下限，0 与负数由 filmcheck 报 error）；\"auto\" = 按风格 BPM 梯度 + 内容指纹决定。music.bpm 优先级更高"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "配乐/纹理种子（缺省 7）；music.seed 优先"
+    },
+    "crf": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 51,
+      "description": "x264 CRF：17 更锐利（体积约 +30%），18 是 filmkit 默认；范围 1–51"
+    },
+    "preset": {
+      "type": "string",
+      "enum": [
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow"
+      ],
+      "description": "x264 preset：medium 是实测基准（141 fps @crf17）；slow 更小更慢，veryfast 只适合预览"
+    },
+    "lines": {
+      "type": "array",
+      "description": "台词数组（必填且非空）：一句一个对象，顺序即播放顺序。id 缺省时 render.py 自动生成 l01、l02…；sfx.cues 的 at 用同一个 id 定位",
+      "items": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "description": "场景 id（TTS 文件与 cue 都靠它定位）。缺省 = l%02d；一旦写 sfx.cues 就显式给 id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "hook",
+              "body",
+              "quote",
+              "outro",
+              "emphasis",
+              "calm"
+            ],
+            "description": "段落类型：hook 开场 / body 正文 / quote 引用 / outro 收尾 / emphasis 强调 / calm 沉静。决定声线、语气、版式与配乐能量"
+          },
+          "text": {
+            "type": "string",
+            "description": "朗读文本（必填，不能为空）：自然口语，TTS 念这一句"
+          },
+          "sub": {
+            "type": "string",
+            "description": "上屏字幕：短、一行优先（约 ≤24 个中文字）；缺省沿用 text"
+          },
+          "big": {
+            "type": "string",
+            "description": "画面大字（标题/金句）"
+          },
+          "subtitle": {
+            "type": "string",
+            "description": "副标题（版式可用的第二行小字，可选）"
+          },
+          "chapter": {
+            "type": "string",
+            "description": "章节标签，如 \"02 · 怎么做到的\"；同一章节内轮换版式，不会每句都跳"
+          },
+          "kicker": {
+            "type": "string",
+            "description": "小标签（如 \"PIPELINE\"），版式里的英文眉标"
+          },
+          "items": {
+            "type": "array",
+            "description": "要点列表（版式画成勾选卡片）；items.py 只读 text/ok",
+            "items": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "要点文字"
+                },
+                "ok": {
+                  "type": "boolean",
+                  "description": "true = 勾（绿色），false = 叉（红色）"
+                }
+              }
+            }
+          },
+          "hold": {
+            "type": "number",
+            "minimum": 0,
+            "description": "语音结束后额外停留秒数（让观众看清）；缺省用全局 hold / 风格 pacing"
+          },
+          "lead": {
+            "type": "number",
+            "minimum": 0,
+            "description": "句前留白秒数；覆盖全局 lead 与 voice_plan 的逐句 lead"
+          },
+          "tail": {
+            "type": "number",
+            "minimum": 0,
+            "description": "句后留白秒数（一般通过 tail_map / voice_plan 控制，这里少见）"
+          },
+          "persona": {
+            "type": "string",
+            "description": "显式声线 persona（voicekit.PERSONA_IDS：narrator_male / narrator_female / warm_female / bright_female / authority_male / young_male / teen_male / dialect_ne_female / dialect_sx_female）"
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "body",
+              "hook",
+              "quote",
+              "outro",
+              "emphasis",
+              "calm"
+            ],
+            "description": "显式语气（voicekit.VOICE_TONES 的键）：覆盖 kind 规则"
+          },
+          "voice": {
+            "type": "string",
+            "description": "显式 edge-tts voice id（覆盖 persona 底子）"
+          }
+        }
+      }
+    },
+    "lead": {
+      "type": "number",
+      "minimum": 0,
+      "description": "全局句前留白（秒）。缺省取风格 pacing（v0.5 body 基准 0.62）"
+    },
+    "tail": {
+      "type": "number",
+      "minimum": 0,
+      "description": "全局句后留白（秒）。缺省取风格 pacing（v0.5 body 基准 0.92）"
+    },
+    "min_dur": {
+      "type": "number",
+      "minimum": 0,
+      "description": "每段最短时长（秒）：语音太短时把画面撑住，缺省 3.0–4.0（按风格）"
+    },
+    "hold": {
+      "type": "number",
+      "minimum": 0,
+      "description": "全局停留秒数（语音结束后的额外停留），逐句 hold 优先"
+    },
+    "max_dur": {
+      "type": "number",
+      "minimum": 0,
+      "description": "每段最长时长（秒）：超过就截断（会截断旁白，慎用）"
+    },
+    "bar": {
+      "type": "number",
+      "minimum": 0,
+      "description": "按小节对齐（秒）：>0 时每段时长向上取整到整数倍。注意 render.py 目前未传这个值给 build_timeline（保留字段）"
+    },
+    "sub_max_hold": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "字幕最长停留秒数（null = 覆盖整句）；拍的是“字幕跟读完”，不是“画面慢放”"
+    },
+    "trim_silence": {
+      "type": "boolean",
+      "description": "TTS 后是否裁掉首尾静音（默认 true；要保留 edge-tts 尾部 ~0.95 s 静音就设 false）"
+    },
+    "trim_db": {
+      "type": "number",
+      "description": "裁静音的门限 dBFS（默认 -42.0）；太激进会把气声裁掉"
+    },
+    "tts_workers": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "TTS 并发句数（默认 4；edge-tts 免费端点别开太大）"
+    },
+    "chunk_frames": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "分块渲染的块大小（帧）；0 = 按 frames/jobs/4 自动算。写死它会同时进分块计划指纹"
+    },
+    "reencode_video": {
+      "type": "boolean",
+      "description": "mux 时是否重编码视频（默认 false = -c:v copy，只改封装与音频）"
+    },
+    "voice_gain": {
+      "type": "number",
+      "description": "旁白总增益（混音侧线性倍数，默认 1.0）"
+    },
+    "whoosh": {
+      "type": "boolean",
+      "description": "v0.2 兼容：没有 cues.json 时每段开头一声 whoosh（默认 true）"
+    },
+    "whoosh_amp": {
+      "type": "number",
+      "minimum": 0,
+      "description": "旧版 whoosh 的幅度（默认 0.055–0.06）"
+    },
+    "tail_map": {
+      "type": "object",
+      "description": "按 lines id 覆盖句后留白：{\"l03\": 1.4}（逐句微调用）"
+    },
+    "pacing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "节奏覆盖（优先于 lead/tail/min_dur/hold 字段，也优先于风格 pacing）",
+      "properties": {
+        "lead": {
+          "type": "number",
+          "minimum": 0,
+          "description": "句前留白"
+        },
+        "tail": {
+          "type": "number",
+          "minimum": 0,
+          "description": "句后留白"
+        },
+        "min_dur": {
+          "type": "number",
+          "minimum": 0,
+          "description": "最短段长"
+        },
+        "hold": {
+          "type": "number",
+          "minimum": 0,
+          "description": "全局停留"
+        },
+        "item_stagger": {
+          "type": "number",
+          "minimum": 0,
+          "description": "要点条目的入场步长（秒）"
+        }
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "视觉覆盖（v0.5）：一般不用写，风格包已经决定；要锁主题/版式时才用",
+      "properties": {
+        "theme": {
+          "type": "string",
+          "description": "锁主题 id（等价于锁 style，主题与风格 1:1）"
+        },
+        "layout": {
+          "type": "string",
+          "description": "锁版式名（stylekit.LAYOUTS 的键，如 left-stack / center-stack / split-right）"
+        },
+        "theme_overrides": {
+          "type": "object",
+          "description": "主题字段覆盖：{\"accent\": \"#ff8a3d\"}（只接受主题里已存在的键）"
+        }
+      }
+    },
+    "music": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "配乐：scorekit 程序化生成 / v0.2 和弦床 / 外部 wav / 关掉。不写 mode 时走 v0.2 兼容链（有 bpm 就生成，没有就沿用）",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "false = 本片不要配乐（等价于 mode=off）"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "score",
+            "bed",
+            "file",
+            "off"
+          ],
+          "description": "score = scorekit 程序化配乐；bed = v0.2 和弦床；file = 用外部 work/music.wav；off = 不要配乐（不读也不删 music.wav）"
+        },
+        "style": {
+          "type": "string",
+          "description": "\"auto\" 或风格 id：配乐风格（缺省跟随全片 style）"
+        },
+        "mood": {
+          "type": "string",
+          "description": "\"auto\" 或情绪名（steady/reflective/hopeful/uplifting/calm/driving，按风格缺省）"
+        },
+        "bpm": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "minimum": 0,
+          "description": "配乐 BPM：数字必须 > 0；\"auto\" = 风格梯度 + 指纹。优先级高于顶层 bpm"
+        },
+        "key": {
+          "type": "string",
+          "description": "调性：\"auto\" 或 C/G/D/F/A/Bb/Dm/Am/Em/Cm；缺省按风格调池选"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "配乐种子（缺省 7）；同一 seed 逐采样一致"
+        },
+        "seed_from_content": {
+          "type": "boolean",
+          "description": "种子是否掺入内容指纹（默认 true：改台词换 BPM/调性，不换细节音色）"
+        },
+        "gain_db": {
+          "type": "number",
+          "description": "配乐总线增益 dB（默认 -1.5，混音前）"
+        },
+        "duck_db": {
+          "type": "number",
+          "description": "音效响起时配乐让位深度 dB（默认按风格 2.0–4.5）"
+        },
+        "seg": {
+          "type": "number",
+          "minimum": 0,
+          "description": "v0.2 和弦床的段长秒数（默认 4.0）"
+        },
+        "amp": {
+          "type": "number",
+          "minimum": 0,
+          "description": "v0.2 和弦床幅度（默认 0.055）"
+        },
+        "gain": {
+          "type": "number",
+          "minimum": 0,
+          "description": "v0.2 和弦床增益（默认 0.9）"
+        },
+        "xfade": {
+          "type": "number",
+          "minimum": 0,
+          "description": "v0.2 和弦床交叉淡化秒数（默认 1.2）"
+        },
+        "chords": {
+          "type": "array",
+          "description": "v0.2 兼容：和弦频率表 [[220, 261.63, 329.63], ...]；只有 mode=bed/兼容链用得到",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "sections": {
+          "type": "array",
+          "description": "手工分段：每项 {id, at 或 start, end, energy, chords, layers…}；at 可写 \"l03\" 让分段跟着场景走",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "sfx": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "音效：按 cues 在绝对时刻落位（画面提示点驱动声音，不靠“对齐猜”）",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "false = 不登记 film.json 的 cues（scenes.py 的 cues() 钩子仍会跑）"
+        },
+        "gain_db": {
+          "type": "number",
+          "description": "音效总线增益 dB（默认 0）"
+        },
+        "mix_gain_db": {
+          "type": "number",
+          "description": "混音时音效总线额外增益 dB（默认 0）"
+        },
+        "cues": {
+          "type": "array",
+          "description": "提示点数组：每条 {at, type, dur, gain, ...}；未知参数原样透传给 sfxkit 配方（size/pan/seed/pitch…）",
+          "items": {
+            "type": "object",
+            "required": [
+              "at",
+              "type"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "at": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "时刻：数字 = 绝对秒；\"abs:12.5\" = 绝对秒；\"l03\" = 场景起点；\"l03+0.35\" / \"l03-0.2\" = 相对场景 start 的偏移。用 id 写法时该 id 必须存在于 lines"
+              },
+              "type": {
+                "type": "string",
+                "description": "sfxkit 配方名或别名：whoosh / riser / impact / ui_blip / ui_click / data_chirp / typing / wind / rain / glitch / reverse_swell …（别名 blip→ui_blip、click→ui_click、chirp→data_chirp、wind→wind 等）"
+              },
+              "dur": {
+                "type": "number",
+                "minimum": 0,
+                "description": "时长秒数（不写用配方默认）"
+              },
+              "gain": {
+                "type": "number",
+                "description": "该条增益 dB"
+              },
+              "size": {
+                "type": "number",
+                "description": "impact 的体量参数（1 = 默认）"
+              },
+              "pan": {
+                "type": "number",
+                "description": "声像 -1（左）~ +1（右）"
+              },
+              "seed": {
+                "type": "integer",
+                "description": "该条随机种子（同 seed 逐采样一致）"
+              },
+              "visual_at": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "可选锚点：画面上那个事件真正发生的秒数（数字或 \"abs:12.42\"）；qa_frames 用它查音画同步"
+              },
+              "visual_t": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "visual_at 的兼容写法（qa_frames 两个都认）"
+              }
+            }
+          }
+        }
+      }
+    },
+    "web": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "浏览器引擎（engine=web）专用配置；走 PIL 时整块可删",
+      "properties": {
+        "entry": {
+          "type": "string",
+          "description": "入口 HTML 路径（相对 film.json 或绝对路径）；缺省 = <项目>/web/index.html"
+        },
+        "chunk_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "页面分块秒数（webengine 切块用，默认 30）"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

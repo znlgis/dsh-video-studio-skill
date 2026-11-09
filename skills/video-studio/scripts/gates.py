@@ -1,0 +1,446 @@
+# -*- coding: utf-8 -*-
+"""gates.py — 门禁账本 / 机读交付报告 / 人工签核（v0.6.0）。
+
+解决三件事（都是"文档承诺了、代码没做"）：
+
+1) **门禁账本**：每个 stage 把判据结果记成一条 {id, title, status, detail}，
+   status 只允许 pass / fail / skipped 三档。"没执行"必须独立成 skipped，
+   不许混进 pass——否则"看起来干净、其实没在查"会一路带进交付。
+2) **机读交付报告** out/QC-REPORT.md：把账本渲染成 gate matrix + 实测值 +
+   人工签核 + 耗时台账。在此之前，质检结论只活在 stdout 里，会话一断就没了。
+3) **人工签核** out/signoff.json：风格/母版/事实/交付四道"必须由人看"的闸。
+   签核绑 contentHash（剧本 + scenes.py + 引擎），内容一变旧签核自动失效。
+
+设计约束：
+  * 纯标准库（hashlib/json/time/os），不引第三方。
+  * 账本与签核写 work/ 下，报告写 out/——渲染产物可整目录搬走。
+  * 不改变既有退出码语义：默认 skipped 只告警，--strict-gates 才升级为 error
+    （与 QA_REQUIRE_SYNC 同一套语义）。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+
+SCHEMA = 1
+
+# 人工签核的四道闸：id -> 人话标题
+GATES = {
+    "style": "风格与声线已确认（看 work/style.json / 试听声线）",
+    "stills": "母版静帧已亲眼看过（work/qa/sheet.png）",
+    "facts": "上屏数字已核对出处（FACTS.md）",
+    "release": "成片已验收（音画 / 字幕 / 响度）",
+}
+GATE_ORDER = ("style", "stills", "facts", "release")
+
+OK, FAIL, SKIP = "pass", "fail", "skipped"
+
+
+def _sha1_text(s):
+    return hashlib.sha1(str(s).encode("utf-8")).hexdigest()[:16]
+
+
+def _sha1_file(path):
+    """文件内容指纹；缺文件返回 'missing'，不抛异常。"""
+    try:
+        h = hashlib.sha1()
+        with open(str(path), "rb") as fh:
+            for blk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(blk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return "missing"
+
+
+def content_hash(script=None, scenes_path="", script_path="", engine="pil"):
+    """本次渲染的"内容身份"：剧本 + 场景代码 + 引擎。
+
+    只取与"这一版画面/声音"相关的量：
+      * 剧本：去掉渲染期注入的 _path/_dir/_style 等私有键后规范化 json；
+      * scenes.py：文件内容（画面逻辑变了，旧签核就得失效）；
+      * engine：pil 与 web 是两条渲染路径，产物不可互换。
+    """
+    body = {}
+    if isinstance(script, dict):
+        for k, v in script.items():
+            if str(k).startswith("_"):
+                continue
+            body[k] = v
+    payload = {
+        "script": _sha1_text(json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)),
+        "script_file": _sha1_file(script_path) if script_path else "",
+        "scenes": _sha1_file(scenes_path) if scenes_path else "",
+        "engine": str(engine or "pil"),
+    }
+    return _sha1_text(json.dumps(payload, sort_keys=True))
+
+
+class GateLedger:
+    """一次运行内的门禁账本（多 stage 共用；--stage all 时是同一个对象）。"""
+
+    def __init__(self, work, script=None, scenes_path="", script_path="", engine="pil"):
+        self.work = str(work or "work")
+        self.items = []
+        self.t0 = time.time()
+        self.script = script or {}
+        self.scenes_path = str(scenes_path or "")
+        self.script_path = str(script_path or "")
+        self.engine = str(engine or "pil")
+        self.content_hash = content_hash(script, self.scenes_path, self.script_path, self.engine)
+        self.bypassed = []          # --no-gate 绕过的记录（必须留痕）
+
+    # ---- 记账 ----
+    def add(self, gid, title, status, detail="", at=None):
+        """记一条门禁。同一个 gid 重复记时**后写覆盖**（stage 可重跑）。"""
+        if status not in (OK, FAIL, SKIP):
+            raise ValueError("门禁状态只能是 pass/fail/skipped，收到 %r" % (status,))
+        item = dict(id=str(gid), title=str(title), status=status,
+                    detail=str(detail or ""), at=float(at if at is not None else time.time()))
+        for i, old in enumerate(self.items):
+            if old["id"] == item["id"]:
+                self.items[i] = item
+                return item
+        self.items.append(item)
+        return item
+
+    def ok(self, gid, title, detail=""):
+        return self.add(gid, title, OK, detail)
+
+    def fail(self, gid, title, detail=""):
+        return self.add(gid, title, FAIL, detail)
+
+    def skip(self, gid, title, detail=""):
+        return self.add(gid, title, SKIP, detail)
+
+    def bypass(self, what, why=""):
+        self.bypassed.append(dict(what=str(what), why=str(why or ""), at=time.time()))
+
+    # ---- 判定 ----
+    def fails(self):
+        return [x for x in self.items if x["status"] == FAIL]
+
+    def skips(self):
+        return [x for x in self.items if x["status"] == SKIP]
+
+    def counts(self):
+        c = {OK: 0, FAIL: 0, SKIP: 0}
+        for x in self.items:
+            c[x["status"]] = c.get(x["status"], 0) + 1
+        return c
+
+    def exit_errors(self, strict=False):
+        """该让命令失败吗：任何 fail 都失败；--strict-gates 下 skipped 也算失败。"""
+        errs = ["[%s] %s %s" % (x["id"], x["title"],
+                                ("— " + x["detail"]) if x["detail"] else "")
+                for x in self.items if x["status"] == FAIL]
+        if strict:
+            errs += ["[%s] %s：本次**没有执行**（--strict-gates 下算失败）"
+                     % (x["id"], x["title"]) for x in self.items if x["status"] == SKIP]
+        return errs
+
+    # ---- 落盘 ----
+    def to_dict(self):
+        return dict(schema=SCHEMA, at=self.t0, contentHash=self.content_hash,
+                    engine=self.engine, counts=self.counts(),
+                    items=list(self.items), bypassed=list(self.bypassed))
+
+    def write_json(self):
+        """work/gates.json —— 给程序读（QC-REPORT.md 只是它的渲染层）。"""
+        os.makedirs(self.work, exist_ok=True)
+        p = os.path.join(self.work, "gates.json")
+        d = self.to_dict()
+        d["wall_s"] = round(time.time() - self.t0, 2)
+        _atomic_json(p, d)
+        return p
+
+
+# ---------------------------------------------------------------- 签核账本
+def signoff_path(work):
+    return os.path.join(str(work), "signoff.json")
+
+
+def read_signoff(work):
+    """读签核账本；坏 JSON 当作"没有签核"，但把原因带出来（不静默吞掉）。"""
+    p = signoff_path(work)
+    if not os.path.exists(p):
+        return {"schema": SCHEMA, "signed": {}}, "没有 %s（还没人签核过）" % p
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return {"schema": SCHEMA, "signed": {}}, "%s 读不了（%s）——当作没有签核" % (p, e)
+    if not isinstance(d, dict) or not isinstance(d.get("signed"), dict):
+        return {"schema": SCHEMA, "signed": {}}, "%s 结构不对——当作没有签核" % p
+    return d, ""
+
+
+def write_signoff(work, gid, content_hash, verdict="approved", by="", note="", artifacts=None):
+    """写一条人工签核。verdict=approved / rejected；rejected 视为没签。"""
+    if str(gid) not in GATES:
+        raise ValueError("未知的门禁 id %r（可选：%s）" % (gid, " / ".join(GATE_ORDER)))
+    d, _why = read_signoff(work)
+    d.setdefault("schema", SCHEMA)
+    d.setdefault("signed", {})
+    d["signed"][str(gid)] = dict(
+        verdict=str(verdict), at=time.time(),
+        atText=time.strftime("%Y-%m-%d %H:%M:%S"), by=str(by or ""),
+        contentHash=str(content_hash or ""), note=str(note or ""),
+        artifacts=[str(x) for x in (artifacts or [])],
+    )
+    os.makedirs(str(work), exist_ok=True)
+    _atomic_json(signoff_path(work), d)
+    return d["signed"][str(gid)]
+
+
+def signoff_state(work, current_hash):
+    """返回 (每道闸的判定, 因内容变化而失效的闸列表)。
+
+    判定只有三档：pass（签了且内容一致）/ fail（明确 rejected）/
+    skipped（没签过，或内容已变——"这一版还没签"，不是"签坏了"）。
+    """
+    d, why = read_signoff(work)
+    signed = (d.get("signed") or {}) if isinstance(d, dict) else {}
+    state, stale = {}, []
+    for gid in GATE_ORDER:
+        rec = signed.get(gid)
+        if not isinstance(rec, dict):
+            state[gid] = dict(status=SKIP, detail=why or "没签核过")
+            continue
+        if str(rec.get("verdict")) != "approved":
+            state[gid] = dict(status=FAIL, detail="签核结论是 %r" % rec.get("verdict"))
+            continue
+        if str(rec.get("contentHash") or "") != str(current_hash or ""):
+            state[gid] = dict(status=SKIP,
+                              detail="内容已变（签核时 %s / 现在 %s），需重新签"
+                                     % (str(rec.get("contentHash"))[:8], str(current_hash)[:8]))
+            stale.append(gid)
+            continue
+        bits = [str(rec.get("atText") or "")]
+        if rec.get("by"):
+            bits.append(str(rec["by"]))
+        if rec.get("note"):
+            bits.append(str(rec["note"]))
+        state[gid] = dict(status=OK, detail=" 已签（%s）" % " · ".join(bits))
+    return state, stale
+
+
+# ---------------------------------------------------------------- 耗时台账
+def append_cost(work, stage, wall_s, **extra):
+    """work/cost.jsonl —— 每 stage 一行实测（排期公式从没被验证过，这是它的对照）。"""
+    os.makedirs(str(work), exist_ok=True)
+    row = dict(at=time.time(), atText=time.strftime("%Y-%m-%d %H:%M:%S"),
+               stage=str(stage), wall_s=round(float(wall_s), 3))
+    for k, v in extra.items():
+        if v is not None:
+            row[k] = v
+    p = os.path.join(str(work), "cost.jsonl")
+    try:
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return p
+
+
+def read_cost(work):
+    p = os.path.join(str(work), "cost.jsonl")
+    rows = []
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return rows
+
+
+# ---------------------------------------------------------------- 报告
+def _fmt_s(sec):
+    try:
+        sec = float(sec)
+    except (TypeError, ValueError):
+        return "-"
+    if sec < 60:
+        return "%.1fs" % sec
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return "%dm%02ds" % (int(m), int(s))
+    h, m = divmod(m, 60)
+    return "%dh%02dm" % (int(h), int(m))
+
+
+def render_report(work, out=None):
+    """把 work/gates.json + signoff + cost.jsonl 渲染成 out/QC-REPORT.md。"""
+    gj = os.path.join(str(work), "gates.json")
+    g = {}
+    if os.path.exists(gj):
+        try:
+            g = json.load(open(gj, encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            g = {}
+    ch = str(g.get("contentHash") or "")
+    items = list(g.get("items") or [])
+    counts = {OK: 0, FAIL: 0, SKIP: 0}
+    for x in items:
+        st = x.get("status", SKIP)
+        counts[st] = counts.get(st, 0) + 1
+    state, stale = signoff_state(work, ch)
+    signed_n = sum(1 for v in state.values() if v["status"] == OK)
+
+    L = []
+    L.append("# QC 报告（成片交付凭据）")
+    L.append("")
+    L.append("> 本文件由 `render.py --stage qa` 自动生成，是**机器可读的交付结论**。")
+    L.append("> 口径：`pass` = 本次真的查过且通过；`fail` = 查了没过；"
+             "`skipped` = **本次没执行**（不等于通过）。")
+    L.append("")
+    L.append("| 项 | 值 |")
+    L.append("|---|---|")
+    L.append("| 内容指纹 | `%s` |" % (ch or "未生成"))
+    L.append("| 引擎 | `%s` |" % (g.get("engine") or "-"))
+    L.append("| 生成时间 | %s |"
+             % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(g.get("at") or time.time())))
+    L.append("| 门禁合计 | pass %d · fail %d · skipped %d |"
+             % (counts.get(OK, 0), counts.get(FAIL, 0), counts.get(SKIP, 0)))
+    L.append("| 人工签核 | %d/%d 有效 |" % (signed_n, len(GATE_ORDER)))
+    L.append("")
+    L.append("## 一、门禁矩阵")
+    L.append("")
+    if items:
+        L.append("| 门禁 | 判据 | 结果 | 实测 / 说明 |")
+        L.append("|---|---|---|---|")
+        for x in items:
+            L.append("| `%s` | %s | **%s** | %s |"
+                     % (x.get("id", "?"), x.get("title", ""), x.get("status", "?"),
+                        (x.get("detail") or "-").replace("|", "\\|")))
+    else:
+        L.append("（没有门禁记录：先跑 `--stage qa`）")
+    L.append("")
+    L.append("## 二、人工签核")
+    L.append("")
+    L.append("| 闸 | 要求 | 结果 | 说明 |")
+    L.append("|---|---|---|---|")
+    for gid in GATE_ORDER:
+        v = state.get(gid, {})
+        L.append("| `%s` | %s | **%s** | %s |"
+                 % (gid, GATES[gid], v.get("status", "?"),
+                    (v.get("detail") or "-").replace("|", "\\|")))
+    if stale:
+        L.append("")
+        L.append("> 内容已变的签核：%s（改了剧本 / scenes.py / 引擎，旧签核自动失效，需重新签）"
+                 % "、".join("`%s`" % x for x in stale))
+    L.append("")
+    L.append("## 三、耗时台账（`work/cost.jsonl` 实测，非估算）")
+    L.append("")
+    rows = read_cost(work)
+    if rows:
+        L.append("| stage | 墙钟 | 备注 |")
+        L.append("|---|---|---|")
+        total = 0.0
+        for r in rows:
+            total += float(r.get("wall_s") or 0)
+            note = " · ".join("%s=%s" % (k, r[k])
+                              for k in ("frames", "n_tts", "n_cues", "rework")
+                              if r.get(k) not in (None, ""))
+            L.append("| `%s` | %s | %s |"
+                     % (r.get("stage", "?"), _fmt_s(r.get("wall_s")), note or "-"))
+        L.append("| **合计** | **%s** | |" % _fmt_s(total))
+    else:
+        L.append("（还没有台账：首次运行或未接入 cost.jsonl）")
+    L.append("")
+    if g.get("bypassed"):
+        L.append("## 四、本次绕过的门禁（留痕，不是通过）")
+        L.append("")
+        for b in g["bypassed"]:
+            L.append("- %s%s" % (b.get("what"), ("：" + b["why"]) if b.get("why") else ""))
+        L.append("")
+        nxt = "五"
+    else:
+        nxt = "四"
+    L.append("## %s、结论（照抄，别自己发挥）" % nxt)
+    L.append("")
+    if counts.get(FAIL):
+        L.append("- **未通过**：fail %d 项，按上表逐条修，别宣称完成。" % counts.get(FAIL))
+    elif counts.get(SKIP):
+        L.append("- **有条件通过**：skipped %d 项（明确没执行），交付时必须逐项说明原因。"
+                 % counts.get(SKIP))
+    else:
+        L.append("- **通过**：所有门禁本次都执行且通过。")
+    L.append("- 报告：`%s`；机器可读源：`%s`。"
+             % (out or os.path.join("out", "QC-REPORT.md"), gj))
+    L.append("")
+    return "\n".join(L)
+
+
+def write_report(work, out_path=None):
+    p = str(out_path or os.path.join(os.path.dirname(str(work)) or ".", "out", "QC-REPORT.md"))
+    d = os.path.dirname(os.path.abspath(p))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    text = render_report(work, out=p)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return p
+
+
+# ---------------------------------------------------------------- 原子写
+def atomic_write_json(path, obj):
+    """先写 .tmp 再 os.replace：断电 / 被杀不会留下半截 JSON。"""
+    d = os.path.dirname(os.path.abspath(str(path)))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = "%s.%d.tmp" % (str(path), os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, str(path))
+
+
+def _atomic_json(path, obj):
+    return atomic_write_json(path, obj)
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    ap = argparse.ArgumentParser(description="门禁账本 / 签核 / QC 报告")
+    ap.add_argument("--work", default="work")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--accept", default="",
+                    help="签核一道闸：%s" % " / ".join(GATE_ORDER))
+    ap.add_argument("--reject", default="", help="否决一道闸（同样记一条，但不算通过）")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--by", default="")
+    ap.add_argument("--artifacts", default="", help="逗号分隔的证据文件路径")
+    ap.add_argument("--json", action="store_true", help="打印账本 JSON")
+    a = ap.parse_args()
+    try:
+        if a.accept or a.reject:
+            gid = (a.accept or a.reject).strip()
+            d, _why = read_signoff(a.work)
+            ch = ""
+            gj = os.path.join(a.work, "gates.json")
+            if os.path.exists(gj):
+                try:
+                    ch = str(json.load(open(gj, encoding="utf-8")).get("contentHash") or "")
+                except (json.JSONDecodeError, OSError):
+                    ch = ""
+            rec = write_signoff(a.work, gid, ch,
+                                verdict="approved" if a.accept else "rejected",
+                                by=a.by, note=a.note,
+                                artifacts=[x.strip() for x in a.artifacts.split(",") if x.strip()])
+            print("[签核] %s = %s（内容指纹 %s）" % (gid, rec["verdict"], ch or "未知"))
+        p = write_report(a.work, a.out or None)
+        print("[QC 报告]", p)
+        if a.json:
+            print(json.dumps(GateLedger(a.work).to_dict(), ensure_ascii=False, indent=1))
+        sys.exit(0)
+    except (ValueError, OSError) as e:
+        print("[ERROR] %s" % e, file=sys.stderr)
+        sys.exit(2)

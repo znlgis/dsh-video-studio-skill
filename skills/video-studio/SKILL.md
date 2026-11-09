@@ -32,12 +32,14 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .            # 剧本模板（改文字即可）
 cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
-cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py} .
+#    v0.6.0 起 gates.py（门禁账本）与 stagewatch.py（阶段新鲜度）是**必需**的：
+#    render.py 直接 import 它们，少一个就是 ModuleNotFoundError。
+cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,stagewatch.py} .
 # 可选（v0.3）：要程序化音效/配乐就一并拷；要走浏览器渲染再拷 webengine.py + assets/web/
 cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：29 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：32 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
@@ -54,12 +56,26 @@ python render.py --script film.json --stage style
 python render.py --script film.json --scenes scenes.py --work work --stage stills \
        --stills "l01:3,l02:5,l03:2.5"
 
+# 4.5) 【v0.6】先算成本再开渲：帧数 / 各阶段耗时 / 磁盘 / 分块建议
+#      项目原则是"成本敏感"，而在此之前开渲前拿不到任何数字。
+#      （--json 可机读；有 work/timeline.json 时用真实时长，否则按字数粗估并标注）
+python <SKILL_DIR>/../../../tools/estimate.py --script film.json --jobs 4
+
 # 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 
 # 6) 亲眼看质检抽出的帧
 #    work/qa/sheet.png      联系表（全片调性）
 #    work/qa/snap_*.png     全分辨率静帧
+
+# 7) 【v0.6 新步骤】看机器可读的交付结论，然后签核
+#    out/QC-REPORT.md 是**交付凭据**：gate matrix 分 pass / fail / skipped 三档，
+#    skipped 表示"本次没执行"，不等于通过。以前这些只活在 stdout 里，会话一断就没了。
+cat out/QC-REPORT.md
+python render.py --script film.json --work work --stage accept --gate stills    # 看过静帧了
+python render.py --script film.json --work work --stage accept --gate release   # 成片验收过了
+# 签核绑内容指纹：改了剧本 / scenes.py / 引擎，旧签核自动失效，要重新看、重新签。
+# 交付前想强制：加 --strict-gates（skipped 也算失败）。
 ```
 
 分阶段跑（**每个 stage 只做自己的事**，不会再顺手重渲全片）：
@@ -76,6 +92,8 @@ python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--engine pi
 python render.py ... --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
 python render.py ... --stage qa       # 只质检（只读输入，只写 work/qa/）+ 帧级深检
 python render.py ... --stage stills   # 只渲母版静帧 + 联系表
+python render.py ... --stage accept --gate stills   # 【v0.6】人工签核一道闸（写 work/signoff.json）
+python render.py ... --stage explain  # 【v0.6】只报"哪些阶段过时了、为什么、该跑什么"，不跑任何 stage
 ```
 
 `--stage all` 的完整顺序：`style → tts → layout → cues → score → sfx → audio → frames → mux → qa`。
@@ -95,6 +113,11 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 > **改台词 / 改 scenes.py / 改编码参数之后，`--resume` 会拒绝复用旧分块**（`work/segments/_plan.json`
 > 里存着计划指纹），并提示你 `rm -rf work/segments`——这是刻意的：旧分块配新时间轴会拼出
 > "画面和旁白对不上"的片子，而且时长门禁查不出来。
+
+> **v0.6.0 修了一个已发布版本里的真 bug**：`--jobs >1` 时子进程从 `_script_snapshot.json` 读剧本，
+> JSON 把主题色的 `(r,g,b)` 元组变成 `list`，而 `scenes._bg()` 拿它当缓存键 → `TypeError: unhashable type: "list"`。
+> 也就是说 **"长片并行渲染"这条 SKILL 自己教的路径此前是崩的**。现在子进程会按剧本重解风格（拿回元组），
+> `scenes.py` 的 `_bg` 键也做了冻结兜底；`selfcheck` 第 32 条专门盯这个。
 
 ## 2. 标准八阶段（P0–P7）
 
@@ -360,9 +383,58 @@ python render.py ... --stage style # 用某份 film.json 解析风格并打印"�
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（29 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（32 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
+# v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
+#       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
 ```
+
+### 7.0 交付凭据：`out/QC-REPORT.md` 与人工签核（v0.6.0）
+
+> 这一节解决的是"**质检结论只活在控制台里**"——会话一断，"我查过了"就无从复现。
+
+**三档状态**（这是最关键的语义，不许混）：
+
+| 状态 | 含义 | 退出码 |
+|---|---|---|
+| `pass` | 本次**真的查了**且通过 | 0 |
+| `fail` | 查了没过 | 非 0（除非 `--no-gate` 绕过，且会留痕） |
+| `skipped` | 本次**没有执行**（没装 cv2 / 没写 visual_at / 没签核） | 默认 0，`--strict-gates` 下非 0 |
+
+**"skipped ≠ 通过"** 是这套机制的全部意义：以前"没查"和"查了没事"在输出上都叫"没报错"。
+
+```bash
+cat out/QC-REPORT.md                          # gate matrix + 实测值 + 签核 + 耗时，交付时一起给
+python render.py ... --stage qa --strict-gates   # 交付前：skipped 也算失败
+python render.py ... --stage accept --gate stills --note "看过联系表"   # 人工签核
+```
+
+**四道人工签核闸**（`style` 风格与声线 / `stills` 母版静帧 / `facts` 上屏数字 / `release` 成片验收）：
+
+- 签核前会检查"证据产物存在"（如 `stills` 要求 `work/qa/sheet.png`），**没有证据不许签**——
+  否则签核就是橡皮图章。
+- 签核绑**内容指纹**（剧本 + `scenes.py` + 引擎）。改了其中任何一个，旧签核**自动失效**，
+  报告里会标成 `skipped` 并写明"内容已变"。这不是麻烦，是防止"我签过了"变成空头支票。
+- 逃生阀是 `--no-gate`（整体跳过签核检查），但会写进 QC 报告的"本次绕过的门禁"一节，
+  **留痕不等于通过**。
+
+**耗时台账** `work/cost.jsonl`：每个 stage 一行实测墙钟（`--cost` 开启，`--stage all` 里自动记）。
+它是 SKILL §12 那张"排期公式"的对照——公式从来没被验证过，现在有数据了。
+
+### 7.0b 阶段新鲜度：别让旧产物混进新片（v0.6.0）
+
+> 与 §1 的分块指纹同源：那里只修了 `frames` 一个点，其余 stage 此前是裸奔的
+> （改了 `style` 后 `--stage audio` 仍读旧 `music.wav`；改了 `hold` 后 `--stage frames` 仍用旧 `cues.json`，**都不报错**）。
+
+```bash
+python render.py ... --stage explain          # 哪些阶段过时了、为什么、最小重跑命令
+python render.py ... --stage explain --json   # 机读
+python render.py ... --stage qa --strict-stale   # 有过时就失败（CI / 交付前）
+```
+
+机制：每个 stage 结束往 `work/manifest.json` 记一行 `{stage, at, inputs:{名:指纹}, outputs:{名:指纹}}`；
+下次该 stage 开始前重算上游输入与自己的产物指纹。**默认只告警**（`--strict-stale` 升级为失败，
+`--allow-stale` 显式放行并留痕）。改一句要重跑什么，见 [references/change-impact.md](references/change-impact.md)。
 
 **质检分三层**，一层比一层更接近"观众真的看到了什么"：
 
@@ -521,6 +593,7 @@ v0.4 给了两条真正能用的路：
 - `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
 - `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
 - `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单
+- `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/style/scenes.py 各要重跑什么
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
 
 ## 10. 脚本资产
@@ -528,14 +601,19 @@ v0.4 给了两条真正能用的路：
 | 文件 | 作用 |
 |---|---|
 | `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
-| `scripts/render.py` | 编排器：**10 个独立 stage**、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
-| `scripts/selfcheck.py` | 回归自检：**29 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
+| `scripts/render.py` | 编排器：**13 个 stage**（含 `accept` / `explain`）、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
+| `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
+| `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
+| `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
+| `scripts/selfcheck.py` | 回归自检：**32 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
 | `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
 | `scripts/qa_frames.py` | **（v0.3）帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
 | `assets/scenes.py` | 场景模板（开场/正文卡片/收尾 + **`cues()` 提示点钩子示范**），含缓存排版与预烘焙背景的正确写法 |
 | `assets/film.json` | 剧本模板（含 `hold`/`bpm`/`music`/`sfx.cues`/`engine` 等新字段） |
+| `../../schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，模板由 `tools/ci_check.py` 第 12 项守着 |
+| `../../tools/estimate.py` | **（v0.6）开渲前预演**：帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，`--json` 可机读。基准常量集中在文件顶部，换机请重测后回填 |
 | `assets/web/` | **（v0.3）浏览器页面模板**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本 |
 | `requirements.txt` | **（v0.4）Python 依赖清单**：必需（numpy/Pillow/edge-tts）/ 强烈建议（cv2）/ 可选（scipy、playwright）三档，带注释说明"缺了会怎样"。`pip install -r requirements.txt` 即可 |
 
@@ -565,13 +643,16 @@ v0.4 给了两条真正能用的路：
 7. **（v0.3）帧级深检的三个数**：单帧闪烁 N 条 / 画面空窗 N 段 / 音画同步超差 N 条
    （有 web 引擎时再加页面层的 文字重叠 / 出画 / 一闪而过 / 从没露面 四项）
 
+> **v0.6 起不要口头复述这些数字**：`out/QC-REPORT.md` 是机器生成的交付凭据，
+> 照抄报告里的"实测值"即可；报告里的 `skipped` 项必须逐项说明为什么没执行。
+>
 > 完整示例（本技能自带模板片的实测，可以照这个格式抄；**数字每次跑会差一点**——
 > TTS 实测时长、AAC 编码都会让真峰/响度/锐度在小范围内浮动，别 chasing 小数点）：
 > ```
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 29 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 11 / FAIL 0
+> 自检：selfcheck PASS 32 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```
@@ -681,7 +762,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 29 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 32 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（24 项，会真起无头浏览器，约 15 秒）
@@ -697,6 +778,10 @@ selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依
 > `python tools/ci_check.py -v` 只查"这个仓库作为可分发包是否完整"（语法/JSON/依赖白名单/
 > 打包卫生/文档路径引用），**不需要 ffmpeg、字体或网络**，任何机器都能跑；
 > selfcheck 查的是"技能还能不能真的出片"。两层都在 CI 里跑。
+>
+> v0.6.0 起 ci_check 多了第 12 项「film.json 契约」：直接调 `scripts/filmcheck.py` 校验模板，
+>并把 `schemas/film.schema.json` 的存在与合法性一起断言——**校验规则只允许有一份**，
+>不在这里重写一遍。
 
 ### v0.2 在本机实测（2026-11-07，同一台机器）
 

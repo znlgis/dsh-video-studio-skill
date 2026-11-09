@@ -23,7 +23,18 @@ opencv-python-headless>=4.8
 # 装完还要下载浏览器：python -m playwright install chromium
 # playwright>=1.40
 
+# ---- v0.6.0 新增文件：都是纯标准库，**不需要**任何 pip 包 ----
+#   scripts/gates.py        门禁账本 / QC 报告 / 人工签核（必需：render.py 直接 import）
+#   scripts/stagewatch.py   阶段新鲜度（必需：同上）
+#   scripts/filmcheck.py    film.json 契约校验（可选：ci_check 第 12 项会调）
+#   tools/estimate.py       开渲前成本预演（可选）
+# 若你从旧版本升级，记得把 gates.py / stagewatch.py 一起拷到工作目录，
+# 否则 render.py 会 ModuleNotFoundError。
+
 # ---- 不需要 ----
 # moviepy / pydub / soundfile / librosa / manim：本技能一行都不 import。
 # ffmpeg 不是 pip 包：系统 PATH 里要有（含 libx264 / aac / loudnorm），
 # 或用环境变量 FILMKIT_FFMPEG 指向可执行文件。
+# v0.6.0 起探测是 fail-closed 的：每个候选真跑 `-version`，跑不起来的会被跳过
+# （防的是"存在但缺 xfade 的旧版 ffmpeg 被静默选中"）。`FILMKIT_FFMPEG_STRICT=1`
+# 可把"找不到可用 ffmpeg"从回退裸命令改成直接报错。

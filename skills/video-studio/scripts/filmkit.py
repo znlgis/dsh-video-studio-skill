@@ -48,32 +48,216 @@ CUE_ALIASES = {
 
 
 # ---------------------------------------------------------------- ffmpeg
+# ffmpeg 探测必须 fail-closed：候选"文件存在"不等于"能用"。
+# 本机曾静默选中 C:\Program Files\EVCapture\ffmpeg.exe（2019 旧版，没有 xfade），
+# 一路跑到滤镜阶段才挂，报错离原因太远。现在每个候选都必须真的跑通
+# "ffmpeg -version" 且 returncode == 0 才算可用（超时/异常一律视为不可用）。
+_FFMPEG_ENV = "FILMKIT_FFMPEG"
+_FFMPEG_STRICT_ENV = "FILMKIT_FFMPEG_STRICT"
+_FFMPEG_UP_LEVELS = 5           # 从 cwd 向上最多找 5 层父目录的便携布局
+_FFMPEG_NAMES = ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg", "ffmpeg.exe")
+
+# 来源键 -> 给人看的说明（ffmpeg_source() 用；backend 回显 / 日志都靠它）
+FFMPEG_SOURCE_LABELS = {
+    "env": "显式指定（FILMKIT_FFMPEG）",
+    "portable": "向上搜索（tools/ffmpeg）",
+    "hardcoded": "硬编码候选（WinGet/系统路径）",
+    "path": "PATH（shutil.which）",
+    "fallback": "未找到（回退裸命令，默认宽松模式）",
+}
+_FFMPEG_CACHE = {}              # {候选集合 tuple: (可执行路径, 来源键)}：同一候选集合只探测一次
+_FFPROBE_CACHE = {}             # {ffmpeg 路径: ffprobe 路径}：ffprobe 定位也不重复做
+
+_FFMPEG_STRICT_HINT = (
+    "找不到可用的 ffmpeg：FILMKIT_FFMPEG、从当前目录向上 %d 层的 tools/ffmpeg、"
+    "WinGet/系统固定路径、PATH 里都没有能跑通 \"ffmpeg -version\"（returncode=0）的可执行文件。"
+    "装了没有？winget install Gyan.FFmpeg 可以装；装在哪？便携版放到 <项目>/tools/ffmpeg/ffmpeg.exe "
+    "即可被自动发现；怎么指？设置环境变量 FILMKIT_FFMPEG=D:/tools/ffmpeg.exe。"
+    "（当前 FILMKIT_FFMPEG_STRICT=1，所以直接退出；去掉该变量会回退成裸命令 ffmpeg。）"
+    % _FFMPEG_UP_LEVELS
+)
+
+
+def _probe_ffmpeg(path):
+    """候选是否真的可用：返回可执行路径，不可用返回 None（fail-closed）。
+
+    必须跑通 "-version"；文件不存在 / 不是可执行文件 / 权限拒绝 / 超时 / 非 0 退出，
+    一律视为不可用。异常吞掉继续试下一个候选——探测阶段不应该把 import 炸掉。
+    """
+    try:
+        if not path:
+            return None
+        exe = str(path)
+        if not os.path.isfile(exe):
+            exe = shutil.which(exe) or ""   # 允许 FILMKIT_FFMPEG=ffmpeg 这种裸名字
+            if not exe:
+                return None
+        elif not os.path.isabs(exe):
+            exe = os.path.abspath(exe)      # 相对路径候选按 cwd 解析，别让 execvp 去 PATH 里找
+        p = subprocess.run([exe, "-version"], capture_output=True, timeout=10)
+        if p.returncode != 0:
+            return None
+        return exe
+    except Exception:                       # noqa: BLE001 —— 探测失败=候选不可用，换下一个
+        return None
+
+
+def _iter_up_dirs(levels=None):
+    """cwd + 向上 levels 层父目录（含 cwd 共 levels+1 个）。cwd 被删时安全退化。"""
+    try:
+        d = os.path.abspath(os.getcwd())
+    except Exception:                       # noqa: BLE001
+        return
+    yield d
+    for _ in range(int(_FFMPEG_UP_LEVELS if levels is None else levels)):
+        parent = os.path.dirname(d)
+        if parent == d:                     # 到盘符根 / 文件系统根，停
+            break
+        d = parent
+        yield d
+
+
+def _portable_ffmpeg_candidates():
+    """便携布局：<目录>/tools/ffmpeg/ffmpeg(.exe) 与 <目录>/tools/ffmpeg(.exe)。"""
+    out = []
+    for d in _iter_up_dirs():
+        for name in _FFMPEG_NAMES:
+            out.append(os.path.join(d, "tools", "ffmpeg", name))
+        for name in _FFMPEG_NAMES:
+            out.append(os.path.join(d, "tools", name))
+    return out
+
+
+def _hardcoded_ffmpeg_candidates():
+    """原有硬编码候选（WinGet Links / Unix 常见路径）。顺序保持原样，不新增 EVCapture 之类的意外构建。"""
+    out = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    user = os.environ.get("USERPROFILE", "")
+    if local:
+        out.append(os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"))
+    if user:
+        out.append(os.path.join(user, "AppData", "Local", "Microsoft", "WinGet",
+                                "Links", "ffmpeg.exe"))
+    out += ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"]
+    return out
+
+
+def _ffmpeg_candidates():
+    """按优先级返回 [(候选路径, 来源键)]：显式指定 -> 向上搜索 -> 硬编码 -> PATH。"""
+    cands, seen = [], set()
+
+    def add(path, src):
+        path = (path or "").strip()
+        if len(path) >= 2 and path[0] == path[-1] and path[0] in "\"'":
+            path = path[1:-1].strip()       # 容忍用户把路径连引号一起粘进环境变量
+        if not path:
+            return
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            return
+        seen.add(key)
+        cands.append((path, src))
+
+    add(os.environ.get(_FFMPEG_ENV), "env")
+    for p in _portable_ffmpeg_candidates():
+        add(p, "portable")
+    for p in _hardcoded_ffmpeg_candidates():
+        add(p, "hardcoded")
+    add(shutil.which("ffmpeg"), "path")
+    return cands
+
+
+def _resolve_ffmpeg():
+    """探测并缓存 ffmpeg，返回 (可执行路径, 来源键)。
+
+    默认宽松：一个候选都不可用时回退裸命令 "ffmpeg"（让真正调用 subprocess 的地方自己报错）；
+    FILMKIT_FFMPEG_STRICT=1 时改为 raise SystemExit，并在消息里说清怎么装/放哪/怎么指。
+    """
+    cands = _ffmpeg_candidates()
+    key = tuple((os.path.normcase(os.path.abspath(p)), s) for p, s in cands)
+    hit = _FFMPEG_CACHE.get(key)
+    if hit is not None:
+        # 回退结果命中缓存时也要按"当前"STRICT 再判一次：改完 env 不 reset 也不能漏掉 fail-closed
+        if hit[1] != "fallback" or (os.environ.get(_FFMPEG_STRICT_ENV) or "").strip() != "1":
+            return hit
+        raise SystemExit(_FFMPEG_STRICT_HINT)
+    for cand, src in cands:
+        exe = _probe_ffmpeg(cand)
+        if exe:
+            res = (exe if isinstance(exe, str) else cand, src)
+            _FFMPEG_CACHE[key] = res
+            return res
+    if (os.environ.get(_FFMPEG_STRICT_ENV) or "").strip() == "1":
+        raise SystemExit(_FFMPEG_STRICT_HINT)
+    res = ("ffmpeg", "fallback")
+    _FFMPEG_CACHE[key] = res
+    return res
+
+
 def _find_ffmpeg() -> str:
-    env = os.environ.get("FILMKIT_FFMPEG")
-    if env and os.path.exists(env):
-        return env
-    cands = [
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
-        os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "Microsoft",
-                     "WinGet", "Links", "ffmpeg.exe"),
-        "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg",
-    ]
-    for c in cands:
-        if c and os.path.exists(c):
-            return c
-    return shutil.which("ffmpeg") or "ffmpeg"
+    """旧内部接口保留：返回探测到的 ffmpeg 可执行路径。"""
+    return _resolve_ffmpeg()[0]
+
+
+def _reset_ffmpeg_cache():
+    """清空探测缓存并立即重探（测试改过 os.environ / cwd 后必须调它）。
+
+    同时刷新模块级 FFMPEG，保证 filmkit.FFMPEG、ffprobe_path()、向上搜索布局
+    在同一个进程里改环境后能拿到新结果。
+    """
+    global FFMPEG
+    _FFMPEG_CACHE.clear()
+    _FFPROBE_CACHE.clear()
+    FFMPEG = _find_ffmpeg()
+    return FFMPEG
 
 
 FFMPEG = _find_ffmpeg()
 PY = sys.executable
 
 
+def _find_ffprobe(ffmpeg=None) -> str:
+    """ffprobe 定位：先找 ffmpeg 同目录的 ffprobe(.exe)，再用 shutil.which 兜底。
+
+    不再做 FFMPEG.replace("ffmpeg", "ffprobe")：ffmpeg 被改名（如 ffmpeg-full.exe）时
+    字符串替换出来的路径根本不存在，调用要到远处才炸。
+    """
+    ff = str(ffmpeg or FFMPEG)
+    hit = _FFPROBE_CACHE.get(ff)
+    if hit:
+        return hit
+    cand = ""
+    looks_pathy = os.path.isabs(ff) or os.sep in ff or bool(os.altsep and os.altsep in ff)
+    if looks_pathy:
+        d = os.path.dirname(os.path.abspath(ff))
+        names = ("ffprobe.exe", "ffprobe") if os.name == "nt" else ("ffprobe", "ffprobe.exe")
+        for name in names:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                cand = p
+                break
+    if not cand:
+        cand = shutil.which("ffprobe") or "ffprobe"
+    _FFPROBE_CACHE[ff] = cand
+    return cand
+
+
 def ffprobe_path() -> str:
-    base = os.path.basename(FFMPEG)
-    cand = FFMPEG[: -len(base)] + ("ffprobe.exe" if base.endswith(".exe") else "ffprobe")
-    if os.path.exists(cand):
-        return cand
-    return shutil.which("ffprobe") or FFMPEG.replace("ffmpeg", "ffprobe")
+    """ffprobe 可执行文件路径（按 ffmpeg 路径缓存；_reset_ffmpeg_cache() 可清）。"""
+    return _find_ffprobe()
+
+
+def ffmpeg_source() -> str:
+    """可读的 ffmpeg 来源回显，如 "显式指定（FILMKIT_FFMPEG）: D:/tools/ffmpeg.exe"。
+
+    供 backend / 日志说明"到底用了哪个 ffmpeg、它从哪来的"。
+    """
+    path, src = _resolve_ffmpeg()
+    txt = "%s: %s" % (FFMPEG_SOURCE_LABELS.get(src, src), path)
+    env = (os.environ.get(_FFMPEG_ENV) or "").strip()
+    if env and src != "env":
+        txt += "；注意 %s=%r 不可用，已跳过" % (_FFMPEG_ENV, env)
+    return txt
 
 
 def _run(cmd, **kw):
@@ -1625,8 +1809,224 @@ def contact_sheet(frames, out_png, cols=4, thumb_w=480, labels=None):
     return out_png
 
 
+# ---------------------------------------------------------------- 拼接
+# 事故背景：混 fps 的片段以前直接 -c copy，拼出半速成片还不报错。
+# 现在拼前先查参数一致性；不一致或 copy 失败都自动降级重编码，只有重编码也失败才 raise。
+_LAST_CONCAT = {}
+
+
+def concat_last_state():
+    """最近一次 concat_segments 的结果（mode/reencoded/issues/out/concat_txt）。
+
+    返回副本；没跑过返回 {}。给测试和 backend 回显判断"这次到底有没有重编码"用，
+    不改变 concat_segments 的返回值（仍然是 str(out)）。
+    """
+    return dict(_LAST_CONCAT)
+
+
+def _set_concat_state(**kw):
+    _LAST_CONCAT.clear()
+    _LAST_CONCAT.update(kw)
+
+
+def _stderr_brief(raw, limit=300):
+    """ffmpeg stderr 摘要：真正的错误通常在一堆行里的最后几条，取末尾三行拼成一句。"""
+    txt = (raw or b"").decode("utf-8", "replace").strip()
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return "（ffmpeg 没有输出错误信息）"
+    return " | ".join(lines[-3:])[:limit]
+
+
+def _concat_quote(path):
+    """生成 ffmpeg concat 清单的一行：绝对路径 + 单引号转义。
+
+    concat demuxer 的引号规则照抄 shell：单引号内不能再出现单引号，
+    标准写法是把 ' 变成 '\''（先闭合、转义一个引号、再打开）。
+    路径里真的含单引号（Windows 文件名允许）也不会坏。
+    """
+    p = os.path.abspath(str(path)).replace("\\", "/")
+    return "file '%s'\n" % p.replace("'", "'\\''")
+
+
+def _probe_concat_part(path):
+    """单段探测（纯读）：返回 dict，ok=False 时 why 说明原因。"""
+    p = str(path)
+    if not os.path.isfile(p):
+        return dict(ok=False, path=p, why="文件不存在")
+    pr = probe(p)
+    streams = pr.get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if v is None:
+        return dict(ok=False, path=p, why="ffprobe 读不出视频流（文件损坏或不是视频）")
+    rate = str(v.get("r_frame_rate") or "0/0")
+    fps = 0.0
+    try:
+        num, _, den = rate.partition("/")
+        fps = float(num) / float(den or 1)
+    except Exception:                       # noqa: BLE001 —— 脏帧率不崩，交给诊断
+        fps = 0.0
+    dur = 0.0
+    try:
+        dur = float((pr.get("format") or {}).get("duration") or 0)
+    except Exception:                       # noqa: BLE001
+        dur = 0.0
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    return dict(ok=True, path=p, width=int(v.get("width") or 0),
+                height=int(v.get("height") or 0), fps=round(fps, 3),
+                fps_text=rate, codec=str(v.get("codec_name") or ""),
+                audio=bool(a), dur=dur)
+
+
+def _fmt_fps(info):
+    """帧率说人话：30/1 -> 30；30000/1001 -> 29.97；读不出来 -> 原始文本。"""
+    try:
+        fps = float(info.get("fps") or 0.0)
+    except Exception:                       # noqa: BLE001
+        fps = 0.0
+    if fps <= 0:
+        return str(info.get("fps_text") or "未知")
+    if abs(fps - round(fps)) < 0.01:
+        return "%d" % int(round(fps))
+    return "%.2f" % fps
+
+
+def _concat_issues(parts):
+    """逐段探测并与参照段比对（纯读）。返回 (infos, issues, ref_index)。
+
+    参照段 = 第一个能读出来的段（正常就是第 1 段）；每条 issue 都写清"哪段、差在哪"。
+    """
+    infos = [_probe_concat_part(p) for p in parts]
+    issues = []
+    ref = None
+    for i, inf in enumerate(infos):
+        if not inf.get("ok"):
+            issues.append("第 %d 段%s：%s" % (i + 1, inf.get("why", "探测失败"),
+                                             inf.get("path", parts[i])))
+            continue
+        if ref is None:
+            ref = i
+            continue
+        r = infos[ref]
+        who, base = "第 %d 段" % (i + 1), "第 %d 段" % (ref + 1)
+        if (inf["width"], inf["height"]) != (r["width"], r["height"]):
+            issues.append("%s分辨率 %dx%d != %s %dx%d"
+                          % (who, inf["width"], inf["height"], base, r["width"], r["height"]))
+        if abs(float(inf["fps"]) - float(r["fps"])) > 0.01:
+            issues.append("%s fps %s != %s fps %s"
+                          % (who, _fmt_fps(inf), base, _fmt_fps(r)))
+        if inf["codec"] != r["codec"]:
+            issues.append("%s视频编码 %s != %s %s"
+                          % (who, inf["codec"] or "?", base, r["codec"] or "?"))
+        if bool(inf["audio"]) != bool(r["audio"]):
+            issues.append("%s%s音轨，%s%s音轨"
+                          % (who, "有" if inf["audio"] else "无",
+                             base, "有" if r["audio"] else "无"))
+    return infos, issues, ref
+
+
+def concat_preflight(parts):
+    """拼接前的参数一致性检查（纯读：不写文件、不改全局状态、不碰 out）。
+
+    逐段 ffprobe 比对 width / height / r_frame_rate / codec_name（外加有无音轨），
+    以第一个能读出来的段为参照。返回 (ok, issues)：
+      ok=False 表示不能直接 -c copy，调用方应降级重编码；issues 是可直接打印的中文诊断。
+    注意：这里只回答"能不能 copy"，不检查画面内容 / 时间轴是否正确。
+    """
+    parts = [str(p) for p in parts]
+    if not parts:
+        return False, ["parts 为空（没有可拼接的片段）"]
+    _infos, issues, _ref = _concat_issues(parts)
+    return (not issues), issues
+
+
+def _concat_reencode(parts, out, infos, ref, lst):
+    """降级路径：重编码后再拼（libx264 crf20 + aac 192k），返回 str(out)。
+
+    不用"concat demuxer + 重编码"：那仍然要求各段分辨率/像素格式一致，混分辨率时
+    会花屏或直接失败。这里用 concat 滤镜，逐段把画面统一到参照段的宽高/帧率
+    （等比缩放 + 补边，不拉伸），音轨统一 48kHz 立体声；某段没音轨就补等长静音，
+    避免 v=1:a=1 的 concat 滤镜拒收。只有所有段都没音轨时才输出纯视频。
+    """
+    if ref is None:
+        raise RuntimeError(
+            "[concat] 降级失败：%d 段全都读不出视频流。先逐段跑 ffprobe -show_streams "
+            "确认文件没坏；concat.txt 保留在：%s" % (len(parts), lst))
+    r = infos[ref]
+    tw, th = int(r.get("width") or 0), int(r.get("height") or 0)
+    if tw <= 0 or th <= 0:
+        tw, th = W, H
+    # yuv420p 要求偶数宽高（参照段是奇数尺寸时裁掉 1px，别让重编码挂在最后一步）
+    tw, th = max(2, tw - tw % 2), max(2, th - th % 2)
+    fps_arg = str(r.get("fps_text") or "")
+    if fps_arg in ("", "0/0"):
+        fps_arg = "%g/1" % (float(r.get("fps") or 0) or float(FPS))
+    any_audio = any(inf.get("ok") and inf.get("audio") for inf in infos)
+    ref_dur = max(float(r.get("dur") or 0), 0.0)
+    fc = []
+    for i, inf in enumerate(infos):
+        fc.append("[%d:v]fps=%s,scale=%d:%d:force_original_aspect_ratio=decrease,"
+                  "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v%d]"
+                  % (i, fps_arg, tw, th, tw, th, i))
+        if not any_audio:
+            continue
+        if inf.get("ok") and inf.get("audio"):
+            fc.append("[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a%d]"
+                      % (i, i))
+        else:
+            dur = max(float(inf.get("dur") or 0), ref_dur, 0.1)
+            fc.append("anullsrc=r=48000:cl=stereo,atrim=duration=%.3f,asetpts=PTS-STARTPTS[a%d]"
+                      % (dur, i))
+    labels = "".join("[v%d]%s" % (i, "[a%d]" % i if any_audio else "")
+                     for i in range(len(parts)))
+    fc.append("%sconcat=n=%d:v=1:a=%d[v]%s"
+              % (labels, len(parts), 1 if any_audio else 0, "[a]" if any_audio else ""))
+    fc_text = ";".join(fc)
+
+    cmd = [FFMPEG, "-y", "-v", "error"]
+    for src in parts:
+        cmd += ["-i", str(src)]
+    script_path = None
+    try:
+        if len(fc_text) > 8000:
+            # 段数多时滤镜串会撞 Windows 命令行长度上限：落成临时脚本再引用
+            fd, script_path = tempfile.mkstemp(prefix="filmkit_concat_", suffix=".txt")
+            os.close(fd)
+            with open(script_path, "w", encoding="utf-8") as fh:
+                fh.write(fc_text)
+            cmd += ["-filter_complex_script", script_path]
+        else:
+            cmd += ["-filter_complex", fc_text]
+        cmd += ["-map", "[v]"]
+        if any_audio:
+            cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+        proc = _run(cmd)
+    finally:
+        if script_path:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "[concat] 重编码拼接也失败：%d 段既不能 -c copy，concat 滤镜重编码也没成。\n"
+            "  先逐段跑 ffprobe -show_streams 找坏段/缺流；concat.txt 保留在：%s\n"
+            "  ffmpeg: %s" % (len(parts), lst, _stderr_brief(proc.stderr)))
+    return str(out)
+
+
 def concat_segments(parts, out, workdir=None):
-    """分段无损拼接（各段编码参数必须一致，否则 copy 拼接会失败或花屏）。"""
+    """分段拼接：参数一致走 -c copy（快、无损），不一致或 copy 失败自动降级重编码。
+
+    向后兼容：签名和返回值不变（返回 str(out)）。降级发生时打印 [concat] 诊断，
+    并把 mode/issues/reencoded 记到 concat_last_state()，供调用方和测试判断。
+    """
+    parts = [str(p) for p in parts]
+    if not parts:
+        raise RuntimeError("concat_segments: parts 为空（没有可拼接的片段）")
+    _LAST_CONCAT.clear()                    # 失败时别让上一次的 mode 误导调用方
     lst = os.path.join(workdir or os.path.dirname(str(out)), "concat.txt")
     d = os.path.dirname(os.path.abspath(lst))
     if d:
@@ -1634,13 +2034,32 @@ def concat_segments(parts, out, workdir=None):
     # 必须写绝对路径：concat 文件里的相对路径按 ffmpeg 的 cwd 解析，
     # 而不是按 concat.txt 所在目录（实测会拼成 work2/work2/... 打不开）。
     with open(lst, "w", encoding="utf-8") as f:
-        for p in parts:
-            ap = os.path.abspath(str(p))
-            f.write("file '%s'\n" % ap.replace("\\", "/"))
-    p = _run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
-              "-c", "copy", str(out)])
-    if p.returncode != 0:
-        raise RuntimeError("concat 失败: " + p.stderr.decode("utf-8", "replace")[:600])
+        for src in parts:
+            f.write(_concat_quote(src))
+    infos, issues, ref = _concat_issues(parts)
+    base_state = dict(out=str(out), parts=len(parts), issues=list(issues), concat_txt=lst)
+    if not issues:
+        proc = _run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                     "-i", lst, "-c", "copy", str(out)])
+        if proc.returncode == 0:
+            _set_concat_state(mode="copy", reencoded=False, **base_state)
+            return str(out)
+        detail = _stderr_brief(proc.stderr)
+        print("[concat] -c copy 失败（%s），降级为重编码拼接（libx264 crf20 + aac 192k）"
+              % detail, flush=True)
+        base_state = dict(base_state, copy_error=detail)
+    else:
+        print("[concat] 拼接前检查发现 %d 处参数不一致：" % len(issues), flush=True)
+        for it in issues:
+            print("   [concat] " + it, flush=True)
+        summ = "；".join(issues[:3])
+        if len(issues) > 3:
+            summ += "；等 %d 处" % len(issues)
+        print("[concat] 参数不一致（%s），已降级为重编码（libx264 crf20 + aac 192k）"
+              % summ, flush=True)
+        print("   [concat] concat.txt 保留供排查：%s" % lst, flush=True)
+    _concat_reencode(parts, out, infos, ref, lst)
+    _set_concat_state(mode="reencode", reencoded=True, **base_state)
     return str(out)
 
 
