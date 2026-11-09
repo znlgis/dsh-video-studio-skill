@@ -521,21 +521,34 @@ def st_score(script, work, tl):
     style_arg = None if plan_s["legacy"] else str(mp.get("style") or plan_s["style"])
     kwargs = dict(bpm=float(mp["bpm"]), key=str(mp["key"] or "Dm"), anchors=anchors,
                   sections=sections, seed=int(mp["seed_effective"]))
+    # v0.7：内容指纹参与配乐结构变奏（和弦替换 / 动机级数 / 鼓型 ghost，见
+    # references/audio-variation.md §3.3）。只在非 legacy 时传——不传 fingerprint 的
+    # scorekit 认不出这个 kwarg，会走下面的 TypeError 回退链，照样出片只少变奏。
+    # legacy 必须不传：v0.4 的逐样本兼容是硬契约（selfcheck 20/26 条守着）。
+    fp_hex = ""
+    if not plan_s["legacy"]:
+        fp_hex = str((plan_s.get("fingerprint") or {}).get("full") or "")
+    kw_fp = dict(kwargs, fingerprint=fp_hex) if fp_hex else kwargs
     # scorekit 0.5 起：style/mood + music_plan（一次把 bpm/key/mood/seed 全交出去，
     # 免得两处默认值打架）+ pace（把过碎的段落并进前一段）。
     # 旧 scorekit 没有这些 kwargs -> TypeError -> 自动退回老接口，不阻断出片。
+    # 四级回退：带指纹 -> 不带指纹 -> 只有 style/mood -> 最老的签名。
     pace = {"min_dur": float(plan_s["pacing"]["min_dur"]),
             "hold": float(plan_s["pacing"]["hold"])}
-    try:
-        samples, report = sk.render(float(tl["total"]), style=style_arg,
-                                    mood=str(mp.get("mood") or "steady"),
-                                    music_plan=mp, pace=pace, **kwargs)
-    except TypeError:
+    mood_arg = str(mp.get("mood") or "steady")
+    samples = report = None
+    for attempt in (
+            dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kw_fp),
+            dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kwargs),
+            dict(style=style_arg, mood=mood_arg, **kwargs),
+            dict(**kwargs)):
         try:
-            samples, report = sk.render(float(tl["total"]), style=style_arg,
-                                        mood=str(mp.get("mood") or "steady"), **kwargs)
+            samples, report = sk.render(float(tl["total"]), **attempt)
+            break
         except TypeError:
-            samples, report = sk.render(float(tl["total"]), **kwargs)
+            continue
+    if samples is None:
+        raise SystemExit("[score] scorekit.render() 不接受任何一种已知签名，无法出配乐")
     if report and not plan_s["legacy"]:
         print("   配乐风格: %s / mood %s / %s BPM / %s"
               % (report.get("style") or style_arg, mp.get("mood"),
@@ -551,8 +564,82 @@ def st_score(script, work, tl):
     return out
 
 
+def _sfx_seed_context(script):
+    """v0.7：算音效的内容派生上下文 (style, content_fp, key, enabled)。
+
+    legacy（没写 style 字段）时返回全 None -> CueBus 走旧的 seed_base + i 路径，
+    v0.4 及以前的片子逐样本不变。参考 references/audio-variation.md §3.2 / §4。
+    """
+    plan = resolve_style(script)
+    sfx_cfg = script.get("sfx") or {}
+    want_content = bool(sfx_cfg.get("content_seed", True))
+    if plan.get("legacy") or not want_content:
+        return None, None, None
+    fp = (plan.get("fingerprint") or {}).get("full")
+    mus = plan.get("music") or {}
+    return str(plan.get("style")), str(fp) if fp else None, str(mus.get("key") or "Dm")
+
+
+def _duck_transition_sfx(samples, cues, scenes, sr=K.SR, depth_db=-3.0, window=2.2):
+    """段落边界前的转场音效自动让位（v0.7，契约 §4）。
+
+    配乐在段落交界自己已经有一段过门（scorekit 的 swell / riser / sub_boom），
+    sfx 轨再在同一时刻放 whoosh / riser，同一频段叠两层就是"配乐和音效听起来像同一套"。
+    做法：对位于 [边界-window, 边界] 内的转场类 cue，在它的时长内乘一个 dB 增益包络。
+    只压转场类，不碰 impact / 提示音（那是"该响"的语义重音）。
+    """
+    if not scenes or samples is None or not len(samples):
+        return samples
+    try:
+        import numpy as np
+    except Exception:                                       # noqa: BLE001
+        return samples
+    x = np.array(samples, copy=True, dtype=np.float32)
+    n = len(x)
+    bounds = [float(s["start"]) for s in scenes if float(s.get("start", 0.0)) > 0.5]
+    if not bounds:
+        return x
+    kinds = 0
+    for c in cues or []:
+        if str(c.get("type")) not in ("whoosh", "riser", "reverse_swell"):
+            continue
+        t = float(c.get("t", -1.0))
+        if t < 0:
+            continue
+        near = any(abs(t - b) <= window for b in bounds)
+        if not near:
+            continue
+        dur = float(c.get("dur") or 1.5)
+        s = max(0, int(round(t * sr)))
+        e = min(n, int(round((t + dur) * sr)))
+        if e <= s:
+            continue
+        g = 10.0 ** (depth_db / 20.0)
+        k = min(80, max(8, int(0.01 * sr)))
+        ramp = min((e - s) // 2, k)
+        seg = x[s:e]
+        if ramp > 0:
+            env = np.full(e - s, g, dtype=np.float32)
+            env[:ramp] = np.linspace(1.0, g, ramp, dtype=np.float32)
+            env[-ramp:] = np.linspace(g, 1.0, ramp, dtype=np.float32)
+            seg = seg * env[:, None] if seg.ndim == 2 else seg * env
+        else:
+            seg = seg * g
+        x[s:e] = seg
+        kinds += 1
+    if kinds:
+        print("   过门避让: %d 条转场音效在段落边界前 %.1fs 内 -%.0f dB（避免和配乐过门撞车）"
+              % (kinds, window, abs(depth_db)))
+    return x
+
+
 def st_sfx(script, work, tl):
-    """按提示点合成音效轨 -> work/sfx.wav。没有 cues.json 就跳过。"""
+    """按提示点合成音效轨 -> work/sfx.wav。没有 cues.json 就跳过。
+
+    v0.7：非 legacy 时走内容派生 seed（跨片同一位置不再逐样本相同），
+    并把配乐调性透传给提示音配方（不再硬编码 Dm）；
+    段落边界前的转场音效自动让位（不与配乐过门撞车）。
+    """
     print("== SFX")
     cues_path = os.path.join(work, "cues.json")
     if not os.path.exists(cues_path):
@@ -564,10 +651,12 @@ def st_sfx(script, work, tl):
         print("   cues.json 里没有提示点，跳过")
         return None
     sfx_cfg = script.get("sfx") or {}
+    style, content_fp, key = _sfx_seed_context(script)
     try:
         samples = bus.build_audio(total=tl["total"],
                                   base_db=sfx_cfg.get("base_db"),
-                                  default_gain_db=float(sfx_cfg.get("gain_db", 0.0)))
+                                  default_gain_db=float(sfx_cfg.get("gain_db", 0.0)),
+                                  style=style, content_fp=content_fp, key=key)
     except Exception as e:                                  # noqa: BLE001
         # 音效轨是"增强"不是"必需"：sfxkit 缺失/配方不全时不要拖死整片，
         # 但必须把原因喊出来（静默降级比报错更危险）。
@@ -576,6 +665,10 @@ def st_sfx(script, work, tl):
         if os.path.exists(stale):
             os.remove(stale)
         return None
+    if not sfx_cfg.get("duck_transitions", True):
+        pass
+    else:
+        samples = _duck_transition_sfx(samples, bus.resolved(), tl.get("scenes") or [])
     out = os.path.join(work, "sfx.wav")
     peak = K.wav_write(out, samples)
     print("   sfx.wav %.2fs  峰值 %.3f  声道 %d" % (
@@ -672,15 +765,30 @@ def st_audio(tl, work, script):
     plan_s = resolve_style(script)
     # 风格化的 duck 深度：轻快/极简风格的配乐更"薄"，让位可以浅一点；
     # 电影/史诗要压得更狠。用户显式写 music.duck_db 时永远以用户为准。
-    duck_default = 3.0
+    # v0.7：整体 +1 dB —— 旧值（2.0/2.5/3.0/4.5）下配乐只比音效低 1.5 dB、duck 仅 3 dB，
+    # 段落过门时两者在同一频段几乎等高，是"配乐和音效听起来像同一套"的混音侧成因。
+    duck_default = 4.0
     if not plan_s["legacy"]:
-        duck_default = {"mono": 2.0, "lo-fi": 2.5, "magazine": 2.5,
-                        "cinema": 4.5, "epic": 4.5}.get(plan_s["style"], 3.0)
+        duck_default = {"mono": 3.0, "lo-fi": 3.5, "magazine": 3.5,
+                        "cinema": 5.5, "epic": 5.5}.get(plan_s["style"], 4.0)
     samples = K.mix_film(voice, music, sfx, total=total,
                          voice_gain=float(script.get("voice_gain", 1.0)),
-                         music_gain_db=float(mus.get("gain_db", -1.5)),
+                         # v0.7.1 旁白优先：配乐基线从 -1.5 dB 降到 -12 dB。
+                         # 视频以旁白为主，-1.5 dB 时背景与台词响度几乎等高，观众要费力分辨字；
+                         # 12 dB 是"人声明显压住背景"的经验线（audio.md §2 的那条设计标准）。
+                         music_gain_db=float(mus.get("gain_db", -12.0)),
                          sfx_gain_db=float((script.get("sfx") or {}).get("mix_gain_db", 0.0)),
-                         duck_db=float(mus.get("duck_db", duck_default)))
+                         duck_db=float(mus.get("duck_db", duck_default)),
+                         # 旁白说话时再压背景（侧链）：配乐 6 dB、音效 3 dB；
+                         # 间隙自动恢复，避免整片背景被闷住。显式写 0 可关掉。
+                         voice_duck_db=float(mus.get("voice_duck_db", 6.0)),
+                         voice_duck_sfx_db=float(mus.get("voice_duck_sfx_db", 3.0)),
+                         voice_thresh_db=float(mus.get("voice_thresh_db", -42.0)),
+                         voice_floor_db=float(mus.get("voice_floor_db", -60.0)),
+                         # SNR 兜底：混音后实测人声活跃区的人声/背景差，不足 12 dB 自动补压背景。
+                         # 这是"画面/素材电平再离谱也不许盖住旁白"的最后一道闸；0 = 关。
+                         guard_snr_db=float(mus.get("guard_snr_db", 12.0)),
+                         guard_cap_db=float(mus.get("guard_cap_db", 30.0)))
     out = os.path.join(work, "audio.wav")
     peak = K.wav_write(out, samples)
     print("   audio.wav %.2fs  峰值 %.3f  声道 %d" % (K.wav_dur(out), peak, 2))

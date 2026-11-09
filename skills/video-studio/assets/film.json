@@ -24,8 +24,11 @@
   "key": "auto",
   "seed": 7,
   "seed_from_content": true,
-  "gain_db": -1.5,
-  "duck_db": 3,
+  "gain_db": -12,
+  "duck_db": 4,
+  "voice_duck_db": 6,
+  "voice_duck_sfx_db": 3,
+  "guard_snr_db": 12,
   "seg": 4,
   "amp": 0.05,
   "gain": 0.9,
@@ -51,24 +54,14 @@
  "sfx": {
   "enabled": true,
   "gain_db": 0,
+  "content_seed": true,
+  "_comment": "v0.7 去固定化（references/audio-variation.md §3.5）：模板只留 1 条转场 whoosh 作示例，具体提示点建议交给 assets/scenes.py 的 cues() 钩子按画面内容生成（hook=impact+riser；body=ui_blip 按条目文本定音高 + answer_chime + 段尾 whoosh；quote=reverse_swell+impact；outro=answer_chime+sub_drop）。content_seed=true（默认）= 每条 cue 的 seed 由 style/content_fp 派生（不同片子同一位置也不同），显式 false 回到 v0.6 的 seed_base+i 旧行为。",
   "cues": [
    {
     "at": "l02-0.15",
     "type": "whoosh",
     "dur": 0.9,
     "gain": -2
-   },
-   {
-    "at": "l03",
-    "type": "riser",
-    "dur": 2,
-    "gain": -4
-   },
-   {
-    "at": "l03+0.05",
-    "type": "impact",
-    "size": 1,
-    "gain": -3
    }
   ]
  },

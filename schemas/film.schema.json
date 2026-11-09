@@ -382,11 +382,35 @@
         },
         "gain_db": {
           "type": "number",
-          "description": "配乐总线增益 dB（默认 -1.5，混音前）"
+          "description": "配乐总线增益 dB（v0.7.1 默认 -12：视频以旁白为主，背景必须明显低于人声；旧版 -1.5 会让背景与台词几乎等高）"
         },
         "duck_db": {
           "type": "number",
-          "description": "音效响起时配乐让位深度 dB（默认按风格 2.0–4.5）"
+          "description": "音效响起时配乐让位深度 dB（v0.7 默认按风格 3.0–5.5）"
+        },
+        "voice_duck_db": {
+          "type": "number",
+          "description": "v0.7.1：旁白说话时配乐额外让位深度 dB（默认 6；0 = 关闭旁白侧链）"
+        },
+        "voice_duck_sfx_db": {
+          "type": "number",
+          "description": "v0.7.1：旁白说话时音效额外让位深度 dB（默认 3；0 = 关闭）"
+        },
+        "voice_thresh_db": {
+          "type": "number",
+          "description": "v0.7.1：语音活跃度阈值 dBFS（默认 -42；低于它算静音间隙，背景恢复）"
+        },
+        "voice_floor_db": {
+          "type": "number",
+          "description": "v0.7.1：语音包络的地板 dBFS（默认 -60；与阈值之间做 0~1 映射）"
+        },
+        "guard_snr_db": {
+          "type": "number",
+          "description": "v0.7.1：旁白清晰度兜底（默认 12）。混音后实测人声活跃区的人声/背景响度差，不足就整体再压背景；0 = 关闭"
+        },
+        "guard_cap_db": {
+          "type": "number",
+          "description": "v0.7.1：SNR 兜底最多补压多少 dB（默认 30，防止把背景压成忽有忽无；补压 >18 dB 会提示检查素材电平）"
         },
         "seg": {
           "type": "number",
@@ -444,6 +468,14 @@
         "mix_gain_db": {
           "type": "number",
           "description": "混音时音效总线额外增益 dB（默认 0）"
+        },
+        "content_seed": {
+          "type": "boolean",
+          "description": "v0.7：true（默认）= 每条 cue 的 seed 由 style/content_fp 派生（不同影片同一位置也不同）；false = 回到 v0.6 的 seed_base+i 位置派生（老片逐样本兼容）"
+        },
+        "duck_transitions": {
+          "type": "boolean",
+          "description": "v0.7：true（默认）= 段落边界前 2.2s 内的 whoosh/riser/reverse_swell 自动 -3 dB，避免与配乐过门在同一频段撞车；false = 不处理"
         },
         "cues": {
           "type": "array",

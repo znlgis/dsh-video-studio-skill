@@ -28,15 +28,17 @@ wav = bus.mix(normalize=True, fade=0.6)
 | 声道 | 单声道总线 → 双声道输出 | 旁白单声道足够 |
 | 母带响度 | **-16 LUFS ± 1** | 网络视频标准 |
 | 真峰 | **≤ -1 dBTP** | AAC 编码会推高约 0.9 dB，混流前留 1.4 dB 余量 |
-| 旁白与间隙比 | ≥ 12 dB | 人声必须明显突出 |
-| 配乐电平 | 旁白以下 12–18 dB | 否则听不清字 |
+| 旁白与间隙比 | ≥ 12 dB | 人声必须明显突出（v0.7.1 起有代码保障：`mix_film` 旁白侧链） |
+| 配乐电平 | 旁白以下 12–18 dB | 否则听不清字（v0.7.1 默认 `music.gain_db=-12`，旧版 -1.5 不合格） |
 
 ## 3. 响度链路（三步）
 
 ```python
 # 本仓库**实际**链路（filmkit.mix_film + mux）：
-#   旁白 voice_gain=1.0 居中 → 配乐 music.gain_db(默认 -1.5) → 音效按 CUE_BASE_DB 逐条
-#   → duck(3 dB) → 峰值保护 0.89 → ffmpeg loudnorm 两遍到 -16 LUFS / 目标真峰 -1.5
+#   旁白 voice_gain=1.0 居中（不被侧链动）
+#   → 音效按 CUE_BASE_DB 逐条，再按旁白包络压 3 dB
+#   → 配乐 music.gain_db(默认 -12) → 音效响时 duck(按风格 3.0–5.5) → 旁白包络再压 6 dB
+#   → 求和 → 峰值保护 0.89 → ffmpeg loudnorm 两遍到 -16 LUFS / 目标真峰 -1.5
 af = K.loudnorm_two_pass("work/audio.wav", target_i=-16.0, target_tp=-1.5)
 ```
 
@@ -185,7 +187,8 @@ print("peak:", np.max(np.abs(bus.bus)))      # 期望 < 0.99
 |---|---|---|
 | 后半段静音 | ffmpeg 多输入混流 | numpy 总线 |
 | 爆音/削波 | 先 astype 再判 dtype | 先判 dtype 再转；打印中间峰值 |
-| 听起来糊 | 配乐电平过高 | 配乐压到旁白以下 12–18 dB |
+| 听起来糊 | 配乐电平过高 | 配乐压到旁白以下 12–18 dB（v0.7.1 默认 -12 且带旁白侧链） |
+| 听不清台词 | 背景与人声响度接近 | `music.gain_db` 降到 -12、`voice_duck_db` 开 6；别用"整体拉高"救 |
 | 响度上不去 | AAC 推高真峰后限幅 | 混流前留 1.4 dB 余量 |
 | 环境音接缝咔 | 直接拼接 | 频域整周期噪声 |
 | 配音机械 | 语速超过 +15% | 降到 +6% 左右，加自然停顿 |
@@ -418,3 +421,62 @@ out.append({"at": "%s+0.3" % s["id"], "type": "text_stream",
 `sfxkit` 的算法思想改编自 `ai-history-film`（MIT）的 `sfx/` 包，实现为本项目单文件重写；
 文件头已注明出处。配方名、参数名保持与上游一致，方便对照上游文档。
 
+## 13. 片间差异与片内分离（v0.7 新增）
+
+> 完整契约与改动清单见 **references/audio-variation.md**；这里只记"怎么用、怎么验"。
+
+### 13.1 为什么 v0.5 之后还会"差不多"
+
+v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具体样子**：
+
+- 配乐：内容指纹只进 `seed`（音色细节），和弦进行/动机/鼓型/段落骨架全固定
+  → 同风格下两段 20 s 配乐相关性 **0.966**（实测）。
+- 音效：`CueBus.build_audio` 的 seed 是 `seed_base + i`（只跟 cue 顺序）
+  → 同一批 cue 跨片逐样本相同。
+- 片内：提示音硬编码 D 小调五声、配乐过门与 sfx 转场在同一段落边界撞车、duck 只有 3 dB。
+
+### 13.2 现在怎么变
+
+| 层 | 行为 | 开关 |
+|---|---|---|
+| 配乐和声/动机/鼓型 | 内容指纹做稳定局部替换（每两小节、±1 级数、ghost 击） | `style: auto`（默认）；写死 `music.seed` + `seed_from_content: false` 可关 |
+| 音效 seed | `content_seed(base, style, fp, type, t)`，随内容变 | `sfx.content_seed`（默认 true；false = 旧 seed_base+i） |
+| 提示音调性 | `in_key(freq, key)` 跟随配乐调性 | `CueBus.build_audio(key=...)`，render.py 自动传 |
+| 段落边界 | [边界-2.2s, 边界] 内的 whoosh/riser 自动 -3 dB | `sfx.duck_transitions`（默认 true） |
+| duck | 按风格 3.0–5.5 dB（默认 4.0） | `music.duck_db` 显式覆盖 |
+
+**legacy 兼容**：不写 `style` 字段 = 全部旧行为（配乐逐样本一致、音效 seed_base+i、提示音 Dm 五声）。
+
+### 13.2.1 旁白优先（v0.7.1）
+
+视频以旁白为主，**BGM 与音效是可选层**：它们负责情绪与重音，不能抢字。具体做法：
+
+| 手段 | 默认值 | 说明 |
+|---|---|---|
+| 配乐基线 | `music.gain_db=-12` | 旧版 -1.5 时背景与台词几乎等高；-12 是"人声明显压住背景"的经验线 |
+| 旁白侧链（配乐） | `voice_duck_db=6` | 有人声的地方再压 6 dB；间隙由包络自动恢复（不会整片闷住） |
+| 旁白侧链（音效） | `voice_duck_sfx_db=3` | 提示音/转场也让人声 |
+| 语音阈值 | `voice_thresh_db=-42` / `voice_floor_db=-60` | 10 ms 块 RMS 映射成 0~1 的活动度，起音快、释放慢 |
+| 旁白自身 | `voice_gain=1.0` | **不被任何侧链影响**——旁白优先不等于"压人声" |
+| SNR 兜底 | `guard_snr_db=12` / `guard_cap_db=30` | 混音后实测人声活跃区的人声/背景差，不足就整体补压背景（只压背景） |
+
+实测（真实 edge-tts 旁白 + scorekit 配乐）：旧混音 **SNR -4.2 dB**（背景比台词还响，就是"听不清"的原因），
+新混音 **SNR 12.0 dB**；合成信号口径 15.0 dB，真实配乐素材口径 12.9 dB。
+设 `voice_duck_db=0` / `voice_duck_sfx_db=0` / `guard_snr_db=0` 可分别关掉对应机制。
+
+### 13.3 验收：别靠耳朵，跑脚本
+
+```bash
+python tools/audio_similarity.py --strict
+```
+
+A 组量"同风格换内容指纹"和"换风格"的相关性；B 组量"跨片音效是否还逐样本相同"（同时验
+legacy 兼容）；C 组读 `render.py` 的 duck 默认值并打印质心对照；
+D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何一项不达标 exit 1。
+
+### 13.4 改音频代码后的自检清单
+
+1. `python tools/audio_similarity.py --strict` —— A/B/C 三组达标。
+2. `python selfcheck.py` —— 38 条全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先）。
+3. `python scorekit.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS。
+4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

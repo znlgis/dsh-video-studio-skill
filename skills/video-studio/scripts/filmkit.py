@@ -841,6 +841,21 @@ def scenes_anchors(scenes):
                  start=float(s["start"]), end=float(s["end"])) for s in scenes]
 
 
+def content_seed(base: int, style: str, content_fp: str, recipe: str, t: float) -> int:
+    """内容派生 seed（v0.7）：同影片同 cue 稳定，不同影片同一位置也换音色细节。
+
+    公式与 sfxkit.content_seed 一致（references/audio-variation.md §3.1）：
+        sha1("v0.7|<base>|<style>|<content_fp>|<recipe>|<t 三位小数>") -> 前 8 位 hex -> % 9000 + 1000
+
+    为什么不用 seed_base + i：那样只跟 cue 的**出现顺序**有关，两部内容完全不同的片子
+    只要 cues 一样，音效轨就逐样本相同（跨片"音效都一样"的直接来源）。
+    """
+    h = hashlib.sha1(
+        ("v0.7|%d|%s|%s|%s|%.3f" % (int(base), str(style), str(content_fp), str(recipe), float(t)))
+        .encode("utf-8")).hexdigest()
+    return int(h[:8], 16) % 9000 + 1000
+
+
 class CueBus:
     """提示点登记表：画面侧登记 -> 落盘 cues.json -> 音频侧按它合成音效。
 
@@ -918,11 +933,18 @@ class CueBus:
 
     # -- 合成 --
     def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
-                    seed_base=1000, verbose=True):
+                    seed_base=1000, verbose=True,
+                    style=None, content_fp=None, key=None):
         """按提示点合成音效轨 -> (n,2) float32。
 
         依赖 scripts/sfxkit.py（v0.3.0 新增）。缺 sfxkit 时直接报错，不静默出哑片。
         未知提示点类型：告警一次并跳过（不 crash 整片混音）。
+
+        v0.7 音频差异化（见 references/audio-variation.md）：
+          - style / content_fp 同时给时，每条 cue 的 seed 由
+            content_seed(seed_base, style, content_fp, type, t) 派生 -> 不同影片同一 cue
+            位置也拿到不同音色细节；任一为 None 时退回 seed_base + i（旧路径逐样本兼容）。
+          - key 非空时透传给配方（提示音调性跟随配乐，不再硬编码 Dm）。
         """
         try:
             import sfxkit as SX
@@ -937,19 +959,35 @@ class CueBus:
         n = int(round(dur * sr)) + int(sr * 0.5)
         bus = np.zeros((n, 2), dtype=np.float32)
         unknown, placed = set(), 0
+        keyed = style is not None and content_fp is not None
+        if keyed and verbose:
+            print("   音效 seed: 内容派生（style=%s / fp=%s）" % (style, str(content_fp)[:8]))
+        elif verbose and style is not None:
+            print("   音效 seed: 位置派生（只给了 style 没给 content_fp）")
         for i, c in enumerate(self.resolved()):
             kind = str(c.get("type"))
             if kind not in reg:
                 unknown.add(kind)
                 continue
             params = {k: v for k, v in c.items()
-                      if k not in ("t", "type", "src", "gain", "pan", "base_db")}
+                      if k not in ("t", "type", "src", "gain", "pan", "base_db", "key")}
             params.pop("dur_hint", None)
+            if keyed:
+                seed = content_seed(seed_base, style, content_fp, kind, float(c["t"]))
+            else:
+                seed = int(seed_base) + i
+            if key is not None:
+                params["key"] = key
             try:
-                x = SX.render(kind, seed=int(seed_base) + i, **params)
+                x = SX.render(kind, seed=seed, **params)
             except TypeError:
-                # 兼容严格签名的配方：退化成只传 seed
-                x = SX.render(kind, seed=int(seed_base) + i)
+                # 兼容严格签名的配方（不认识 key 等新参数）：去掉扩展参数重试
+                strict = {k: v for k, v in params.items() if k != "key"}
+                try:
+                    x = SX.render(kind, seed=seed, **strict)
+                except TypeError:
+                    # 兼容严格签名的配方：退化成只传 seed
+                    x = SX.render(kind, seed=seed)
             if x is None or len(x) == 0:
                 continue
             x = np.asarray(x, dtype=np.float32)
@@ -972,6 +1010,100 @@ class CueBus:
             print("   音效轨：%d 个提示点落位 / %d 个登记（%.2fs）"
                   % (placed, len(self.items), dur))
         return bus[: int(round(dur * sr))]
+
+
+def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
+    """旁白的语音活跃度包络（0~1）：给"旁白优先"混音用的侧链源。
+
+    为什么需要它：v0.7 之前配乐基线只比旁白低 1.5 dB（`music.gain_db=-1.5`），
+    而视频是"以旁白为主"的——背景只要不明显低于人声，观众就得费力分辨字。
+    `mix_film` 现在用这条包络在**有人声的地方**把配乐/音效再压下去，
+    没人声的间隙自动让背景回来（否则整片背景像被闷住）。
+
+    实现：10 ms 块级 RMS -> dB -> 在 [floor_db, thresh_db] 之间线性映射成 0~1 ->
+    起音快 / 释放慢的单向平滑（与 `duck()` 同一套向量化手法，无逐采样循环）。
+    """
+    x = np.asarray(voice, dtype=np.float32)
+    if x.ndim == 2:
+        x = x.mean(axis=1)
+    n = len(x)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    block = max(1, int(sr * float(block_s)))
+    nb = max(1, n // block)
+    seg = x[: nb * block].reshape(nb, block)
+    rms = np.sqrt(np.mean(seg * seg, axis=1) + 1e-12)
+    db = 20.0 * np.log10(rms + 1e-12)
+    lo = float(min(floor_db, thresh_db - 1.0))
+    e = np.clip((db - lo) / (float(thresh_db) - lo), 0.0, 1.0)
+
+    def _smooth(v, tau_s):
+        k = max(1, int(sr * tau_s / block))
+        w = np.ones(k, dtype=np.float32) / k
+        return np.convolve(v, w, mode="same")
+
+    e = np.maximum(_smooth(e, 0.06), _smooth(e, 0.45)).astype(np.float32)
+    return np.interp(np.arange(n), np.arange(nb) * block + block / 2.0, e).astype(np.float32)
+
+
+def duck_voice(track, voice, depth_db=6.0, sr=SR, thresh_db=-42.0, floor_db=-60.0):
+    """旁白说话时压低背景（配乐 / 音效）：旁白优先的侧链压缩（只压背景，不碰人声）。
+
+    depth_db 是"人声满电平时背景最多被压多少 dB"；间隙里包络回 0，背景恢复原电平。
+    与 `duck()`（音效压配乐）叠加使用：人声 > 音效 > 配乐，三条让位链互不冲突。
+    """
+    b = np.asarray(track, dtype=np.float32)
+    if b.ndim == 1:
+        b2 = np.stack([b, b], axis=1)
+    else:
+        b2 = b
+    n = len(b2)
+    if n == 0 or depth_db <= 0:
+        return b2
+    e = voice_env(voice, sr=sr, thresh_db=thresh_db, floor_db=floor_db)[:n]
+    if e.size == 0 or float(np.max(e)) <= 1e-6:
+        return b2
+    gains = 10.0 ** (-float(depth_db) * e / 20.0)
+    return (b2 * gains[:, None]).astype(np.float32)
+
+
+def voice_snr(voice, bg, sr=SR, thresh_db=-42.0, floor_db=-60.0):
+    """在"有人声"的采样区间量 人声/背景 的响度差（dB）。旁白优先的客观指标。
+
+    只在语音活跃度 >= 0.5 的区间统计：静音间隙里背景当然是唯一声源，
+    把间隙算进来会稀释问题（真正让人听不清的，是人说话那一刻背景有多响）。
+    人声总长不足 50 ms 时返回 None（没有可判定的样本）。
+    """
+    v = np.asarray(voice, dtype=np.float64)
+    b = np.asarray(bg, dtype=np.float64)
+    if v.ndim == 2:
+        v = v.mean(axis=1)
+    if b.ndim == 2:
+        b = b.mean(axis=1)
+    n = min(len(v), len(b))
+    if n <= 0:
+        return None
+    v, b = v[:n], b[:n]
+    e = voice_env(v, sr=sr, thresh_db=thresh_db, floor_db=floor_db)
+    act = e >= 0.5
+    if int(np.sum(act)) < int(0.05 * sr):
+        return None
+    vr = float(np.sqrt(np.mean(v[act] ** 2)))
+    br = float(np.sqrt(np.mean(b[act] ** 2)))
+    return 20.0 * np.log10((vr + 1e-12) / (br + 1e-12))
+
+
+def guard_snr(voice, bg, target_db=12.0, cap_db=12.0, sr=SR,
+              thresh_db=-42.0, floor_db=-60.0):
+    """旁白清晰度兜底：人声/背景不足 target_db 时，返回背景应再压多少 dB。
+
+    返回 (trim_db, snr_db)：trim_db=0 表示已达标；cap_db 防止把背景压到无声
+    （压过头会变成"配乐忽有忽无"，比听不清更假）。判定口径同 `voice_snr()`。
+    """
+    snr = voice_snr(voice, bg, sr=sr, thresh_db=thresh_db, floor_db=floor_db)
+    if snr is None or snr >= float(target_db):
+        return 0.0, (snr if snr is not None else float("nan"))
+    return float(min(max(0.0, float(cap_db)), float(target_db) - snr)), snr
 
 
 def duck(music, sfx, depth_db=4.0, attack=0.03, release=0.35, sr=SR):
@@ -1008,11 +1140,24 @@ def duck(music, sfx, depth_db=4.0, attack=0.03, release=0.35, sr=SR):
 
 def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
              voice_gain=1.0, music_gain_db=0.0, sfx_gain_db=0.0,
-             duck_db=3.0, peak_target=0.89, fade=0.4, verbose=True):
+             duck_db=3.0, peak_target=0.89, fade=0.4, verbose=True,
+             voice_duck_db=6.0, voice_duck_sfx_db=3.0,
+             voice_thresh_db=-42.0, voice_floor_db=-60.0,
+             guard_snr_db=12.0, guard_cap_db=30.0):
     """三总线混音：旁白 + 配乐 + 音效 -> 立体声 float32。
 
-    顺序照 ai-history-film 的成片混音：音乐比音效低一点，音效响时音乐让位，
-    最后统一做峰值保护（真正的响度标准化交给 ffmpeg 的 loudnorm）。
+    **旁白优先**（v0.7.1 起是硬行为，不是文档口号）：
+      1. 旁白电平固定 `voice_gain=1.0`，不被任何侧链影响；
+      2. 有人声的地方，配乐再压 `voice_duck_db`（默认 6 dB）、音效再压 `voice_duck_sfx_db`（默认 3 dB）
+         —— 保证"人声比背景响 ≥12 dB"这条可听清线；没人声的间隙自动恢复；
+      3. 音效响时配乐额外让位（`duck_db`，v0.7 默认 4 dB）；
+      4. 最后统一做峰值保护（真正的响度标准化交给 ffmpeg 的 loudnorm）。
+
+    `voice_duck_db=0` / `voice_duck_sfx_db=0` 可单独关掉旁白优先让位（旧片对比用）。
+
+    **SNR 兜底（guard_snr_db=12，0 = 关）**：按台词活跃区实测"人声/背景"响度差，
+    不足 12 dB 就整体再压背景（最多 guard_cap_db），保证"听清旁白"不依赖配乐素材的天然电平——
+    这是本仓库唯一一条会在混音后自己改电平的门禁。触发时会打印实际 SNR 与补压量。
     """
     def _to_stereo(x):
         a = np.asarray(x, dtype=np.float32)
@@ -1033,18 +1178,43 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
     if not n:
         return np.zeros((0, 2), dtype=np.float32)
 
-    out = np.zeros((n, 2), dtype=np.float32)
+    # v0.7.1 旁白优先：先算背景（配乐 + 音效各自让位），再用 SNR 兜底确认"人声压得住"。
+    venv_kw = dict(sr=sr, thresh_db=float(voice_thresh_db), floor_db=float(voice_floor_db))
+    back = np.zeros((n, 2), dtype=np.float32)
     if s is not None:
-        out += s[:n] * (10.0 ** (float(sfx_gain_db) / 20.0))
+        ss = s[:n] * (10.0 ** (float(sfx_gain_db) / 20.0))
+        if v is not None and float(voice_duck_sfx_db) > 0:
+            ss = duck_voice(ss, v[:n], depth_db=float(voice_duck_sfx_db), **venv_kw)
+        back += ss
     if m is not None:
         mm = m[:n] * (10.0 ** (float(music_gain_db) / 20.0))
         if s is not None:
             mm = duck(mm, s[:n], depth_db=duck_db, sr=sr)
         else:
             mm = _to_stereo(mm)
-        out += mm
+        if v is not None and float(voice_duck_db) > 0:
+            mm = duck_voice(mm, v[:n], depth_db=float(voice_duck_db), **venv_kw)
+        back += mm
+    # SNR 兜底：实测人声活跃区的人声/背景比；不够就整体再压背景（不碰人声）。
+    if v is not None and back.any() and float(guard_snr_db) > 0:
+        trim_db, snr_db = guard_snr(v[:n], back, target_db=float(guard_snr_db),
+                                    cap_db=float(guard_cap_db), **venv_kw)
+        if trim_db > 0.0:
+            back *= 10.0 ** (-trim_db / 20.0)
+        if verbose:
+            if snr_db == snr_db:                            # 非 NaN = 有可判定的人声段
+                note = "，达标"
+                if trim_db > 0:
+                    note = "，背景再压 %.1f dB" % trim_db
+                    if trim_db >= float(guard_cap_db) - 1e-6:
+                        note += "（已到兜底上限：检查配乐/音效素材电平）"
+                    elif trim_db > 18.0:
+                        note += "（补压很大：建议调低 music.gain_db）"
+                print("   旁白优先: 人声/背景 = %.1f dB（目标 %.1f）%s"
+                      % (snr_db, float(guard_snr_db), note))
+    out = back
     if v is not None:
-        out += v[:n] * float(voice_gain)
+        out = out + v[:n] * float(voice_gain)
 
     raw = float(np.max(np.abs(out))) if out.size else 0.0
     if fade > 0:

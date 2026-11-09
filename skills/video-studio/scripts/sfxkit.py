@@ -17,6 +17,7 @@ BS.1770 响度、块级动态处理）改编自 ai-history-film（MIT），实�
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import math
 import os
@@ -2011,33 +2012,77 @@ CUE_ALIASES = {
     "stream": "text_stream",                       # 兼容写法：文字流
 }
 
-_PENTA_D = None
+# ============================================================================
+# 调性跟随 / 内容派生 seed（v0.7，references/audio-variation.md §3.1）
+# ============================================================================
+# 提示音以前硬编码 D 小调五声：配乐一旦选到 C / Am 等调，提示音就"跑调"。
+# 这里给 in_key() 加可选的 key 参数，key=None 时逐音保持 v0.6 的 D 小调五声
+# （自检/legacy 逐样本兼容），C 路（CueBus.build_audio）再把配乐调性透传下来。
+#
+# 调名表与 scorekit.KEYS_ALL 对齐（4 个小调 + 6 个大调），不另发明一套写法：
+#   小调 -> 自然小调五声（0/3/5/7/10 半音，Dm = D F G A C）
+#   大调 -> 大调五声（0/2/4/7/9 半音，C = C D E G A）
+_KEY_SPECS = {
+    "Dm": ("D", 2, "minor"), "Am": ("A", 9, "minor"),
+    "Cm": ("C", 0, "minor"), "Em": ("E", 4, "minor"),
+    "C": ("C", 0, "major"), "G": ("G", 7, "major"), "D": ("D", 2, "major"),
+    "F": ("F", 5, "major"), "A": ("A", 9, "major"), "Bb": ("Bb", 10, "major"),
+}
+_PENTA_CACHE = {}
 
 
 def _penta(key="Dm"):
-    """把提示音的音高吸附到一个五声音阶上（避免"叮"和配乐跑调）。
+    """把某一调的五声音阶算成 [Hz, ...]（从小到大，MIDI 24~107）。
 
-    默认 D 小调五声（D F G A C）。返回 [Hz, ...] 从小到大。
+    小调用自然小调五声、大调用大调五声；结果按调名缓存（纯 numpy，无随机）。
+    key 缺省 / None 仍是 D 小调五声：与 v0.6 的数组逐音一致，legacy 逐样本不变。
     """
-    global _PENTA_D
-    if _PENTA_D is not None:
-        return _PENTA_D
-    out = []
-    for midi in range(24, 108):
-        pc = midi % 12
-        if pc in (2, 5, 7, 9, 0):            # D F G A C
-            out.append(midi)
-    _PENTA_D = np.array([440.0 * 2.0 ** ((m - 69) / 12.0) for m in out])
-    return _PENTA_D
+    name = "Dm" if key is None else str(key)
+    got = _PENTA_CACHE.get(name)
+    if got is not None:
+        return got
+    spec = _KEY_SPECS.get(name)
+    if spec is None:
+        raise ValueError("in_key: 未知调名 %r（可用 %s）"
+                         % (key, "/".join(_KEY_SPECS)))
+    pc0, mode = int(spec[1]), spec[2]   # spec[0] 是音名（只给读代码的人看），不参与计算
+    steps = (0, 3, 5, 7, 10) if mode == "minor" else (0, 2, 4, 7, 9)
+    pcs = {(int(pc0) + s) % 12 for s in steps}
+    out = [m for m in range(24, 108) if (m % 12) in pcs]
+    _PENTA_CACHE[name] = np.array([440.0 * 2.0 ** ((m - 69) / 12.0) for m in out])
+    return _PENTA_CACHE[name]
 
 
-def in_key(freq: float) -> float:
-    """把任意频率吸附到最近的 D 小调五声音阶音（配乐同调）。"""
-    p = _penta()
+def in_key(freq: float, key: str | None = None) -> float:
+    """把任意频率吸附到最近的五声音阶音（与配乐同调）。
+
+    key=None -> v0.6 的旧行为：硬编码 D 小调五声（D F G A C），逐样本兼容。
+    key 给 "Dm"/"Am"/"Cm"/"Em"（自然小调五声）或 "C"/"G"/"D"/"F"/"A"/"Bb"
+    （大调五声）-> 吸附到该调；未知调名 raise ValueError，不静默降级（与 _enum 同口径）。
+    """
+    p = _penta(key)
     if freq <= 0:
         return float(p[0])
     i = int(np.argmin(np.abs(np.log(p) - np.log(max(freq, 20.0)))))
     return float(p[i])
+
+
+def content_seed(base: int, style: str, content_fp: str, recipe: str, t: float) -> int:
+    """内容派生 seed（v0.7 契约 §3.1）：同片同 cue 稳定，换片同一位置也换种子。
+
+    公式（与 filmkit.content_seed 逐字一致，两边同参必须同值）：
+        sha1("v0.7|<base>|<style>|<content_fp>|<recipe>|<t 三位小数>") -> 前 8 位 hex
+        -> int(h[:8], 16) % 9000 + 1000（32 位非负 int，落在 1000~9999）。
+
+    纯 stdlib（hashlib）：同进程/跨进程/跨机器同参数同结果，不受 numpy 随机源影响。
+    为什么不用 seed_base + i：那样只跟 cue 的**出现顺序**有关，两部内容完全不同的片子
+    只要 cue 序列一样，音效轨就逐样本相同（跨片"音效都一样"的直接来源）。
+    """
+    h = hashlib.sha1(
+        ("v0.7|%d|%s|%s|%s|%.3f"
+         % (int(base), str(style), str(content_fp), str(recipe), float(t)))
+        .encode("utf-8")).hexdigest()
+    return int(h[:8], 16) % 9000 + 1000
 
 
 def _enum(value, allowed, where: str, name: str = "值") -> str:
@@ -2228,10 +2273,14 @@ def recipe(name=None, *, tags=(), master=None):
 # ---------------------------------------------------------------- 界面音
 @_recipe(tags=("界面", "提示音"))
 def ui_blip(seed=0, pitch=2200.0, kind="tick", dur=0.22, **kw):
-    """极短的"嘀"：玻璃/金属的敲击，音高吸附五声音阶。"""
+    """极短的"嘀"：玻璃/金属的敲击，音高吸附五声音阶。
+
+    v0.7：key 从 **kw 透传（C 路把配乐调性放进来）——None/缺省 = 旧行为（D 小调五声），
+    给 "Dm"/"C"/"Am" 等则吸附到该调，未知调名 raise ValueError（见 in_key）。
+    """
     kind = _enum(kind, ("tick", "ping"), "ui_blip", "kind")
     g = rng(seed)
-    f = in_key(float(pitch)) * float(g.uniform(0.985, 1.015))
+    f = in_key(float(pitch), kw.get("key")) * float(g.uniform(0.985, 1.015))
     if kind == "tick":
         body = _tone(f, dur * 0.55, 0.035, attack=0.0004)
         click = contact_noise(1.4, center_hz=6200.0, q=0.9, seed=seed) * 0.35
@@ -2276,9 +2325,16 @@ def relay_click(seed=0, count=1, gap=0.18, **kw):
 
 @_recipe(tags=("界面", "抽签"))
 def roulette_tick(seed=0, last=False, **kw):
-    """转盘抽签的木质"咔嗒"：硬接触的木块，last=True 时更重、更低。"""
+    """转盘抽签的木质"咔嗒"：硬接触的木块，last=True 时更重、更低。
+
+    v0.7：给了 key 时把木块基频吸附到该调（提示音跟配乐同调）；key=None 走旧公式，
+    随机序列与取样点都不变 -> legacy 逐样本兼容。
+    """
     g = rng(seed)
     f1 = (410.0 if not last else 300.0) * float(g.uniform(0.97, 1.03))
+    key = kw.get("key")
+    if key is not None:
+        f1 = in_key(f1, key)
     b = bar(f1, material="wood", n_modes=7, tilt=0.25, seed=seed)
     x = _bus(0.26, stereo=False)
     _place(x, b.render(Hit(0.0, velocity=1.0 if last else 0.75,
@@ -2289,10 +2345,14 @@ def roulette_tick(seed=0, last=False, **kw):
 
 @_recipe(tags=("界面", "提示音", "音乐"))
 def answer_chime(seed=0, note=1174.66, grace=880.0, grace_lead=0.07, **kw):
-    """"猜中了"的钟琴：一个装饰音 + 一个主音，都在五声音阶上。"""
+    """"猜中了"的钟琴：一个装饰音 + 一个主音，都在五声音阶上。
+
+    v0.7：key 从 **kw 透传（None = 旧行为 D 小调五声；给调名则整条钟琴跟随配乐调性）。
+    """
+    key = kw.get("key")
     x = _bus(1.6, stereo=False)
-    _place(x, _tone(in_key(grace), 0.9, 0.5, attack=0.001, index=1.6, ratio=3.5), 0.0, -10.0)
-    _place(x, _tone(in_key(note), 1.4, 0.9, attack=0.0015, index=1.2, ratio=2.0),
+    _place(x, _tone(in_key(grace, key), 0.9, 0.5, attack=0.001, index=1.6, ratio=3.5), 0.0, -10.0)
+    _place(x, _tone(in_key(note, key), 1.4, 0.9, attack=0.0015, index=1.2, ratio=2.0),
            float(grace_lead), -1.5)
     return x
 
@@ -2341,7 +2401,10 @@ def typing_at(seed=0, times=(0.0, 0.12, 0.25, 0.4), spaces=(), **kw):
 
 @_recipe(tags=("界面", "数据", "文字"))
 def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone", **kw):
-    """AI 逐字输出：比打字更连贯。voice="tone" 是带音高的五声颗粒；"soft" 是不带音高的沙沙。"""
+    """AI 逐字输出：比打字更连贯。voice="tone" 是带音高的五声颗粒；"soft" 是不带音高的沙沙。
+
+    v0.7：voice="tone" 的音高跟随 **kw 里的 key（None = 旧行为 D 小调五声）。
+    """
     voice = _enum(voice, ("tone", "soft"), "text_stream", "voice")
     ts = _times(times, "text_stream")
     g = rng(seed)
@@ -2354,21 +2417,26 @@ def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone"
             k = bandpass(k, 3200.0 + 900.0 * float(g.random()), q=0.9)
             _place(x, k, t, -6.0 + float(g.uniform(-1.5, 1.5)))
         else:
-            f = in_key(float(base) * (2.0 ** (float(g.choice([-2, 0, 2, 4])) / 12.0)))
+            f = in_key(float(base) * (2.0 ** (float(g.choice([-2, 0, 2, 4])) / 12.0)),
+                       kw.get("key"))
             _place(x, _tone(f, 0.06, 0.02, attack=0.0006), t, -9.0 + float(g.uniform(-1.0, 1.0)))
     return x
 
 
 @_recipe(tags=("界面", "数据"))
 def data_chirp(seed=0, dur=0.8, rate=28.0, base=1800.0, **kw):
-    """数据流：一串很快的、带音高的短脉冲，频率在五声上随机跳动。"""
+    """数据流：一串很快的、带音高的短脉冲，频率在五声上随机跳动。
+
+    v0.7：音高跟随 **kw 里的 key（None = 旧行为 D 小调五声）。
+    """
     r = float(rate)
     n = max(2, int(float(dur) * r))
     g = rng(seed)
     x = _bus(dur, stereo=False)
     for i in range(n):
         at = i / r
-        f = in_key(float(base) * (2.0 ** (float(g.choice([-5, -2, 0, 2, 3, 5, 7])) / 12.0)))
+        f = in_key(float(base) * (2.0 ** (float(g.choice([-5, -2, 0, 2, 3, 5, 7])) / 12.0)),
+                   kw.get("key"))
         env_amp = 1.0 - 0.55 * (i / max(1, n - 1))
         _place(x, _tone(f, 0.05, 0.012, attack=0.0004), at, -14.0 + 20 * np.log10(env_amp + 1e-6))
     return x
@@ -2981,7 +3049,33 @@ def selftest() -> int:
             b = render(k, seed=11, dur=3.0) if k == "rain" else render(k, seed=11)
             if not np.array_equal(np.asarray(a), np.asarray(b)):
                 raise ValueError("%s 同 seed 两次渲染不一致" % k)
-        return "impact/whoosh/ui_blip/typing/rain 逐采样一致"
+        # v0.7 契约 §3.1：key=None 与 key="Dm" 必须逐样本一致（旧路径兼容）；
+        # key 给别的调必须真的换音（用 F4：Dm 五声里有 F、C 大调五声里没有，一定吸附到 E4）。
+        old = np.asarray(render("ui_blip", seed=11))
+        dm = np.asarray(render("ui_blip", seed=11, key="Dm"))
+        if not np.array_equal(old, dm):
+            raise ValueError('ui_blip key="Dm" 与 key=None（旧行为）不一致')
+        f4 = np.asarray(render("ui_blip", seed=11, pitch=349.23))
+        c_major = np.asarray(render("ui_blip", seed=11, pitch=349.23, key="C"))
+        if np.array_equal(f4, c_major):
+            raise ValueError('ui_blip key="C" 没有换调（F4 应吸附到 E4）')
+        for rn in ("ui_blip", "answer_chime", "text_stream", "data_chirp", "roulette_tick"):
+            y = render(rn, seed=2, key="Am")
+            if y is None or len(y) == 0:
+                raise ValueError("%s 透传 key='Am' 后无输出" % rn)
+        # content_seed：同参数稳定、对 content_fp/recipe 敏感、落在 1000~9999（契约 §3.1）。
+        s1 = content_seed(1000, "tech-deep", "aaaa1111", "ui_blip", 12.5)
+        s2 = content_seed(1000, "tech-deep", "aaaa1111", "ui_blip", 12.5)
+        s3 = content_seed(1000, "tech-deep", "bbbb2222", "ui_blip", 12.5)
+        s4 = content_seed(1000, "tech-deep", "aaaa1111", "whoosh", 12.5)
+        if s1 != s2:
+            raise ValueError("content_seed 同参数两次不一致")
+        if s3 == s1 or s4 == s1:
+            raise ValueError("content_seed 对 content_fp/recipe 不敏感（跨片会撞种子）")
+        if not (1000 <= s1 <= 9999):
+            raise ValueError("content_seed 超出 1000~9999：%r" % (s1,))
+        return ("impact/whoosh/ui_blip/typing/rain 逐采样一致；key=Dm 同旧行为、key=C 换调；"
+                "content_seed 稳定（s=%d）" % s1)
 
     def t_all_render():
         # 预算分两条路径（见文件头 PERF_BUDGET_* 注释）：有 scipy 1.5 s；无 scipy 走
@@ -3054,7 +3148,9 @@ def selftest() -> int:
                ("knock_wood", dict(room="bogus")),
                ("metal_hit", dict(obj="bogus")),
                ("relay_click", dict(gap=-1.0, count=3)),
-               ("typing_at", dict(times=[-1.0])))
+               ("typing_at", dict(times=[-1.0])),
+               ("ui_blip", dict(key="bogus")),          # v0.7：未知调名必须响亮报错
+               ("answer_chime", dict(key="bogus")))
         for rname, kw in bad:
             try:
                 render(rname, seed=3, **kw)

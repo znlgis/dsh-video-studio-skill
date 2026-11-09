@@ -2,6 +2,124 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.7.1 — 旁白优先：让观众听清字，BGM 与音效退回"可选层"
+
+> 用户的要求很直接：「视频以旁白为主，BGM 和其它音效可有可无，至少不能影响旁白的清晰度」。
+> 0.7.0 解决的是"声音都一样"，这一版解决的是"声音不能抢戏"。
+
+### 修了什么
+
+| 项 | 0.7.0 及以前 | 0.7.1 |
+|---|---|---|
+| 配乐基线 | `music.gain_db=-1.5`：背景只比台词低 1.5 dB | **-12**：人声明显压住背景 |
+| 旁白侧链 | 无 | 有人声处再压配乐 **6 dB**、音效 **3 dB**；间隙自动恢复（包络 10 ms 块，起音快释放慢） |
+| 旁白自身 | `voice_gain=1.0` | 不变，且**不被任何侧链影响**（旁白优先 ≠ 压人声） |
+| **SNR 兜底** | 无 | 混音后实测人声活跃区的人声/背景差，**不足 12 dB 自动补压背景**（最多 30 dB，只动背景） |
+| 失败模式 | "代码不测量也不保证"，靠回听 | selfcheck 35/36/37/38 + `audio_similarity.py --strict` D 组硬断言 |
+
+- 新 API：`filmkit.voice_env()`（台词活跃度包络）、`filmkit.duck_voice()`（旁白侧链压缩）、
+  `filmkit.voice_snr()`（人声活跃区 SNR）、`filmkit.guard_snr()`（不足就补压的判定）。
+- `mix_film` 新增参数：`voice_duck_db=6.0` / `voice_duck_sfx_db=3.0` / `voice_thresh_db=-42` / `voice_floor_db=-60`。
+- `film.json` 的 `music` 新增上述四个键（显式 0 = 关闭），模板已写默认值。
+- 模板 `film.json` 的 `music.gain_db` 从 `-1.5` 改为 `-12`，`duck_db` 3 → 4。
+
+### 实测
+
+- **真实素材对照**（edge-tts 真旁白 + scorekit 真配乐，22 s）：
+  旧混音（配乐 -1.5、无侧链、无兜底）**人声活跃区 SNR = -4.2 dB**——背景比台词还响，正是"听不清"的根源；
+  新混音（-12 + 侧链 6 dB + 12 dB 兜底）**SNR = 12.0 dB**。
+- `--strict` D 组（真实配乐素材）：**12.9 dB**，旁白处背景额外让位 6.0 dB，间隙背景回到基线。
+- `selfcheck` **34 → 38**：新增「35 旁白优先（让位与恢复）」「36 旁白优先默认值（配乐 -12 + 侧链）」
+  「37 旁白清晰度 SNR 兜底」「38 无旁白时混音不受影响」。
+- 同时修了 selfcheck 第 24 条：原来断言"外部配乐峰值 > 0.3"（绝对阈值），配乐基线降到 -12 后误报；
+  改为"比 off 时明显变大"的相对断言——**绝对阈值会被调参牵着走**，这是本版顺手记下的教训。
+
+### 已知限制
+
+- 侧链是"按人声包络整体压背景"，不是频谱避让。旁白与配乐在 1–3 kHz 重叠时，仍靠 12 dB 电平差与人声专注度；
+  想更干净可给配乐加一段 1–3 kHz 的 EQ 挖空（本版没做，属于"可选增强"）。
+- `voice_duck_db` 压太深会让音乐在每句之间"一抽一抽"；默认 6 dB 是听感与安全的折中，可按片子调 4–8。
+- SNR 兜底是**按整片统一补压背景**，不是逐句动态：如果某一句的背景特别响、别处正常，兜底会整体压一次；
+  逐句动态压需要更细的包络（本版没做）。补压超过 18 dB 会打印提示，通常意味着该调低 `music.gain_db`。
+
+## 0.7.0 — 声音也要"一片一样"：配乐变奏、音效内容化、片内分离
+
+> 起因：v0.5 解决了"每部片的风格都差不多"，但同一风格下的**配乐仍像同一首**、
+> **音效逐样本相同**、**片内配乐和音效像同一套**。用户的原话是
+> 「生成的视频为啥背景音乐和音效都差不多」。
+> 本版不动画风与旁白，只把音频三件事做成"随内容变化、片内可分"。
+
+### 实测证据（改造前，`tools/audio_similarity.py`）
+
+| 对照 | corr / 结果 | 含义 |
+|---|---|---|
+| 同风格·同 bpm·同调，只换内容指纹 | **0.966** | 指纹只改 seed，和弦/动机/鼓型不变 → 听感同一首 |
+| 换风格 | 0.534 | 差异几乎全由风格承担 |
+| 同 cue 序列跨片渲染 | **逐样本相同** | 音效 seed = `seed_base + i`，与内容无关 |
+| 提示音音高 | 硬编码 D 小调五声 | 配乐换到 C/G/Am 后提示音"跑调"或同调过强 |
+| duck 默认 | 3.0 dB（2.0–4.5 分风格） | 段落过门时配乐与音效几乎等高 |
+
+### 修法（三路并行，契约见 `references/audio-variation.md`）
+
+| 层 | 改法 |
+|---|---|
+| 配乐和声 | 内容指纹参与**每两小节一次的稳定和弦替换**（不干扰乐句末/片尾规则） |
+| 配乐进行 | 指纹在风格自带的 calm/body/drive 三套进行里选一档（同风格素材，只换功能顺序） |
+| 配乐动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
+| 配乐鼓型 | 指纹加 ghost kick + clap ±0.5 拍 |
+| 出片接线 | `render.py` 的 `st_score` 把 `fingerprint.full` 传进 `scorekit.render()`（legacy 不传，四级 TypeError 回退保旧 scorekit 可用） |
+| 音效 seed | `content_seed(base, style, content_fp, recipe, t)`（filmkit / sfxkit 两侧逐字同公式） |
+| 提示音调性 | `in_key(freq, key)`：key=None 保持 v0.6 逐样本行为；给调名则跟随配乐 |
+| 提示点生成 | `assets/scenes.py` 的 `cues()` 按 kind 出不同音效设计（hook/body/quote/outro），条目音高由文本派生 |
+| 模板 cue | `assets/film.json` 去固定化 + `sfx.content_seed` 开关 |
+| 段落边界 | 边界前 2.2 s 内的 whoosh/riser 自动 -3 dB（不撞配乐过门） |
+| duck | 按风格加深（mono 3.0 / lo-fi·magazine 3.5 / 默认 4.0 / cinema·epic 5.5） |
+
+### 验收（改造后，`python tools/audio_similarity.py --strict`）
+
+| 指标 | 改前 | 目标 | 实测 |
+|---|---|---|---|
+| A 同风格换指纹 corr | 0.966 | ≤ 0.85 | **0.645** |
+| A 换风格 corr | 0.534 | ≤ 0.52 | **0.511** |
+| B legacy 逐样本相同 | True | True（必须） | True |
+| B 不同内容指纹 | 逐样本相同 | 必须可区分 | 已不同（逐样本 False） |
+| B 同内容指纹可复现 | True | True | True |
+| C duck 默认 | 3.0 | ≥ 3.5 | 4.0 |
+
+**验收命令与结论**（本机实测，2026-11-09）：
+
+```bash
+python tools/audio_similarity.py --strict   # STRICT PASS（A/B/C 三组）
+python skills/video-studio/scripts/selfcheck.py    # PASS 34 / FAIL 0 / SKIP 0
+python skills/video-studio/scripts/scorekit.py --selftest   # 21/21 PASS
+python skills/video-studio/scripts/sfxkit.py --selftest     # 16/16 PASS
+```
+
+配乐变奏的实测 `variation`（20 s / tech-deep / 110 BPM / content-a）：`{"chord_swaps": 4,
+"motif_shifts": 4, "drum_ghosts": 6}`；同一剧本换 content-b 得到 `{"chord_swaps": 3,
+"motif_shifts": 4, "drum_ghosts": 7}` —— 三处结构变奏都在随内容变化，不是只改了 seed。
+真实出片链路（`--stage score`）里 `work/score.json` 也能看到这个字段，可直接审计。
+
+### 门禁与回归
+
+- `selfcheck` 32 → 34：新增「33 音效跨片可区分（内容派生 seed + legacy 逐样本兼容）」
+  「34 配乐/音效片内分离（duck 加深）」。
+- `tools/audio_similarity.py` 新增 `--strict`：把 A/B/C 三组阈值变成可执行的验收，失败 exit 1。
+- legacy（不写 `style` 字段 / `sfx.content_seed: false`）逐样本不变：selfcheck 20/26/33 三条守着。
+
+### 已知限制
+
+- **同风格不同指纹有约 1/3 概率落到同一和弦进行档位**：此时两段配乐 corr≈0.93（仍有七和弦色彩与鼓型 ghost 的差别，但听感更接近）。想再降需要"每段独立选档"，会削弱片内连贯性，本轮不做。固定验收的 content-a/content-b 落在不同档。
+- `fixture` 级别的验收脚本 `tools/audio_similarity.py` 用固定指纹串（content-a/b），真实剧本走的是 sha1 指纹，分布一致但不是同一组样本。
+- 音效"跨片可区分"在**同一组 cue 序列**上只保证逐样本不同（corr 仍可能 0.9 量级，因为 cue 时间点相同）；真正的差异来自 `scenes.py` 的 `cues()` 按 kind 与文本生成不同序列。
+
+### 升级须知（v0.6 → v0.7）
+
+1. 老项目照旧能跑：不写新字段 = v0.6 行为（配乐逐样本一致、音效 seed 位置派生）。
+2. 想让配乐/音效随内容变化：保持 `style: auto`（已是默认），**不要**写死 `music.seed`/关掉 `seed_from_content`。
+3. 想让提示点更丰富：把音效写进 `scenes.py` 的 `cues()`（模板已按 kind 生成），`film.json` 的 `sfx.cues` 只留少量固定重击。
+4. 改音频代码后跑 `python tools/audio_similarity.py --strict`（约 1–2 分钟），它比"听起来差不多"可靠。
+
 ## 0.6.0 — 交付可信化：让"我查过了 / 我签过了 / 改一句要重跑什么"都能拿证据
 
 > 这一版不加生成能力，加的是**可追责性**。起因是一次对照：把本项目与另一个成熟插件

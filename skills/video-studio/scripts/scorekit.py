@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""scorekit.py — 程序化配乐（v0.5.0）。
+"""scorekit.py — 程序化配乐（v0.7.0）。
 
 用代码写一张能贯穿整部片子的配乐：调性/和弦表、段落能量、节拍网格、律动层、
 段落过门、自动电平与"吸气"，全部由 numpy + sfxkit 现场合成，不用任何采样。
@@ -33,6 +33,18 @@ v0.5 新增（配乐风格层）：
         style 为 None / "legacy" 时走 v0.4 原路径（逐样本一致）；否则走风格化合成。
     KEYS_MAJOR / KEYS_ALL                    6 个大调 + 全部 10 个调
     spectral_centroid(x, sr=SR)              频谱质心（量"亮度"，验证风格差异用）
+
+v0.7 新增（内容指纹变奏，references/audio-variation.md §3.3）：
+    fingerprint 不再只派生音色 seed —— 同一风格换内容指纹时，结构层也稳定地变：
+      * 进行档：按指纹从 style["progressions"] 的 calm/body/drive 里另选一档
+        （整片一个偏移、climax 仍复用 drive，片内各段的进行关系保持连贯）；
+      * 和弦：每两小节一次稳定替换（i<->i7 / VI<->VI7 / III<->III7 / VII<->VII7；
+        大调侧 I<->Imaj7 / IV<->IVmaj7），不覆盖乐句末属和弦与片尾主和弦；
+      * 动机：每个 (拍, 级数, 时值) 做 ±1 级数偏移（只改级数不改节奏；问句/答句/
+        片尾三种动机独立派生，跨主音的上下行用八度偏移修正）；
+      * 鼓型：kick 最多加一记 ghost 落点（0.5 拍网格、不与现有落点重复），clap ±0.5 拍。
+    report["variation"] = {"chord_swaps", "motif_shifts", "drum_ghosts"} 记实际发生数。
+    style=None 的 legacy 路径不经过这些代码，仍然逐字节兼容（selfcheck 20 条）。
 """
 from __future__ import annotations
 
@@ -50,7 +62,7 @@ import numpy as np
 
 import sfxkit as S                      # 唯一音频依赖：numpy + sfxkit
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 SR = 48000                             # 采样率（与 filmkit / sfxkit 一致）
 BEATS_PER_BAR = 4                      # 4/4
@@ -128,6 +140,11 @@ _DEGREE_TABLE = (
     ("V7", 7, (0, 4, 7, 10), "7"),
     ("vi7", 9, (0, 3, 7, 10), "m7"),
     ("i7", 0, (0, 3, 7, 10), "m7"),
+    # ---- v0.7：和弦替换用的七和弦色彩。同根音、同三音，只把五度后的音换成小七度；
+    # 只允许在表尾追加（前 10 项顺序被 _build_key / 老报告依赖），供 _CHORD_SWAPS 使用。 ----
+    ("VI7", 8, (0, 4, 7, 10), "7"),
+    ("III7", 3, (0, 4, 7, 10), "7"),
+    ("VII7", 10, (0, 4, 7, 10), "7"),
 )
 
 # 级数名 -> 定义行（旋律生成/mood 色彩/自测校验用；只读映射，不参与 _build_key）
@@ -2040,42 +2057,174 @@ def _styled_layers(pack: dict, energy: float, mood: str) -> list:
     return out
 
 
-def _styled_progression(pack: dict, tier: str, mood: str) -> tuple:
-    """取该 tier 的级数进行；climax 复用 drive（高潮靠鼓与层数，不靠换和弦）。"""
+# ---- v0.7 内容指纹变奏（references/audio-variation.md §3.3）----------------
+# v0.6 及以前指纹只进 seed（只改音色细节）：同风格 / 同 bpm / 同调、只换内容指纹，
+# 两段配乐相关性 0.966 —— 因为和弦进行 / 动机 / 鼓型全写死。
+# v0.7 把指纹推到"结构层"：和弦做每两小节一次的稳定替换、动机级数做 ±1 稳定偏移、
+# 鼓型加 ghost 落点。三处决策全部走 _hash_int（FNV-1a，跨进程稳定），所以
+# 同指纹逐采样一致、不同指纹稳定地不同；没有引入额外随机源（变奏全部由指纹决定）。
+_VARIATION_SALT = "v0.7"
+
+# 和弦替换对：同根音、同三音，只在"三和弦 <-> 七和弦色彩"之间换（契约 §3.3 的替代级数集）
+_CHORD_SWAPS = {
+    "minor": {"i": "i7", "i7": "i", "VI": "VI7", "VI7": "VI",
+              "III": "III7", "III7": "III", "VII": "VII7", "VII7": "VII"},
+    "major": {"I": "Imaj7", "Imaj7": "I", "IV": "IVmaj7", "IVmaj7": "IV"},
+}
+
+# 动机级数邻接表：只走"调内级数"的上下各一级（只换级数，节奏 / 时值不动）。
+# 值是 ((下方级数, 八度偏移), (上方级数, 八度偏移))；跨主音时八度偏移 ±1，
+# 否则 i 下行一级会变成高 10 个半音的 VII（旋律轮廓会翻掉）。
+_MOTIF_NEIGHBORS = {
+    "minor": {
+        "i": (("VII", -1), ("ii°", 0)), "ii°": (("i", 0), ("III", 0)),
+        "III": (("ii°", 0), ("iv", 0)), "iv": (("III", 0), ("v", 0)),
+        "v": (("iv", 0), ("VI", 0)), "V": (("iv", 0), ("VI", 0)),
+        "VI": (("v", 0), ("VII", 0)), "VII": (("VI", 0), ("i", 1)),
+        "I": (("VII", -1), ("ii°", 0)), "i7": (("VII", -1), ("ii°", 0)),
+    },
+    "major": {
+        "I": (("vii", -1), ("ii", 0)), "vii": (("vi", 0), ("I", 1)),
+        "ii": (("I", 0), ("iii", 0)), "iii": (("ii", 0), ("IV", 0)),
+        "IV": (("iii", 0), ("V", 0)), "V": (("IV", 0), ("vi", 0)),
+        "vi": (("V", 0), ("vii", 0)), "VI": (("V", 0), ("VII", 0)),
+        "III": (("ii", 0), ("IV", 0)), "iv": (("iii", 0), ("V", 0)),
+        "Imaj7": (("vii", -1), ("ii", 0)), "IVmaj7": (("iii", 0), ("V", 0)),
+    },
+}
+
+# 进行档位（按"安静 -> 推进"排）；climax 复用 drive（v0.5 语义：高潮靠鼓与层数）
+_PROG_TIERS = ("calm", "body", "drive")
+
+
+def _styled_mode(pack: dict) -> str:
+    """风格包是小调还是大调：看 progressions 的主和弦写法（i/i7 = 小调，I/Imaj7 = 大调）。
+
+    调式只决定"替换对 / 级数邻接表"用哪一套；真正的调性仍由 key 决定，两者不改动。
+    """
+    degs = {str(d) for seq in pack["progressions"].values() for d in seq}
+    return "minor" if (degs & {"i", "i7"}) else "major"
+
+
+def _styled_has_fp(fingerprint) -> str:
+    """指纹归一化：None / "" -> ""（= 关掉全部结构变奏，与 v0.5 逐字节一致）。"""
+    if fingerprint is None:
+        return ""
+    s = str(fingerprint)
+    return s if s != "" else ""
+
+
+def _styled_progression(pack: dict, tier: str, mood: str, fingerprint=None) -> tuple:
+    """取该 tier 的级数进行；climax 复用 drive（高潮靠鼓与层数，不靠换和弦）。
+
+    v0.7：给了指纹时，按指纹从该风格的 progressions 里另选一档（契约 §3.3）——
+    同一风格的两部片可以拿到不同的和弦功能顺序，但调式 / 音色 / 鼓型 / 段落结构不变。
+    偏移量对整部片只有一个（哈希里不带段落号），片内各段的进行关系因此仍然连贯；
+    无指纹 -> 与 v0.5 完全同一结果（只按能量档取）。
+    """
     progs = pack["progressions"]
     key = tier if tier in progs else ("drive" if tier == "climax" else "body")
+    fp = _styled_has_fp(fingerprint)
+    tiers = [t for t in _PROG_TIERS if t in progs]
+    if fp and tiers and tier != "climax":      # climax 仍复用 drive（v0.5 语义：高潮靠鼓与层数）
+        base = tiers.index(key) if key in tiers else min(1, len(tiers) - 1)
+        off = _hash_int(_VARIATION_SALT, "tier", fp) % len(tiers)
+        key = tiers[(base + off) % len(tiers)]
     return tuple(progs[key])
 
 
-def _styled_chords(sec: dict, si: int, secs: list, prog: tuple, pack: dict, mood: str) -> list:
-    """一小节一个和弦：级数循环 + 乐句末收属和弦 + mood 色彩 + 片尾落 I。"""
+def _styled_chord_rules(deg: str, j: int, nb: int, ph: int, tier: str,
+                        mood: str, is_last_sec: bool) -> str:
+    """单小节的硬规则（与 v0.5 逐字同序）：乐句末属和弦 -> mood 色彩 -> 片尾主和弦。
+
+    单独拆出来是为了让"变奏前 / 变奏后"各跑一遍：替换是否真的落地、有没有被
+    硬规则吃掉（乐句末收 V、片尾落 I）都能算清楚，report 里的计数才是真数。
+    """
+    # 每两乐句收一次属和弦（制造张力，与 legacy 的写法同源）
+    if j % ph == ph - 1 and (j // ph) % 2 == 1:
+        deg = "V"
+    # mood 色彩：hopeful 加 maj7 / sus2；tense 用 sus4 悬留
+    if mood == "hopeful":
+        if deg == "I":
+            deg = "Imaj7"
+        elif deg == "IV":
+            deg = "IVmaj7"
+        elif deg == "i":
+            deg = "i7"
+        elif j == 0 and tier == "calm":
+            deg = "sus2"
+    elif mood == "tense" and j % ph == ph - 2 and deg in ("i", "I"):
+        deg = "sus4"
+    # 片尾落主和弦（与 legacy 同口径：I = 皮卡迪三度 / 大调主）
+    if is_last_sec and nb >= 2 and j >= nb - 2:
+        deg = "I"
+    return deg
+
+
+def _styled_chords(sec: dict, si: int, secs: list, prog: tuple, pack: dict, mood: str,
+                   fingerprint=None, mode: str = "minor") -> tuple:
+    """一小节一个和弦：级数循环 + 乐句末收属和弦 + mood 色彩 + 片尾落 I。
+
+    v0.7：给了指纹时，**每两小节做一次稳定替换**（契约 §3.3）：按指纹决定替换
+    块内第 1 小节还是第 2 小节，被选中的小节在 _CHORD_SWAPS 里换成同根音的七和弦
+    色彩（该小节级数不在替代集里就跳过）。替换先于硬规则执行，所以乐句末属和弦与
+    片尾主和弦永远不被改坏（契约的"只在不冲突时替换"）。
+    返回 (和弦级数列表, 实际替换次数)；无指纹时替换次数恒 0、列表与 v0.5 逐项一致。
+    """
     nb = len(sec["bars"])
     ph = int(pack["phrase_bars"])
     tier = sec["tier"]
     is_last_sec = (si == len(secs) - 1)
+    fp = _styled_has_fp(fingerprint)
+    smap = _CHORD_SWAPS.get(mode, {})
     out = []
+    swaps = 0
     for j in range(nb):
-        deg = prog[j % len(prog)]
-        # 每两乐句收一次属和弦（制造张力，与 legacy 的写法同源）
-        if j % ph == ph - 1 and (j // ph) % 2 == 1:
-            deg = "V"
-        # mood 色彩：hopeful 加 maj7 / sus2；tense 用 sus4 悬留
-        if mood == "hopeful":
-            if deg == "I":
-                deg = "Imaj7"
-            elif deg == "IV":
-                deg = "IVmaj7"
-            elif deg == "i":
-                deg = "i7"
-            elif j == 0 and tier == "calm":
-                deg = "sus2"
-        elif mood == "tense" and j % ph == ph - 2 and deg in ("i", "I"):
-            deg = "sus4"
-        # 片尾落主和弦（与 legacy 同口径：I = 皮卡迪三度 / 大调主）
-        if is_last_sec and nb >= 2 and j >= nb - 2:
-            deg = "I"
+        base = prog[j % len(prog)]
+        deg = _styled_chord_rules(base, j, nb, ph, tier, mood, is_last_sec)
+        if fp and smap:
+            # 每两小节一次稳定替换：按指纹决定替换块内第 1 还是第 2 小节
+            # （该小节级数不在替代集里就跳过，不硬造不存在的替代级数）
+            pick = _hash_int(_VARIATION_SALT, "chord", fp, si, j // 2) % 2
+            if pick == (j % 2) and base in smap:
+                alt = _styled_chord_rules(smap[base], j, nb, ph, tier, mood, is_last_sec)
+                if alt != deg:                  # 被硬规则吃掉的替换不算一次替换
+                    deg = alt
+                    swaps += 1
         out.append(deg)
-    return out
+    return out, swaps
+
+
+def _styled_kick_ghost(cfg: dict, fp: str, si: int, j: int,
+                       fill_bar: bool, breath: bool):
+    """按指纹给这一小节加一个 kick ghost 落点；返回落点（拍）或 None。
+
+    ghost 只落在 0.5 拍网格上、不与 cfg["kick"] 现有落点重合；fill / breath 小节
+    只允许落在 [0, 3) 拍内（那几个位置要留给鼓加花与呼吸，契约 §3.3）。
+    每小节最多一记，1/3 的小节不加 —— 否则"每小节都多一记"会变成另一种机械。
+    """
+    used = [float(x) for x in cfg.get("kick", ())]
+    cand = []
+    for k in range(int(round(BEATS_PER_BAR / 0.5))):
+        pos = 0.5 * k
+        if any(abs(pos - u) < 1e-9 for u in used):
+            continue
+        if (fill_bar or breath) and pos >= 3.0 - 1e-9:
+            continue
+        cand.append(pos)
+    if not cand:
+        return None
+    h = _hash_int(_VARIATION_SALT, "ghost", fp, si, j)
+    if h % 3 == 0:
+        return None
+    return cand[(h >> 3) % len(cand)]
+
+
+def _styled_clap_shift(fp: str, si: int, j: int, idx: int) -> float:
+    """拍手位置的指纹位移：±0.5 拍（契约 §3.3）；1/3 不动，保留原律动的稳定感。"""
+    h = _hash_int(_VARIATION_SALT, "clap", fp, si, j, idx)
+    m = h % 3
+    return 0.0 if m == 2 else (0.5 if m == 0 else -0.5)
 
 
 def _styled_target_db(energy: float, span: float) -> float:
@@ -2140,15 +2289,55 @@ def _lead_texture(bank: "_Bank", voice: str, note: str, dur: float, bright: floa
     return bank.bell(note, max(2.4, dur))
 
 
-def _emit_styled_motif(bus: "_Bus", bank: "_Bank", motif, kval: dict, voice: str,
-                       t0: float, beat: float, db: float, bright: float) -> None:
-    """把风格动机铺到主奏总线：级数 -> 音名，乐器由 lead_cycle 指定。"""
+def _styled_motif_shift(motif, kind: str, fingerprint, style: str, mode: str) -> tuple:
+    """按指纹给动机的每个事件派生 ±1 级数偏移；返回 (事件列表, 偏移次数)。
+
+    只改级数不改节奏：拍位与时值原样保留。偏移方向按 "指纹 + 风格 + 动机类型 + 事件序号"
+    哈希派生，所以问句(q) / 答句(a) / 片尾(end) **各自独立**（契约 §3.3 的"独立派生"）：
+    同一部片里同种动机稳定，两部片不会同步变形（q 上移的片子 a 未必也上移）。
+    返回的事件是 (拍, 级数, 时值, 八度偏移)：跨主音上行 / 下行时用八度偏移修正，
+    否则"小调 i 下行一级"会变成高 10 个半音的 VII，旋律轮廓会翻掉。
+    """
+    fp = _styled_has_fp(fingerprint)
+    table = _MOTIF_NEIGHBORS.get(mode, {})
+    if not fp or not table:
+        return [(float(ev[0]), str(ev[1]), float(ev[2]), 0) for ev in motif], 0
+    # 整句的偏移方向只由 "指纹 + 风格 + 动机类型" 决定（同种动机稳定），
+    # 每个事件在±1 里取哪边由事件序号决定 —— q 与 a 的方向各自独立派生。
+    up = _hash_int(_VARIATION_SALT, "motif-dir", fp, style, kind) % 2 == 1
+    out = []
+    shifted = 0
     for idx, ev in enumerate(motif):
-        pos_beats, degree, dur_beats = float(ev[0]), str(ev[1]), float(ev[2])
-        note = _degree_note(kval, degree, 4)
+        pos, deg, dur = float(ev[0]), str(ev[1]), float(ev[2])
+        pair = table.get(deg)
+        h = _hash_int(_VARIATION_SALT, "motif", fp, style, kind, idx)
+        if pair is None:                    # 邻接表没收录的级数不动，绝不瞎编级数
+            out.append((pos, deg, dur, 0))
+            continue
+        name, oct_delta = pair[1] if (up != bool(h % 2)) else pair[0]
+        out.append((pos, name, dur, int(oct_delta)))
+        shifted += 1
+    return out, shifted
+
+
+def _emit_styled_motif(bus: "_Bus", bank: "_Bank", motif, kval: dict, voice: str,
+                       t0: float, beat: float, db: float, bright: float,
+                       fingerprint=None, style: str = "", kind: str = "",
+                       mode: str = "minor") -> int:
+    """把风格动机铺到主奏总线：级数 -> 音名，乐器由 lead_cycle 指定。
+
+    v0.7：先按指纹做级数 ±1 偏移（_styled_motif_shift）再铺；返回被偏移的事件数，
+    供 report["variation"]["motif_shifts"] 审计。无指纹时偏移数恒 0、逐音与 v0.5 相同。
+    """
+    events, shifted = _styled_motif_shift(motif, kind, fingerprint, style, mode)
+    for idx, ev in enumerate(events):
+        pos_beats = float(ev[0])
+        degree, dur_beats, oct_delta = str(ev[1]), float(ev[2]), int(ev[3])
+        note = _degree_note(kval, degree, 4 + oct_delta)
         tex = _lead_texture(bank, voice, note, dur_beats * beat, bright)
         pan = 0.18 if idx % 2 == 0 else -0.18
         bus.add(tex, t0 + pos_beats * beat, db, pan)
+    return shifted
 
 
 def _styled_gate_env(n: int, secs: list, present: list, bar: float, sr: int = SR) -> np.ndarray:
@@ -2264,7 +2453,10 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
       * 复用老 _Bank 的鼓组与 _Bus 总线，只新增音色方法，不重写任何老乐器；
       * 老路径（render(style=None) / "legacy"）完全不受影响，逐样本与 v0.4 相同。
 
-    anchors / sections 语义与 render() 一致；mood 见 MOOD_IDS；fingerprint 只影响 seed 派生。
+    anchors / sections 语义与 render() 一致；mood 见 MOOD_IDS。
+    fingerprint（v0.7）：参与 seed 派生 + 结构层变奏（契约 §3.3）——和弦每两小节一次
+        七和弦色彩替换、按指纹选进行档、动机级数 ±1 稳定偏移、鼓型 ghost 落点 / clap 位移。
+        None / "" 时三处变奏全部关闭，逐样本与 v0.5 相同；报告里的 variation 是这三项的计数。
 
     music_plan：stylekit.resolve_script_style(script) 的 "music" 子字典（整份 plan 也接受）。
         非 None 时 bpm / key / mood / seed 以它为准（优先级高于显式参数）——render.py 只需
@@ -2284,6 +2476,9 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
              f"bpm 必须是有限正数，收到 {bpm!r}")
     _require(key in KEYS_ALL, f"未知调性 {key!r}；可选：{'/'.join(KEYS_ALL)}")
     pack = MUSIC_STYLES[style]
+    # v0.7：调式决定和弦替换对 / 级数邻接表用哪一套；fp_s 为空 = 全部结构变奏关闭
+    mode = _styled_mode(pack)
+    fp_s = _styled_has_fp(fingerprint)
     dur = float(duration)
     sr = SR
     sc = Score(duration, bpm=float(bpm), key=key, seed=int(seed))
@@ -2309,13 +2504,20 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
     space = pack["space"]
 
     # ---- 1) 段落规划：tier / 层 / 和弦 / 电平目标 ----
+    # v0.7：指纹变奏计数（chord_swaps / motif_shifts / drum_ghosts）进 report["variation"]。
+    # 无指纹时三处变奏全关、计数恒 0，和弦仍走 v0.5 那条"只按能量档取进行"的分支。
+    chord_swaps = 0
+    motif_shifts = 0
+    drum_ghosts = 0
     for si, sec in enumerate(secs):
         e = sec["energy"]
         tier = _styled_tier(e)
         sec["tier"] = tier
         sec["layers"] = _styled_layers(pack, e, mood)
-        sec["chords"] = _styled_chords(sec, si, secs, _styled_progression(pack, tier, mood),
-                                       pack, mood)
+        prog = _styled_progression(pack, tier, mood, fingerprint)
+        sec["chords"], n_swap = _styled_chords(sec, si, secs, prog, pack, mood,
+                                               fingerprint, mode)
+        chord_swaps += n_swap
         sec["target_db"] = round(_styled_target_db(e, span), 2)
         sec["target_lufs"] = round(BASE_LUFS + sec["target_db"], 1)
         sec["breath"] = {"calm": 2, "body": 1, "drive": 0, "climax": 0}[tier]
@@ -2353,6 +2555,14 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
                     var = bank.kicks[(bi * 4 + int(round(kb))) % len(bank.kicks)]
                     drums.add(var, t0 + kb * beat, kick_db + accent)
                     hits.append((t0 + kb * beat, 0.28 + 0.22 * e))
+                # v0.7：指纹再塞一记 ghost kick（0.5 拍网格、不与现有落点重复；见 _styled_kick_ghost）
+                if fp_s:
+                    ghost_pos = _styled_kick_ghost(cfg, fp_s, si, j, fill_bar, breath)
+                    if ghost_pos is not None:
+                        gidx = (bi * 4 + int(round(ghost_pos * 2)) + 2) % len(bank.kicks)
+                        drums.add(bank.kicks[gidx], t0 + ghost_pos * beat, kick_db - 5.5)
+                        hits.append((t0 + ghost_pos * beat, 0.12 + 0.12 * e))
+                        drum_ghosts += 1
             if has_hat and cfg.get("hat"):
                 step = float(cfg["hat"])
                 total = int(round(BEATS_PER_BAR / step))
@@ -2369,11 +2579,17 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
                     var = bank.hats[(bi * 7 + k) % len(bank.hats)]
                     drums.add(var, t0 + pos * beat, hat_db + ghost, pan)
             if has_hat and e >= 0.50 and cfg.get("clap"):
-                for cb in cfg.get("clap", ()):
+                for cidx, cb in enumerate(cfg.get("clap", ())):
                     if phrase_end and cb >= 3.0:
                         continue
-                    drums.add(bank.claps[(bi * 2 + int(round(cb))) % len(bank.claps)],
-                              t0 + cb * beat, -16.0 + 4.0 * e - 1.5 * float(m["drum"]), 0.08)
+                    pos = float(cb)
+                    if fp_s:
+                        shift = _styled_clap_shift(fp_s, si, j, cidx)
+                        if shift and 0.0 <= pos + shift < float(BEATS_PER_BAR):
+                            pos += shift
+                            drum_ghosts += 1
+                    drums.add(bank.claps[(bi * 2 + int(round(pos))) % len(bank.claps)],
+                              t0 + pos * beat, -16.0 + 4.0 * e - 1.5 * float(m["drum"]), 0.08)
             if tier == "climax" and has_hat:
                 for pos in (0.5, 1.5, 2.5, 3.5):
                     if phrase_end and pos >= 3.5:
@@ -2535,20 +2751,24 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
             for pi, first in enumerate(range(0, nb, ph)):
                 is_last_phrase = (si == last_si and pi == (nb - 1) // ph)
                 if is_last_phrase:
-                    motif = pack["motif"]["end"]
+                    kind, motif = "end", pack["motif"]["end"]
                 elif phrase_i % 2 == 0:
-                    motif = pack["motif"]["q"]
+                    kind, motif = "q", pack["motif"]["q"]
                 else:
-                    motif = pack["motif"]["a"]
+                    kind, motif = "a", pack["motif"]["a"]
                 voice = cycle[phrase_i % len(cycle)]
                 t0 = sec["bars"][first] * bar
-                _emit_styled_motif(lead, bank, motif, kval, voice, t0, beat, mel_db, bright)
+                motif_shifts += _emit_styled_motif(
+                    lead, bank, motif, kval, voice, t0, beat, mel_db, bright,
+                    fingerprint=fingerprint, style=style, kind=kind, mode=mode)
                 phrase_i += 1
         elif si == last_si and e >= 0.22:
             # 片尾安静段：用第一个主奏音色把结局动机答完
             t_last = sec["bars"][0] * bar + max(0.0, (nb - 2) * bar)
-            _emit_styled_motif(lead, bank, pack["motif"]["end"], kval, cycle[0],
-                               t_last, beat, -19.0 + float(m["lead_db"]), bright)
+            motif_shifts += _emit_styled_motif(
+                lead, bank, pack["motif"]["end"], kval, cycle[0],
+                t_last, beat, -19.0 + float(m["lead_db"]), bright,
+                fingerprint=fingerprint, style=style, kind="end", mode=mode)
     lead.buf *= _styled_gate_env(n, secs, lead_pres, bar, sr)[:, None]
     master += lead.buf
     sc._add_delayed(master, lead.buf, float(space["delay_beats"]) * beat * 0.85,
@@ -2630,6 +2850,10 @@ def render_styled(duration, *, style, bpm=None, key=None, mood=None, anchors=Non
         "seed": int(sc.seed),
         "seed_effective": int(seed_eff),
         "fingerprint": "" if fingerprint is None else str(fingerprint),
+        # v0.7：指纹变奏的实际发生数（审计用；无指纹时三项目全 0）
+        "variation": {"chord_swaps": int(chord_swaps),
+                      "motif_shifts": int(motif_shifts),
+                      "drum_ghosts": int(drum_ghosts)},
         "bar_s": round(bar, 4),
         "beat_s": round(beat, 4),
         "phrase_bars": ph,
@@ -3406,6 +3630,11 @@ def _format_report(rep: dict, wav_path: Path | None, report_path: Path | None) -
                      f" / 情绪 {rep.get('mood', 'steady')} / 有效 seed {rep.get('seed_effective', rep['seed'])}"
                      f" / 频谱质心 {rep.get('spectral_centroid_hz', 0):.0f} Hz")
     lines.append(f"  段落 {len(rep['sections'])} 个，交界 {len(rep['transitions'])} 处，吸气 {len(rep['sucks'])} 处")
+    var = rep.get("variation") or {}
+    if any(int(var.get(k, 0) or 0) for k in ("chord_swaps", "motif_shifts", "drum_ghosts")):
+        lines.append("  指纹变奏：和弦替换 %d 处 / 动机偏移 %d 音 / 鼓型 ghost %d 处"
+                     % (int(var.get("chord_swaps", 0)), int(var.get("motif_shifts", 0)),
+                        int(var.get("drum_ghosts", 0))))
     for s in rep["sections"]:
         lines.append(f"    {s['name']:<8} {s['start']:7.2f} – {s['end']:7.2f} s"
                      f"  energy {s['energy']:.2f}  目标 {s['target_lufs']:.1f} LUFS"
@@ -3434,7 +3663,8 @@ def main(argv=None) -> int:
     ap.add_argument("--style", default=None,
                     help="配乐风格：" + "/".join(MUSIC_STYLE_IDS) + "（缺省 = legacy，与 v0.4 逐样本一致）")
     ap.add_argument("--mood", default="steady", help="情绪修饰：" + "/".join(MOOD_IDS))
-    ap.add_argument("--fingerprint", default=None, help="内容指纹（只影响 v0.5 风格路径的 seed 派生）")
+    ap.add_argument("--fingerprint", default=None,
+                    help="内容指纹（v0.7：参与和声/动机/鼓型变奏；只影响 style 路径，legacy 忽略）")
     ap.add_argument("--bpm", type=float, default=None,
                     help="BPM（缺省：legacy 120；风格路径取该风格 bpm_hint 的中位）")
     ap.add_argument("--key", default=None,

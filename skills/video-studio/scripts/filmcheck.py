@@ -286,6 +286,11 @@ SCRIPT_SPEC = {
             "seed": {"t": "int", "min": 0},
             "seed_from_content": {"t": "bool"},
             "gain_db": {"t": "num"}, "duck_db": {"t": "num"},
+            # v0.7.1 旁白优先：mix_film 读这四个（背景在人声处额外让位多少 / 阈值）
+            "voice_duck_db": {"t": "num"}, "voice_duck_sfx_db": {"t": "num"},
+            "voice_thresh_db": {"t": "num"}, "voice_floor_db": {"t": "num"},
+            # v0.7.1 SNR 兜底：混音后实测人声/背景差，不足就整体压背景
+            "guard_snr_db": {"t": "num"}, "guard_cap_db": {"t": "num"},
             "seg": {"t": "num", "min": 0.0}, "amp": {"t": "num", "min": 0.0},
             "gain": {"t": "num", "min": 0.0}, "xfade": {"t": "num", "min": 0.0},
             "chords": {"t": "list", "item": {"t": "list", "item": {"t": "num"}}},
@@ -294,6 +299,10 @@ SCRIPT_SPEC = {
             "enabled": {"t": "bool"},
             "gain_db": {"t": "num"},
             "mix_gain_db": {"t": "num"},
+            # v0.7 音频差异化：content_seed 由 CueBus 读（位置派生 vs 内容派生）；
+            # duck_transitions 由 render.st_sfx 读（段落边界前的转场音效自动让位）。
+            "content_seed": {"t": "bool"},
+            "duck_transitions": {"t": "bool"},
             "cues": {"t": "list", "item": CUE_SPEC}}},
         "web": {"t": "dict", "props": {
             "entry": {"t": "str"},

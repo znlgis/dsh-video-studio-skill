@@ -29,6 +29,7 @@ v0.5.0 画风主题化
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import sys
@@ -1055,7 +1056,57 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
     return fn(scene, t_local, dur, t_global, script, frame, plan, th)
 
 
-# ---------------- 提示点（v0.3.0，可选） ----------------
+# ---------------- 提示点（v0.3.0 起可选；v0.7 按 kind 与内容生成） ----------------
+def _sha1_int(*parts):
+    """把若干文本片段拼起来取 sha1 前 8 位（提示点"内容派生"的稳定来源）。"""
+    raw = "|".join(str(p) for p in parts).encode("utf-8")
+    return int(hashlib.sha1(raw).hexdigest()[:8], 16)
+
+
+def _item_pitch(text, base=1760.0):
+    """条目文本 -> ui_blip 音高（sha1 派生，不用序号）。
+
+    v0.7 契约 §3.4：body 条目的 pitch 必须由**条目文本**派生，不再按序号
+    （旧实现 1760+110*i 每片都一样）——同一句文案换到别的片子里仍是同一个音高，
+    不同文案落到 -5~+7 半音的不同音级；万一两条碰撞，_dedupe_segment 会再升半音。
+    """
+    off = _sha1_int("pitch", text) % 13 - 5
+    return round(float(base) * 2.0 ** (off / 12.0), 2)
+
+
+def _cue_gain_decay(gain, repeat):
+    """同段内同类型 cue 第 repeat 次重复（0 起）时的增益：每次再低 2 dB（-2/-4/-6/…）。
+
+    v0.7 契约 §3.4：不许再出现"每段都一模一样的三连击"——同类型重复必须**严格递减**
+    （第 2 次 -2、第 3 次 -4、第 4 次 -6……），且 pitch 必须不同。
+    """
+    return round(float(gain) - 2.0 * int(repeat), 2)
+
+
+def _dedupe_segment(seg):
+    """同一段内：同类型重复的 gain 递减、pitch 去重（保证"pitch 必须不同"）。
+
+    正文条目多时 sha1 可能把两条吸附到同一个半音；碰撞就把后一个再升半音——
+    仍然由文本派生，只是保证同段里不出现两个一模一样的高音（听着像卡带）。
+    """
+    seen = {}                                  # type -> {"n": 已出现次数, "pitch": 已用音高集}
+    for c in seg:
+        st = seen.setdefault(c["type"], {"n": 0, "pitch": set()})
+        if st["n"]:
+            c["gain"] = _cue_gain_decay(c.get("gain", 0.0), st["n"])
+        st["n"] += 1
+        p = c.get("pitch")
+        if p is not None:
+            p = float(p)
+            guard = 0
+            while round(p, 2) in st["pitch"] and guard < 12:
+                p *= 2.0 ** (1.0 / 12.0)
+                guard += 1
+            c["pitch"] = round(p, 2)
+            st["pitch"].add(round(p, 2))
+    return seg
+
+
 def cues(tl, script):
     """画面提示点钩子：render.py --stage cues 会调它（没有这个函数就不调）。
 
@@ -1065,7 +1116,16 @@ def cues(tl, script):
     v0.5：条目落位步长与场景绘制共用 plan["pacing"]["item_stagger"]，
     两边读同一个数，否则音效会错位（这是 v0.4 写死 0.32 留下的坑）。
 
-    返回 [{"at": 时刻, "type": 配方名, ...参数}]；
+    v0.7（references/audio-variation.md §3.4）：提示点改为按**场景 kind 与内容**生成，
+    不再是"每段 ui_blip 三连 + 结尾 answer_chime"的同质化固定套路（跨片音效雷同的
+    来源之一）：
+      hook  : 段首 impact（size 按字数 0.9~1.3）+ 落定 riser
+      body  : 条目落位 ui_blip（pitch 由条目文本 sha1 派生）+ items>=3 补 answer_chime
+              + 段尾 whoosh（转场到下一段）
+      quote : reverse_swell + 落定轻 impact
+      outro : answer_chime + 片尾 sub_drop
+    同段内同类型 cue 重复时 gain 逐次再降 2 dB（-2/-4/-6）、pitch 必须不同。
+    返回 schema 不变：[{"at": 时刻, "type": 配方名, ...参数}]；
       at 可以写 "abs:12.5" / 12.5 / "l03+0.35"（相对该段 start）/"l03"
       type 见 references/sfx-design.md 的配方表，或 sfxkit.list_recipes()
     """
@@ -1073,13 +1133,58 @@ def cues(tl, script):
     stagger = 0.32
     if not plan.get("legacy"):
         stagger = float((plan.get("pacing") or {}).get("item_stagger") or 0.32)
+    scenes = list(tl.get("scenes") or [])
     out = []
-    for s in tl["scenes"]:
-        if s.get("kind") == "body":
-            # 条目逐条落位：第一项在 0.48s 出现，之后每 stagger 秒一个（和 _draw_items 同一节拍）
-            for i, _it in enumerate(s.get("items") or []):
-                out.append({"at": "%s+%.2f" % (s["id"], 0.48 + stagger * i),
-                            "type": "ui_blip", "pitch": 1760.0 + 110.0 * i, "gain": -6})
-        if s.get("kind") == "outro":
-            out.append({"at": "%s+0.35" % s["id"], "type": "answer_chime", "gain": -4})
+    for i, s in enumerate(scenes):
+        sid = str(s.get("id") or ("l%02d" % (i + 1)))
+        kind = str(s.get("kind") or "body")
+        end = float(s.get("end") or 0.0)
+        dur = float(s.get("dur") or max(0.0, end - float(s.get("start") or 0.0)))
+        has_next = (i + 1) < len(scenes)
+        seg = []
+
+        def _at(off):
+            """本段相对时刻 -> cue 的 at 写法（id+偏移，保持返回 schema 不变）。"""
+            return "%s+%.2f" % (sid, max(0.0, float(off)))
+
+        if kind == "hook":
+            # 开场重击按文案字数给"体量"：字数越多 size 越大（0.9~1.3），避免每片同一记闷响
+            text = str(s.get("text") or s.get("big") or "")
+            n_char = len("".join(text.split()))
+            size = round(0.9 + 0.4 * min(1.0, n_char / 40.0), 2)
+            seg.append({"at": _at(0.10), "type": "impact", "size": size, "gain": -2})
+            seg.append({"at": _at(min(1.2, max(0.35, dur * 0.28))),
+                        "type": "riser", "dur": 1.2, "gain": -6})
+        elif kind == "quote":
+            # 引语段：先来一层反向渐强铺底，落定时轻一点的一击
+            seg.append({"at": _at(0.05), "type": "reverse_swell", "dur": 1.2, "gain": -5})
+            seg.append({"at": _at(min(1.4, max(0.5, dur * 0.30))),
+                        "type": "impact", "size": 0.6, "gain": -8})
+        elif kind == "outro":
+            # 收尾：答对钟声 + 片尾 sub_drop（尾巴正好落在段尾，不留半截低频）
+            seg.append({"at": _at(0.35), "type": "answer_chime", "gain": -4})
+            seg.append({"at": _at(max(0.30, dur - 1.60)),
+                        "type": "sub_drop", "dur": 1.6, "gain": -5})
+        else:
+            # body（以及 emphasis/calm 等未单独设计的 kind：按正文处理，向后兼容）
+            items = list(s.get("items") or [])
+            for j, it in enumerate(items):
+                # 条目逐条落位：第一项在 0.48s 出现，之后每 stagger 秒一个（与 _draw_items 同一拍）
+                at = 0.48 + stagger * j
+                if at > dur - 0.12:            # 极短段：放不下的条目不再排提示点（避免响到下一段）
+                    break
+                txt = it.get("text") if isinstance(it, dict) else it
+                seg.append({"at": _at(at), "type": "ui_blip",
+                            "pitch": _item_pitch(txt), "gain": -6})
+            blips = [c for c in seg if c["type"] == "ui_blip"]
+            if len(items) >= 3 and blips and dur > 0.6:
+                # 最后一个条目落定后的下一拍补一声"猜中了"，给列表收尾
+                last_at = float(blips[-1]["at"].split("+", 1)[1])
+                t_chime = min(last_at + stagger, max(last_at + 0.20, dur - 0.30))
+                seg.append({"at": _at(t_chime), "type": "answer_chime", "gain": -6})
+            if has_next and dur > 0.6:
+                # 段尾 whoosh：从本段扫进下一段（C 路会在段界附近给转场类音效让位）
+                seg.append({"at": _at(max(0.0, dur - 0.45)),
+                            "type": "whoosh", "dur": 0.9, "gain": -6})
+        out.extend(_dedupe_segment(seg))
     return out

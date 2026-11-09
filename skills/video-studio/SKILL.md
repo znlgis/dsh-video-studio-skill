@@ -39,7 +39,7 @@ cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,s
 cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：32 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：38 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
@@ -206,9 +206,15 @@ python webengine.py textqa ./web/index.html            # 文字重叠/出画/一
 | 配乐 | `scorekit.py`（程序化） | `work/music.wav` | 和弦表 + 律动层 + 分段能量；段落边界对齐小节线 |
 | 音效 | `sfxkit.py`（物理建模） | `work/sfx.wav` | 按 `cues.json` 里登记的提示点逐条合成 |
 
-三条总线在 `--stage audio` 里合成：**音效响起时配乐自动让位**（`duck_db`，默认 3 dB），
+三条总线在 `--stage audio` 里合成：**音效响起时配乐自动让位**（`duck_db`，v0.7 默认 4 dB，
+cinema/epic 5.5 dB；旧版 3 dB 在段落过门时配乐几乎与音效等高），
 最后交给 ffmpeg 两遍 loudnorm 到 -16 LUFS / 真峰 ≤ -1 dBTP。**不要**自己在 numpy 里做最终响度标准化——
 你有 `loudnorm`，它比手写归一化准得多，而且真峰才是门禁。
+
+> **v0.7 片内分离**：配乐在段落交界本来就有过门（scorekit 的 swell/riser/sub_boom），
+> sfx 轨不再在同一个边界重复放 whoosh/riser——`--stage sfx` 会对落在
+> [边界 - 2.2 s, 边界] 内的转场类 cue 自动 -3 dB（`sfx.duck_transitions=false` 可关）。
+> 提示音的音高现在跟随配乐调性（`in_key(freq, key)`），不再硬编码 D 小调五声。
 
 ### 5.2 提示点：让声音跟着画面走
 
@@ -344,20 +350,59 @@ python render.py ... --stage style # 用某份 film.json 解析风格并打印"�
 ### 5.6 混音链（照着做，别自创）
 
 ```
-旁白(单声道, 居中) ─┐
-配乐(立体声) ───────┼─> duck(音效包络, -3dB) ─> 求和 ─> 峰值保护(0.89) ─> ffmpeg loudnorm 两遍 ─> -16 LUFS / TP<=-1
-音效(立体声) ───────┘
+旁白(单声道, 居中) ─────────────────────────────┐
+配乐(立体声, -12dB 基线) ─> 音效duck(-4dB) ─> 旁白duck(-6dB) ─┤─> 求和 ─> 峰值保护(0.89) ─> loudnorm 两遍 ─> -16 LUFS / TP<=-1
+音效(立体声) ───────────────────> 旁白duck(-3dB) ─────────────┘
 ```
 
-- **旁白优先**（听清台词是第一优先）：`mix_film` 里旁白固定 `voice_gain=1.0` 居中，配乐默认
-  `music.gain_db=-1.5`、音效按 `CUE_BASE_DB` 逐条定电平。**"高 12 dB"是人耳经验值，代码不测量也不保证**——
-  交付前用 `filmkit.loudness` 或回听确认旁白压得住，别把它当门禁。
-- 音效响时配乐自动让位 3 dB（`mix_film(duck_db=3.0)`；注意 `duck()` 函数自身默认是 4.0，
-  `mix_film` 传的是 3.0——看源码时别被两个默认值绕住）。让得太多会"音乐一抖一抖"。
+- **旁白优先是硬行为（v0.7.1）**，不是文档口号：`mix_film` 里旁白固定 `voice_gain=1.0` 居中、不被任何侧链影响；
+  配乐基线 `music.gain_db=-12`（旧版 -1.5，导致背景与台词几乎等高）；有人声的地方再按旁白包络压
+  配乐 6 dB、音效 3 dB（`music.voice_duck_db` / `music.voice_duck_sfx_db`，间隙自动恢复）。
+  实测人声段"旁白/背景"响度差 **12.9 dB**（真实配乐素材下；合成信号口径 15 dB），
+  selfcheck 第 35/36 条与 `audio_similarity.py --strict` 的 D 组守着这条。
+- **SNR 兜底（v0.7.1 最后一道闸）**：混音后按台词活跃区实测"人声/背景"，不足 12 dB 就整体再压背景
+  （`music.guard_snr_db`，最多 `guard_cap_db=30`；补压 >18 dB 会提示检查素材电平）。
+  这是唯一一条"混音后自己改电平"的门禁，保证换任何配乐素材都不会把旁白盖住。
+- **BGM 与音效是可选层**：它们的作用是铺情绪与打重音，不该抢字。想更安静就调低 `music.gain_db`
+  或设 `music.enabled=false`；"让观众听清旁白"永远优先于"背景好听"。
+- 音效响时配乐自动让位：v0.7 起风格表默认 4.0 dB（mono 3.0 / lo-fi·magazine 3.5 /
+  cinema·epic 5.5），`film.json` 的 `music.duck_db` 显式值永远优先。旧版 `mix_film` 默认 3.0 dB，
+  在段落过门时配乐几乎与音效等高——这是"配乐和音效听着像同一套"的混音侧成因，已由 `duck_default` 抬高。
+  让得太多会"音乐一抖一抖"，所以按风格分级而不是一律压狠。
 - **本项目不做母带压缩**：链路是 求和 → duck → 峰值保护 0.89 → `ffmpeg loudnorm` 两遍。
   代码里**没有压缩器**（想加请自行在 `mix_film` 之后接），所以也不存在"压太狠"的问题；
   要让重击前后有能量差，靠的是配乐分段 energy 与 `suck()`，不是压缩。
 - 成片音轨必须 48 kHz（`mux` 已显式 `-ar 48000`，selfcheck 第 12 条守着）。
+
+### 5.7 声音的片间差异与片内分离（v0.7 新增）
+
+> v0.5 解决的是"配乐风格都差不多"，但**同一风格下每部片的配乐仍像同一首**——
+> 内容指纹只进了 seed（改音色细节），和弦进行/动机/鼓型全固定。
+> 实测：同风格、同 bpm、同调、只换内容指纹，两段配乐相关性 **0.966**。
+
+v0.7 把指纹推进到**结构层**（详见 **references/audio-variation.md**）：
+
+| 层 | v0.6 | v0.7 |
+|---|---|---|
+| 配乐和声 | 风格固定进行 | 指纹决定**每两小节一次的稳定和弦替换**（不影响乐句末与片尾规则） |
+| 配乐进行 | 风格固定一套进行 | 指纹在风格自带的 calm/body/drive 三档里选一档（同风格素材，只换功能顺序） |
+| 配乐动机 | 风格固定动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
+| 配乐鼓型 | 固定落点 | 指纹加 ghost kick（不与现有落点重复），clap 位置 ±0.5 拍 |
+| 出片接线 | 指纹只进 seed | `render.py` 的 `st_score` 把 `fingerprint.full` 传进 `scorekit.render()`；legacy 不传 |
+| 音效 seed | `seed_base + i`（只跟 cue 顺序） | `content_seed(seed_base, style, content_fp, type, t)`（跟内容走） |
+| 提示音音高 | 硬编码 D 小调五声 | `in_key(freq, key)` 跟随配乐调性 |
+| 段落边界 | 配乐过门 + sfx 转场各响各的 | 边界前 2.2 s 内的 whoosh/riser **自动 -3 dB**（不与过门撞车） |
+| duck | 3 dB 一刀切 | 按风格 3.0–5.5 dB，配乐让得更彻底 |
+| 旁白优先（v0.7.1） | 配乐 -1.5 dB、无语音侧链 | 配乐 -12 dB 基线 + 人声处再压 6 dB（音效 3 dB），人声段 SNR 实测 15 dB |
+
+**向后兼容**：不写 `style` 字段（legacy）或 `sfx.content_seed: false` 时，音效走旧的
+`seed_base + i` 路径，老片逐样本不变（selfcheck 第 33 条守着这条）。
+
+验收工具（改音频相关代码后必须跑）：
+
+```bash
+python tools/audio_similarity.py --strict    # A/B/C 三组阈值，失败 exit 1
+```
 
 ## 6. 停留窗口：让观众看清楚，而不是整片放慢（v0.3.0）
 
@@ -383,7 +428,7 @@ python render.py ... --stage style # 用某份 film.json 解析风格并打印"�
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（32 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（38 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -605,7 +650,7 @@ v0.4 给了两条真正能用的路：
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**32 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
+| `scripts/selfcheck.py` | 回归自检：**38 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
 | `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
@@ -652,7 +697,8 @@ v0.4 给了两条真正能用的路：
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 32 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 自检：selfcheck PASS 38 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 音频：work/score.json 的 variation 非 0（指纹参与了结构变奏）、audio_similarity --strict 全 PASS
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```
@@ -694,7 +740,7 @@ v0.4 给了两条真正能用的路：
 | `scorekit` | 389 s 全片 **4–8 s**（v0.3 首测 6.7–8.2 s，v0.4 复测 3.9–5.8 s，随负载）；60 s 实测 2–4 s；输出 -18.5 LUFS / -1.44 dBTP（母带交给 loudnorm）。**selftest 会打印当下实测**，以那个为准 |
 | `webengine` | **80–130 ms/帧**（1080p30，Edge 无头，PNG 截图）；12 s / 360 帧 **28–30 s**（2 workers，含启动）；**同一页面会话内**同帧两次截图 byte 完全一致（跨会话默认 GPU 光栅有 ≤4 像素、±1 级抗锯齿差异，要跨会话字节级一致请开 `--deterministic`，代价约 +22%/帧） |
 | `qa_frames` | 30 s 片全量深检 **约 1 s**（160×90 流式解码 903 帧）；闪烁/空窗/静止/同步 |
-| 端到端 | 30.10 s 模板片：TTS 4 句 → cues 13 条 → 配乐 3.3 s → 音效 13 条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
+| 端到端 | 30.10 s 模板片：TTS 4 句 → cues 由 scenes.py 按 kind 生成（v0.7，模板片 17 条）→ 配乐 3.3 s → 音效逐条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
 | Python 依赖 | **playwright 已装**（chromium + msedge 均可用）；scipy 1.18 已装（sfxkit 可选，缺了走 FFT 兜底）；`soundfile` **没装**（本技能不依赖它） |
 
 ### 排期公式（保守）
@@ -762,7 +808,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 32 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 38 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（24 项，会真起无头浏览器，约 15 秒）

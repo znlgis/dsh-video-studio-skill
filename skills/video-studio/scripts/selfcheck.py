@@ -33,6 +33,15 @@
   27  （v0.5.0）内容指纹：同剧本稳定、改标点不换风格、换题材才换
   28  （v0.5.0）声线计划：4 句样片 >=2 把声音，legacy 仍是单声线
   29  （v0.5.0）字体族与主题字幕：换族换缓存键，浅色主题不画黑背板
+  30  （v0.6.0）门禁账本与签核：pass/fail/skipped 三档不许混，签核必须绑内容指纹
+  31  （v0.6.0）阶段新鲜度：改了输入必须报"过时"，不许用旧产物静默出片
+  32  （v0.6.0）并行渲染主题序列化：JSON 往返后重解风格必须回到 tuple
+  33  （v0.7.0）音效跨片可区分：内容派生 seed 让跨片不同、legacy 逐样本不变
+  34  （v0.7.0）配乐/音效片内分离：duck 默认加深，配乐给音效让位
+  35  （v0.7.1）旁白优先：人声出现时背景必须再压、间隙恢复、人声电平不动
+  36  （v0.7.1）旁白优先默认值：配乐 -12 dB 基线 + 旁白侧链 6 dB（读 st_audio 源码）
+  37  （v0.7.1）旁白清晰度 SNR 兜底：背景天然太响时自动补压到 >=12 dB
+  38  （v0.7.1）无旁白时混音不受影响（voice_env/guard 不得空转改电平）
 """
 import argparse
 import io
@@ -430,7 +439,11 @@ def t_music_plan():
             file_peak = float(np.max(np.abs(K.wav_read(file_out)[0])))
         assert "music.mode=off" in buf.getvalue(), "off 没有打印说明（静默跳过也不行）"
         assert off_peak < 0.01, "music.mode=off 仍把旧 music.wav 混进来了（峰值 %.3f）" % off_peak
-        assert file_peak > 0.3, "music.mode=file 没有用外部配乐（峰值 %.3f）" % file_peak
+        # v0.7.1：断言改成"相对 off 明显变大"而不是绝对 0.3——
+        # 配乐基线降到 -12 dB（旁白优先）后，0.8 幅度的外部配乐混出来约 0.2；
+        # 绝对阈值会把"旁白优先调好了"判成"没读到外部配乐"，这类断言会被调参牵着走。
+        assert file_peak > 0.1 and file_peak > off_peak * 3.0, (
+            "music.mode=file 没有用外部配乐（off %.3f -> file %.3f）" % (off_peak, file_peak))
     return "off 峰值 %.3f / file 峰值 %.3f" % (off_peak, file_peak)
 
 
@@ -852,6 +865,144 @@ def _load_scenes_mod():
     except Exception:                                       # noqa: BLE001
         return None
 
+def t_sfx_content_seed():
+    """v0.7：音效 seed 必须随内容变化，但 legacy 路径必须逐样本不变。
+
+    - 不传 style/content_fp -> 两次渲染逐样本相同（v0.4 兼容，不破老片）；
+    - 传了不同 content_fp  -> 必须不同（否则跨片音效还是"都一样"）；
+    - 同一 content_fp      -> 逐样本相同（可复现，是程序化视频的底线）。
+    """
+    import numpy as np
+    scenes = [{"id": "l01", "kind": "hook", "start": 0.0, "end": 2.0},
+              {"id": "l02", "kind": "body", "start": 2.0, "end": 6.0}]
+    rows = [{"at": "l02", "type": "ui_click"}, {"at": "l02+0.5", "type": "whoosh"}]
+
+    def build(**kw):
+        b = K.CueBus(scenes=scenes, total=6.0)
+        b.extend(rows)
+        return b.build_audio(total=6.0, verbose=False, **kw)
+
+    try:
+        legacy_a, legacy_b = build(), build()
+    except Exception:                                       # noqa: BLE001
+        return "skip"                                       # sfxkit 不可用
+    assert np.array_equal(legacy_a, legacy_b), "legacy 两次渲染不一致（v0.4 兼容被破坏）"
+    a = build(style="tech-deep", content_fp="aaaa1111", key="Dm")
+    b = build(style="tech-deep", content_fp="bbbb2222", key="Dm")
+    assert not np.array_equal(a, b), "不同内容指纹得到相同音效轨：跨片音效仍一模一样"
+    a2 = build(style="tech-deep", content_fp="aaaa1111", key="Dm")
+    assert np.array_equal(a, a2), "同内容指纹渲染不可复现"
+    return "legacy 逐样本相同 / 跨片可区分"
+
+
+def t_audio_separation():
+    """v0.7：混音侧 duck 默认必须加深（片内配乐给音效让位）。
+
+    直接读 render.py 的常量文本而不是跑全链：这条断言盯的是"默认值没被改回去"
+    （v0.4 的 3.0 dB 在段落过门时配乐几乎和音效等高，是"听起来像同一套"的成因之一）。
+    """
+    import re
+    path = os.path.join(HERE, "render.py")
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r"duck_default\s*=\s*([0-9.]+)", src)
+    assert m, "render.py 里找不到 duck_default"
+    base = float(m.group(1))
+    assert base >= 3.5, "duck_default=%.1f dB 太浅（v0.7 要求 >= 3.5）" % base
+    for sid, want in (("mono", 3.0), ("cinema", 5.5), ("epic", 5.5)):
+        mm = re.search(r'"%s"\s*:\s*([0-9.]+)' % sid, src)
+        assert mm, "render.py 里找不到风格 %s 的 duck 值" % sid
+        assert float(mm.group(1)) >= want, "%s duck=%.1f < %.1f" % (sid, float(mm.group(1)), want)
+    return "duck 默认 %.1f dB（cinema/epic 5.5）" % base
+
+
+def t_voice_priority():
+    """v0.7.1 旁白优先：人声出现时背景必须再压，人声间隙背景恢复。
+
+    以前配乐基线只比旁白低 1.5 dB，视频以旁白为主时观众要费力分辨字。
+    修法：`mix_film` 用旁白包络做侧链——人声处配乐 -6 dB、音效 -3 dB，间隙回原电平。
+    这里分别验证「人声段被压」和「静音段恢复」，以及旁白自身电平不被影响。
+    """
+    import numpy as np
+    n = int(2.0 * K.SR)
+    t = np.arange(n) / float(K.SR)
+    voice = np.zeros(n, dtype=np.float32)
+    voice[: n // 2] = (0.2 * np.sin(2 * np.pi * 220 * t[: n // 2])).astype(np.float32)
+    music = np.full((n, 2), 0.2, dtype=np.float32)
+    out = K.mix_film(voice, music, None, total=2.0, fade=0.0,
+                     music_gain_db=0.0, voice_duck_db=6.0, guard_snr_db=0.0)
+    v = np.stack([voice, voice], axis=1)
+    music_part = out - v                      # 混音是线性叠加，减掉人声即背景分量
+    # 人声段：取中段（避开包络起音/释放的斜坡）
+    talk = music_part[int(0.35 * K.SR): int(0.45 * K.SR)]
+    gap = music_part[int(1.55 * K.SR): int(1.95 * K.SR)]
+    talk_rms = float(np.sqrt(np.mean(talk * talk)))
+    gap_rms = float(np.sqrt(np.mean(gap * gap)))
+    # 期望：人声段 ≈ 0.2*10^(-6/20)=0.100；间隙 ≈ 0.2
+    assert abs(talk_rms - 0.1003) < 0.03, "人声段背景没被压到 -6 dB（RMS %.3f，期望 0.100）" % talk_rms
+    assert abs(gap_rms - 0.2) < 0.03, "人声间隙背景没恢复（RMS %.3f，期望 0.200）" % gap_rms
+    # SNR 口径：只统计人声活跃区（含间隙会把问题稀释掉）。
+    # 这里配乐基线是 0 dB，只有 -6 dB 侧链 -> SNR 应为 -3+6 = 3 dB 左右。
+    snr = K.voice_snr(voice, music_part)
+    assert snr is not None and 2.0 <= snr <= 4.0, "voice_snr 口径异常（%.1f dB，期望约 3）" % (snr or -99)
+    # 旁白自身电平不能被侧链动过
+    voice_part = out[:, 0] - music_part[:, 0]
+    seg = voice_part[int(0.35 * K.SR): int(0.45 * K.SR)]
+    want = voice[int(0.35 * K.SR): int(0.45 * K.SR)]
+    assert float(np.max(np.abs(seg - want))) < 1e-4, "旁白电平被侧链改变（旁白优先不能压人声）"
+    return "人声段背景 %.3f / 间隙 %.3f（dB 差 %.1f）" % (
+        talk_rms, gap_rms, 20 * np.log10(gap_rms / (talk_rms + 1e-9)))
+
+
+def t_music_gain_default():
+    """v0.7.1：配乐默认增益必须是 -12 dB（beside 人声），不是旧版的 -1.5。
+
+    这条盯的是 `render.st_audio` 的默认值：`mus.get("gain_db", -12.0)`。
+    直接读源码文本，避免"跑全链才知道默认值"。
+    """
+    src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
+    assert 'gain_db", -12.0' in src, "st_audio 的配乐默认增益不是 -12 dB"
+    assert 'voice_duck_db", 6.0' in src, "st_audio 没有开旁白侧链（voice_duck_db=6）"
+    return "配乐 -12 dB + 旁白侧链 6 dB"
+
+
+def t_snr_guard():
+    """v0.7.1 SNR 兜底：背景天然太响时，混音后必须自己把它压到"人声听得清"。
+
+    构造一段人声 + 一段刻意很响的配乐（比人声高 10 dB），不设侧链、只靠 guard：
+    `mix_film(guard_snr_db=12)` 后实测人声活跃区的 人声/背景 必须 >= 12 dB，
+    且人声本身电平不能被兜底改过（兜底只压背景）。
+    """
+    import numpy as np
+    sr = K.SR
+    n = int(3.0 * sr)
+    t = np.arange(n) / float(sr)
+    voice = np.zeros(n, dtype=np.float32)
+    voice[int(0.4*sr):int(2.6*sr)] = (0.2 * np.sin(2*np.pi*220*t[int(0.4*sr):int(2.6*sr)])).astype(np.float32)
+    # 配乐 RMS 约 0.6，比人声（RMS 0.141）高 ~12.5 dB —— 刻意做成"盖住旁白"的反例
+    loud = np.full((n, 2), 0.6, dtype=np.float32)
+    out = K.mix_film(voice, loud, None, total=3.0, fade=0.0,
+                     music_gain_db=0.0, voice_duck_db=0.0, voice_duck_sfx_db=0.0,
+                     guard_snr_db=12.0, guard_cap_db=30.0, verbose=False)
+    v2 = np.stack([voice, voice], axis=1)
+    bg = out - v2
+    snr = K.voice_snr(voice, bg)
+    assert snr is not None and snr >= 11.9, "SNR 兜底没生效：人声/背景 %.1f dB（要求 >=12）" % (snr or -99)
+    # 人声电平不能被兜底动过
+    seg_v = (out[:, 0] - bg[:, 0])[int(1.0*sr):int(2.0*sr)]
+    want = voice[int(1.0*sr):int(2.0*sr)]
+    assert float(np.max(np.abs(seg_v - want))) < 1e-4, "SNR 兜底改到了人声电平"
+    return "兜底前约 -12.5 dB -> 兜底后 %.1f dB" % snr
+
+
+def t_mix_no_voice():
+    """没有旁白时混音行为不变：没有 voice_env/guard 可用，背景应原样输出。"""
+    import numpy as np
+    n = int(0.5 * K.SR)
+    music = np.full((n, 2), 0.2, dtype=np.float32)
+    out = K.mix_film(None, music, None, total=0.5, fade=0.0, music_gain_db=0.0, verbose=False)
+    assert abs(float(np.max(np.abs(out))) - 0.2) < 1e-5, "无旁白时配乐被改动了（峰值 %.3f）" % float(np.max(np.abs(out)))
+    return "无旁白时背景不被压"
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -885,6 +1036,12 @@ CASES = [
     ("30 门禁账本与签核", t_gates),
     ("31 阶段新鲜度守卫", t_stagewatch),
     ("32 并行渲染主题序列化", t_parallel_frames),
+    ("33 音效跨片可区分（v0.7 内容派生 seed）", t_sfx_content_seed),
+    ("34 配乐/音效片内分离（v0.7 duck 加深）", t_audio_separation),
+    ("35 旁白优先（v0.7.1 背景让位与恢复）", t_voice_priority),
+    ("36 旁白优先默认值（配乐 -12 dB + 侧链）", t_music_gain_default),
+    ("37 旁白清晰度 SNR 兜底（背景太响时自动补压）", t_snr_guard),
+    ("38 无旁白时混音不受影响", t_mix_no_voice),
 ]
 
 

@@ -96,7 +96,7 @@ cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
 cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 32 条环境/回归断言（20 秒，不联网）
+python selfcheck.py                                     # 38 条环境/回归断言（20 秒，不联网）
 python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
@@ -171,7 +171,7 @@ skills/video-studio/
   scripts/stagewatch.py      v0.6 阶段新鲜度（work/manifest.json + --stage explain）
   scripts/filmcheck.py       v0.6 film.json 契约校验（未知键/枚举/跨字段）
   scripts/render.py          编排器（13 个 stage、pil|web 双引擎、分块并行、断点续跑、母版预览、门禁账本）
-  scripts/selfcheck.py       回归自检（32 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（38 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
