@@ -2,6 +2,33 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.5.1 — 修 CI：selfcheck 第 29 条把"系统装了几族字体"当成产品缺陷
+
+> 症状：`skill selfcheck (Linux)` 红，Windows 的 repo check 绿。
+> 根因：新增的 case 29 断言"四个字体族量出来的宽度必须不同"，但 GitHub 的 ubuntu runner
+> 只装 `fonts-noto-cjk`，没有雅黑/宋体/楷体 —— 四个族全部回退到同一个 `NotoSansCJK-Bold.ttc`，
+> 宽度当然一样。**断言写死了本机的字体环境**，产品代码本身没问题。
+
+### 修法
+
+把 case 29 拆成两层，各验各的：
+
+| 层 | 验什么 | 依赖环境吗 |
+|---|---|---|
+| 机制（必过） | 字体缓存键必须按 family 分键（否则 wrap 与绘制会用不同字体，文字溢出安全区） | 不依赖 |
+| 语义（有条件） | 仅当系统**真的解析出 ≥2 个字体文件**时，才要求"宽度必须不同" | 依赖 |
+
+单族系统（CI 的 fonts-noto-cjk、极简 Linux 容器）会打印
+`4 个字体族 / 单族回退（NotoSansCJK-Bold.ttc）/ 只验缓存分键`，**跳过宽度比较而不是判失败**。
+
+### 验证
+
+- 在本机把 `os.path.exists` 换成"Linux 视角"（Windows 字体 -> False，Noto -> True）复现：
+  修前 `FAIL 29`，修后 `29/29 PASS`；本机原生环境同样 `29/29 PASS`。
+- **变异测试**（防止新断言变成"永远为真"）：故意把 `font()` 的缓存键改成 `(size, weight)`
+  （丢掉 family），case 29 必须失败 —— 实测报 `字体缓存键没带 family（换族会串味）`，说明门禁仍在。
+- CI 后续 4 个 selftest（sfxkit 16、scorekit 21、qa_frames 22、无 scipy 兜底）本地逐个复跑全绿。
+
 ## 0.5.0 — 风格包：让每部片的画风 / 配乐 / 旁白都不一样
 
 > 这一版解决的是**同质化**，不是加功能。用户的原话：

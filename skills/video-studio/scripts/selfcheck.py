@@ -630,17 +630,40 @@ def t_voice_plan():
 
 
 def t_font_family():
-    """29 字体族 + 字幕主题：换族必须换缓存键，主题字幕不能是黑底白字。"""
+    """29 字体族 + 字幕主题：换族必须换缓存键，主题字幕不能是黑底白字。
+
+    **别把"系统装了几族字体"当成产品缺陷**：CI 的 ubuntu 只装 fonts-noto-cjk，
+    四个族全回退到同一个 NotoSansCJK，宽度必然一样。v0.5.0 的第一版就在这里误报——
+    断言写成"宽度必须不同"，于是 Linux CI 红、Windows 绿。
+    真正要保证的是**机制**：缓存按 family 分键（换族不会串味）；
+    宽度差异只在"系统确实解析出不同字体文件"时才有意义，单族系统跳过并说明。
+    """
     fams = list(getattr(K, "FAMILY_IDS", ()))
     assert fams, "filmkit 没有 FONT_FAMILIES（v0.5 字体族没生效）"
-    widths = {}
+    resolved = {}
     for fam in fams:
         f = K.font(40, "bold", fam)
-        assert f is not None
-        widths[fam] = K.text_w("中文测试ABC", f)
-        assert K.font(40, "bold", fam).size == 40
-    assert len(set(round(v, 3) for v in widths.values())) >= 2, \
-        "四个字体族量出来的宽度完全一样，缓存键很可能没带 family: %s" % widths
+        assert f is not None, "字体族 %s 加载失败" % fam
+        assert f.size == 40, "字体族 %s 的字号被改写成 %s" % (fam, f.size)
+        resolved[fam] = str(getattr(f, "path", "") or "")
+    # (a) 机制保证：四个族必须是四条独立缓存，且键里带 family（否则 wrap 与绘制会用不同字体）
+    keys = [k for k in K._font_cache if len(k) == 3 and k[0] == 40 and k[1] == "bold"]
+    assert len({k[2] for k in keys}) == len(fams), \
+        "字体缓存键没带 family（换族会串味）: %s" % (keys,)
+    # (b) 语义保证：仅当系统真解析出 >=2 个字体文件时，宽度才必须有差异
+    uniq_files = len(set(resolved.values()))
+    widths = {}
+    for fam in fams:
+        widths[fam] = round(K.text_w("中文测试ABC", K.font(40, "bold", fam)), 3)
+    uniq_w = len(set(widths.values()))
+    if uniq_files >= 2:
+        assert uniq_w >= 2, ("换族没换字形（%d 个字体文件却只有 %d 种宽度）: %s"
+                             % (uniq_files, uniq_w, widths))
+        detail = "%d 个字体族 / %d 个字体文件 / %d 种宽度" % (len(fams), uniq_files, uniq_w)
+    else:
+        # 单族回退（CI 的 fonts-noto-cjk，或极简 Linux 容器）：只验机制，不验宽度
+        detail = "%d 个字体族 / 单族回退（%s）/ 只验缓存分键" % (
+            len(fams), os.path.basename(list(resolved.values())[0]) or "?")
     # 缓存键必须区分 family（否则 wrap 与绘制会用不同字体，文字溢出安全区）
     a = K.wrap_cn_cached("这是一句用来测试换行缓存键的话", 40, 300, "reg", "sans")
     b = K.wrap_cn_cached("这是一句用来测试换行缓存键的话", 40, 300, "reg", "kai")
@@ -662,7 +685,7 @@ def t_font_family():
         assert sum(px) > 200, "浅色主题的字幕背板是深色（%s），说明 theme 没生效" % (px,)
     img2 = Image.new("RGB", (K.W, K.H), (0, 0, 0))
     K.draw_subtitle(img2, "旧调用", theme=None)
-    return "%d 个字体族；最宽 %dpx 最窄 %dpx" % (len(fams), max(widths.values()), min(widths.values()))
+    return detail
 
 
 CASES = [

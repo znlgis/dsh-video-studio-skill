@@ -3,7 +3,7 @@
 # 两个 job 分工明确（别把两者混为一谈）：
 #   repo     —— tools/ci_check.py：语法 / JSON / 技能清单 / 依赖白名单 / 打包卫生 / 文档路径引用。
 #               不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：24 条"曾经真的坏过"的回归断言。
+#   skill    —— skills/video-studio/scripts/selfcheck.py：29 条"曾经真的坏过"的回归断言。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
 #
