@@ -96,11 +96,55 @@ FONT_CANDIDATES = {
 }
 
 
-def font(size: int, weight: str = "bold") -> ImageFont.FreeTypeFont:
-    key = (int(size), weight)
+# ---------------------------------------------------------------- 字体族（v0.5.0）
+# 换片要换气质，字体是第一眼。但"换字体族"必须同时换**所有**缓存键，
+# 否则会出现"用 A 字体量宽度、用 B 字体绘制"——文字直接溢出安全区。
+# 每一族都给中文回退：找不到 serif/kai 时退到同族 reg 再退 sans，**绝不退到 mono**（无中文字形）。
+FONT_FAMILIES = {
+    "sans": {                      # 现状：微软雅黑一族
+        "bold": [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\simhei.ttf",
+                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"],
+        "reg": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"],
+        "light": [r"C:\Windows\Fonts\msyhl.ttc", r"C:\Windows\Fonts\msyh.ttc"],
+    },
+    "serif": {                     # 杂志 / 史诗：宋体系
+        "bold": [r"C:\Windows\Fonts\NotoSerifSC-VF.ttf", r"C:\Windows\Fonts\simsun.ttc",
+                 r"C:\Windows\Fonts\msyhbd.ttc"],
+        "reg": [r"C:\Windows\Fonts\NotoSerifSC-VF.ttf", r"C:\Windows\Fonts\simsun.ttc",
+                r"C:\Windows\Fonts\msyh.ttc"],
+        "light": [r"C:\Windows\Fonts\NotoSerifSC-VF.ttf", r"C:\Windows\Fonts\simsun.ttc",
+                  r"C:\Windows\Fonts\msyh.ttc"],
+    },
+    "kai": {                       # 手绘纸感：楷体
+        "bold": [r"C:\Windows\Fonts\simkai.ttf", r"C:\Windows\Fonts\simfang.ttf",
+                 r"C:\Windows\Fonts\msyhbd.ttc"],
+        "reg": [r"C:\Windows\Fonts\simkai.ttf", r"C:\Windows\Fonts\simfang.ttf",
+                r"C:\Windows\Fonts\msyh.ttc"],
+        "light": [r"C:\Windows\Fonts\simkai.ttf", r"C:\Windows\Fonts\msyh.ttc"],
+    },
+    "round": {                     # 圆润：等线 / 雅黑回退
+        "bold": [r"C:\Windows\Fonts\Dengb.ttf", r"C:\Windows\Fonts\msyhbd.ttc"],
+        "reg": [r"C:\Windows\Fonts\Deng.ttf", r"C:\Windows\Fonts\msyh.ttc"],
+        "light": [r"C:\Windows\Fonts\Dengl.ttf", r"C:\Windows\Fonts\msyhl.ttc"],
+    },
+}
+FAMILY_IDS = tuple(FONT_FAMILIES.keys())
+
+
+def font(size: int, weight: str = "bold", family: str = "sans") -> ImageFont.FreeTypeFont:
+    """取字体。family 缺省 sans = v0.4 行为（老调用 font(46, "reg") 输出不变）。"""
+    fam = str(family or "sans")
+    if fam not in FONT_FAMILIES:
+        fam = "sans"                 # 未知族名退到 sans，不让拼写错误炸掉渲染
+    key = (int(size), weight, fam)
     if key in _font_cache:
         return _font_cache[key]
-    for path in FONT_CANDIDATES.get(weight, []) + FONT_CANDIDATES["reg"]:
+    chain = list(FONT_FAMILIES[fam].get(weight) or [])
+    chain += list(FONT_FAMILIES[fam]["reg"])
+    chain += list(FONT_CANDIDATES.get(weight) or [])
+    chain += list(FONT_CANDIDATES["reg"])
+    for path in chain:
         if path and os.path.exists(path):
             try:
                 f = ImageFont.truetype(path, int(size), index=0)
@@ -257,24 +301,25 @@ _wrap_cache = {}
 _tw_cache = {}
 
 
-def wrap_cn_cached(s: str, size: int, max_w: float, weight: str = "reg"):
+def wrap_cn_cached(s: str, size: int, max_w: float, weight: str = "reg",
+                   family: str = "sans"):
     """带缓存的换行。场景函数每帧都要调用，务必用这个版本。
 
     实测：每帧重新排版（12 张卡片 x 2 个 wrap_cn）会让单帧从 4.6ms 涨到 12ms。
     """
-    key = (s, int(size), int(max_w), weight)
+    key = (s, int(size), int(max_w), weight, str(family or "sans"))
     r = _wrap_cache.get(key)
     if r is None:
-        r = wrap_cn(s, font(size, weight), max_w)
+        r = wrap_cn(s, font(size, weight, family), max_w)
         _wrap_cache[key] = r
     return r
 
 
-def text_w_cached(s: str, size: int, weight: str = "reg") -> float:
-    key = (s, int(size), weight)
+def text_w_cached(s: str, size: int, weight: str = "reg", family: str = "sans") -> float:
+    key = (s, int(size), weight, str(family or "sans"))
     r = _tw_cache.get(key)
     if r is None:
-        r = text_w(s, font(size, weight))
+        r = text_w(s, font(size, weight, family))
         _tw_cache[key] = r
     return r
 
@@ -306,23 +351,29 @@ def check_bbox(box, safe=SAFE, tag=""):
     return []
 
 
-def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg"):
+def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
+                  family="sans"):
     """字幕折行：优先两行，超宽逐级缩字号。返回 (lines, font)。"""
     for sz in (size, int(size * 0.92), int(size * 0.84), int(size * 0.76)):
-        f = font(sz, weight)
+        f = font(sz, weight, family)
         lines = wrap_cn(text, f, max_w)
         if len(lines) <= max_lines:
             return lines, f
-    f = font(int(size * 0.76), weight)
+    f = font(int(size * 0.76), weight, family)
     return wrap_cn(text, f, max_w), f
 
 
-def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None):
+def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None,
+                  theme=None, family=None):
+    """烧字幕。v0.5.0 加 theme（stylekit 主题）与 family（字体族）；
+    theme=None 时与 v0.4 逐像素一致。"""
     if not text or alpha <= 0.01:
         return img
     if band_w is None:
         band_w = SUB_BAND[2] - SUB_BAND[0]
-    lines, f = fit_sub_lines(text, max_w=band_w, size=size)
+    th = theme if isinstance(theme, dict) else None
+    fam = family or (th or {}).get("family") or "sans"
+    lines, f = fit_sub_lines(text, max_w=band_w, size=size, family=fam)
     lines = lines[:2]                       # 硬约束：最多两行
     lh = int(f.size * 1.32)
     cx = (SUB_BAND[0] + SUB_BAND[2]) // 2
@@ -335,10 +386,17 @@ def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None):
     bx1 = cx + widest / 2 + 34
     by0 = base_y - 16
     by1 = base_y + total_h + 16
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=10, fill=(0, 0, 0, int(150 * alpha)))
+    if th is None:
+        plate = (0, 0, 0, int(150 * alpha))
+        ink = (245, 248, 252, int(255 * alpha))
+    else:
+        # 浅色主题不能"黑底白字"：背板取 bg2 半透，字取 ink
+        plate = tuple(th["bg2"]) + (int(170 * alpha),)
+        ink = tuple(th["ink"]) + (int(255 * alpha),)
+    d.rounded_rectangle([bx0, by0, bx1, by1], radius=10, fill=plate)
     for i, ln in enumerate(lines):
         lw = text_w(ln, f)
-        d.text((cx - lw / 2, base_y + i * lh), ln, font=f, fill=(245, 248, 252, int(255 * alpha)))
+        d.text((cx - lw / 2, base_y + i * lh), ln, font=f, fill=ink)
     return img
 
 
@@ -848,7 +906,9 @@ def music_plan(script, has_music_file: bool = False):
     """
     mus = script.get("music") or {}
     raw = str(mus.get("mode") or "").strip().lower()
-    bpm = script.get("bpm")
+    # v0.5.0：bpm 可以是 "auto"（由 stylekit 按风格梯度和内容指纹决定）。
+    # 这里只判断"有没有 bpm 这个概念"，具体数值由 st_score 解析后传入 scorekit。
+    bpm = mus.get("bpm", script.get("bpm"))
     if raw == "auto":
         raw = ""
     if raw in ("off", "none", "mute"):
@@ -877,6 +937,82 @@ def music_plan(script, has_music_file: bool = False):
     if mus.get("chords"):
         return "bed", "缺省配乐：没有 bpm，退回 v0.2 和弦床"
     return "none", "缺省配乐：没有 bpm / music.chords / work/music.wav，本片无配乐"
+
+
+# ---------------------------------------------------------------- 风格 / 主题（v0.5.0）
+def _stylekit():
+    """惰性 import stylekit（同目录；缺了就明确报错，而不是静默回落到单一样式）。"""
+    try:
+        import stylekit as ST
+        return ST
+    except Exception as e:                                  # noqa: BLE001
+        raise RuntimeError("找不到 stylekit.py（v0.5.0 起 scenes/render 都依赖它，"
+                           "请与 filmkit.py 放在同一目录）：%s" % e)
+
+
+def resolve_theme(script, scene=None):
+    """给场景取主题字典。
+
+    优先级：scene["theme"]（同明暗族才允许） > script 里解析出的风格主题。
+    stylekit 不在时退回内置 tech-deep（只为了让老工作目录少一个文件也能跑）。
+    """
+    try:
+        ST = _stylekit()
+        plan = script.get("_style")
+        if not isinstance(plan, dict):
+            plan = ST.resolve_script_style(script)
+        th = dict(ST.THEMES[plan["theme_id"]])
+        sid = (scene or {}).get("theme")
+        if sid and sid in ST.THEMES:
+            alt = ST.THEMES[sid]
+            if ST.family_compatible(th, alt):
+                th = dict(alt)
+        return th
+    except Exception:                                       # noqa: BLE001
+        return _FALLBACK_THEME
+
+
+def style_plan(script):
+    """解析剧本的风格计划（含 legacy 判定）。stylekit 缺失时返回 legacy 计划。"""
+    try:
+        ST = _stylekit()
+        plan = script.get("_style")
+        return plan if isinstance(plan, dict) else ST.resolve_script_style(script)
+    except Exception:                                       # noqa: BLE001
+        return {"legacy": True, "style": "legacy", "theme_id": "tech-deep",
+                "music": {"style": "legacy", "bpm": script.get("bpm") or 120.0,
+                          "key": (script.get("music") or {}).get("key") or "Dm",
+                          "mood": "steady",
+                          "seed_effective": int((script.get("music") or {}).get("seed", 7) or 7)},
+                "voice": {"map": {}, "policy": {"auto": False, "jitter": 0.0, "max_distinct": 2}},
+                "pacing": {"lead": float(script.get("lead", 0.62)),
+                           "tail": float(script.get("tail", 0.92)),
+                           "min_dur": float(script.get("min_dur", 3.2)),
+                           "hold": float(script.get("hold", 0.0)),
+                           "item_stagger": 0.32}}
+
+
+# v0.4 的深蓝橙，作为"没装 stylekit 也能出片"的兜底（与 assets/scenes.py 的老 THEME 同值）
+_FALLBACK_THEME = {
+    "id": "tech-deep", "label": "科技深蓝", "keywords": (),
+    "bg": (7, 14, 26), "bg2": (17, 33, 54), "surface": (26, 42, 64),
+    "ink": (240, 245, 252), "muted": (150, 174, 200), "dim": (120, 142, 168),
+    "accent": (243, 132, 60), "accent2": (86, 170, 232),
+    "good": (108, 178, 110), "bad": (226, 96, 92), "rule": (255, 255, 255),
+    "vignette": 0.40, "vignette_tint": (0, 0, 0), "grain": 5.0, "grain_freq": 0.31,
+    "texture": "dots", "texture_alpha": 0.045,
+    "family": "sans",
+    "scale": {"display": (96, "bold"), "heading": (64, "bold"), "sub": (38, "light"),
+              "body": (34, "reg"), "kicker": (28, "bold"), "chip": (27, "reg"),
+              "brand": (23, "reg")},
+    "line_gap": 1.30, "tracking": 0.0,
+    "layout": "left-stack",
+    "card": {"radius": 14, "fill_a": 16, "outline_a": 28, "pad": 34, "h": 96, "gap": 118},
+    "safe_bias": 0,
+    "ease": "out3", "entrance_dx": 0, "entrance_dy": 26, "push": 0.04,
+    "item_stagger": 0.32, "transition": "black", "hud": "chip-left",
+    "qa": {"luma_max": 0.030, "flicker_thresh": 6.0, "dark": True},
+}
 
 
 # ---------------------------------------------------------------- 程序化音源
@@ -934,16 +1070,32 @@ def whoosh(dur=0.45, sr=SR, amp=0.06, seed=3):
 
 # ---------------------------------------------------------------- TTS
 def tts_key(text, voice, rate, pitch) -> str:
+    """v1 缓存键：4 参签名保持不变（selfcheck 与用户脚本都在用）。"""
     h = hashlib.sha1(("%s|%s|%s|%s" % (text, voice, rate, pitch)).encode("utf-8"))
     return h.hexdigest()[:16]
 
 
+def tts_key_v2(text, voice, rate, pitch, volume="+0%", trim=True, trim_db=-42.0,
+               keep_ms=None) -> str:
+    """v2 缓存键：把 volume / trim 开关也纳入。
+
+    为什么必须升 v2（v0.4 的真 bug）：trim 不进键，用户把 trim_silence 改成 false 之后，
+    老 meta 里 trimmed=True 仍会命中第一条分支，返回**裁剪版**——"关了裁剪其实没关"。
+    """
+    payload = "%s|%s|%s|%s|%s|%s|%s|%s" % ("v2", text, voice, rate, pitch,
+                                           volume, int(bool(trim)), round(float(trim_db), 3))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
-        cache=True, retries=4, trim=True, trim_db=-42.0):
+        cache=True, retries=4, trim=True, trim_db=-42.0, volume="+0%",
+        persona=None, tone=None):
     """逐句合成旁白（带输入校验的缓存 + 网络重试 + 可选尾静音裁剪）。
 
     v0.1 的缓存只判断文件是否存在，改一句台词会静默复用旧音频；
     v0.2 起把 text/voice/rate/pitch 的哈希写进 meta，变了就重新合成。
+    v0.5.0：加 volume（edge-tts 原生支持，之前一直没传）+ persona/tone 审计字段；
+            缓存键升 v2（把 volume/trim 也纳入，修掉"关了裁剪其实没关"的静默 bug）。
     trim=True 时另外落一份裁剪后的 wav 并在 meta.path 指向它，dur 为裁剪后实测时长。
     """
     out_mp3 = str(out_mp3)
@@ -951,15 +1103,25 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
     if d:
         os.makedirs(d, exist_ok=True)
     meta_path = out_mp3 + ".json"
-    key = tts_key(text, voice, rate, pitch)
+    vol = str(volume or "+0%")
+    key = tts_key_v2(text, voice, rate, pitch, volume=vol, trim=trim, trim_db=trim_db)
+    legacy_key = tts_key(text, voice, rate, pitch)
 
     if cache and os.path.exists(out_mp3) and os.path.getsize(out_mp3) > 2000:
         try:
             m = json.load(open(meta_path, encoding="utf-8"))
+            # v2 命中：key 已经含 volume/trim，不需要再分叉判断 trimmed
             if m.get("key") == key and m.get("text") == text:
                 if m.get("trimmed") and m.get("path") and os.path.exists(m["path"]):
                     return m
                 if not m.get("trimmed") and not trim:
+                    return m
+            # v1 老缓存（升级前合成的）只有在参数完全等于 v1 语义时才复用，
+            # 避免"改了一个 volume 却拿到老音频"这种升级期的静默错配。
+            elif (legacy_key == tts_key(text, voice, rate, pitch)
+                  and str(m.get("key") or "") == legacy_key and m.get("text") == text
+                  and vol in ("+0%", "") and m.get("voice") == voice):
+                if m.get("trimmed") and m.get("path") and os.path.exists(m["path"]):
                     return m
         except Exception:
             pass
@@ -972,7 +1134,7 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
             import edge_tts
 
             async def go():
-                c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+                c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=vol)
                 await c.save(out_mp3)
 
             asyncio.run(go())
@@ -995,23 +1157,42 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
         dur = len(pcm) / float(SR)
 
     m = dict(path=used, mp3=out_mp3, text=text, voice=voice, rate=rate, pitch=pitch,
-             key=key, dur=dur, dur_raw=dur_raw, trimmed=bool(trim))
+             volume=vol, key=key, spec_version=2, dur=dur, dur_raw=dur_raw,
+             trimmed=bool(trim), trim_db=float(trim_db))
+    if persona:
+        m["persona"] = str(persona)
+    if tone:
+        m["tone"] = str(tone)
     json.dump(m, open(meta_path, "w", encoding="utf-8"), ensure_ascii=False)
     return m
 
 
 def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
-              workers=4, trim=True):
-    """并发逐句合成（并发只影响墙钟，不影响产物：每句独立缓存）。"""
+              workers=4, trim=True, plan=None, trim_db=-42.0):
+    """并发逐句合成（并发只影响墙钟，不影响产物：每句独立缓存）。
+
+    v0.5.0：plan=[{voice,rate,pitch,volume,persona,tone}, ...]（与 lines 等长）时
+    逐句用各自的声线/语气；plan=None 时行为与 v0.4 完全一致。
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     tts_dir = os.path.join(workdir, "tts")
     os.makedirs(tts_dir, exist_ok=True)
     results = [None] * len(lines)
+    specs = list(plan) if plan is not None else [None] * len(lines)
+    if len(specs) != len(lines):
+        raise ValueError("plan 长度 %d 与 lines 长度 %d 不一致" % (len(specs), len(lines)))
 
     def one(i, ln):
+        spec = specs[i] or {}
         mp3 = os.path.join(tts_dir, str(ln["id"]) + ".mp3")
-        m = tts(ln["text"], mp3, voice=voice, rate=rate, pitch=pitch, trim=trim)
+        m = tts(ln["text"], mp3,
+                voice=spec.get("voice") or voice,
+                rate=spec.get("rate") or rate,
+                pitch=spec.get("pitch") or pitch,
+                volume=spec.get("volume") or "+0%",
+                trim=trim, trim_db=trim_db,
+                persona=spec.get("persona"), tone=spec.get("tone"))
         row = dict(ln)
         row.update(m)
         print("  tts %-10s %6.2fs  %s" % (ln["id"], m["dur"], ln["text"][:34]), flush=True)
@@ -1027,7 +1208,7 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
 
 # ---------------------------------------------------------------- 时间轴
 def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_dur=None,
-                   hold=0.0, hold_map=None, bar=0.0):
+                   hold=0.0, hold_map=None, bar=0.0, lead_map=None):
     """由实测语音时长反推时间轴。第一段 start 必须严格为 0。
 
     hold / hold_map（v0.3.0）：语音结束后额外停留的秒数——这就是 ai-history-film 的"停留窗口"：
@@ -1039,14 +1220,18 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
     for ln in lines:
         voice = float(ln.get("dur") or 0.0)
         extra = float(ln.get("hold", (hold_map or {}).get(ln["id"], hold)) or 0.0)
-        d = max(float(min_dur), float(lead) + voice + float((tail_map or {}).get(ln["id"], tail)) + extra)
+        # v0.5.0：lead 也支持逐句（行内 lead > lead_map > 全局），
+        # 与 tail_map 同构 —— 不同语气档的"句前呼吸"本来就不该一样长。
+        lead_i = float(ln.get("lead", (lead_map or {}).get(ln["id"], lead)))
+        tail_i = float((tail_map or {}).get(ln["id"], tail))
+        d = max(float(min_dur), lead_i + voice + tail_i + extra)
         if max_dur and d > float(max_dur):
             d = float(max_dur)
         if bar and float(bar) > 0:
             d = math.ceil(d / float(bar) - 1e-9) * float(bar)
         scenes.append(dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
-                           voice_start=round(t + float(lead), 3),
-                           voice_end=round(t + float(lead) + voice, 3)))
+                           voice_start=round(t + lead_i, 3),
+                           voice_end=round(t + lead_i + voice, 3)))
         t += d
     if scenes:
         scenes[0]["start"] = 0.0
@@ -1097,7 +1282,8 @@ def write_srt(scenes, path, max_hold=None):
     return len(rows)
 
 
-def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52):
+def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52,
+              theme=None):
     """直接写 ASS，并在头里声明 PlayResX/Y=1920/1080。
 
     这样交 libass 不会按 PlayResY=288 反推，避免"字号小得看不见"
@@ -1110,6 +1296,18 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52)
         s, cs = cs // 100, cs % 100
         return "%d:%02d:%02d.%02d" % (h, m, s, cs)
 
+    primary, outline, back = "&H00FCF8F5", "&H00101010", "&H96000000"
+    if isinstance(theme, dict):
+        # ASS 的颜色是 &HAABBGGRR（BGR 顺序 + alpha 在前，alpha 0=不透明）
+        def _ass(rgb, alpha=0):
+            r, g, b = rgb
+            return "&H%02X%02X%02X%02X" % (int(alpha), int(b), int(g), int(r))
+        primary = _ass(theme["ink"])
+        outline = _ass(theme["bg2"])
+        back = _ass(theme["surface"], 0x60)
+        fam = str(theme.get("family") or "sans")
+        # 字体族 -> Windows 上的实际字体名（libass 认 name 不认路径）
+        font_name = {"serif": "SimSun", "kai": "KaiTi", "round": "DengXian"}.get(fam, "Microsoft YaHei")
     head = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -1122,8 +1320,8 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52)
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: Default,%s,%d,&H00FCF8F5,&H000000FF,&H00101010,&H96000000,-1,0,0,0,100,100,0,0,"
-        "1,3,1,2,60,60,56,1" % (font_name, int(size)),
+        "Style: Default,%s,%d,%s,&H000000FF,%s,%s,-1,0,0,0,100,100,0,0,"
+        "1,3,1,2,60,60,56,1" % (font_name, int(size), primary, outline, back),
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -1448,7 +1646,7 @@ def concat_segments(parts, out, workdir=None):
 
 # ---------------------------------------------------------------- 总质检
 def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None,
-              expected_subtitles=None, min_bitrate=0, notes=None):
+              expected_subtitles=None, min_bitrate=0, notes=None, theme=None):
     """分档质检：errors 必须修，warnings 看情况。
 
     v0.2 修正：
@@ -1510,6 +1708,13 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
         warns.append("首尾之外检测到 %d 段长黑帧" % nb)
     if detect_silence(path) > 0:
         warns.append("检测到长静音段（确认是否有意留白）")
+    if isinstance(theme, dict):
+        # 主题体检的结论带进报告：这样"深色主题必然贴空窗阈值"这种事实不是靠嘴说
+        lmax = float(theme.get("qa", {}).get("luma_max", 0.045))
+        warns_t = ["主题 %s：空窗阈值 luma_max=%.3f、闪烁阈值 %.1f"
+                   % (theme.get("label") or theme.get("id"), lmax,
+                      float(theme.get("qa", {}).get("flicker_thresh", 6.0)))]
+        warns.extend(warns_t)
     quality = None
     if ref_img is not None or (ref_png and os.path.exists(ref_png)):
         q = encode_quality(path, ref_png, ref_sec, ref_img=ref_img)

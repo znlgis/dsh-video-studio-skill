@@ -28,6 +28,11 @@
  22  （v0.3）webengine 可用时：页面契约齐全（window.renderFrame/getCues/ready）
  23  （v0.3）qa_frames 可用时：能检出注入的单帧闪烁
  24  （v0.4.0）配乐来源：music.mode=off 不读上一轮 work/music.wav（模式判定回归）
+  25  （v0.5.0）风格层：8 套主题全部过对比度门禁，8 类题材能分出 >=6 种风格
+  26  （v0.5.0）legacy 兼容：没写 style 字段必须精确落回 Dm/120/seed7/单声线
+  27  （v0.5.0）内容指纹：同剧本稳定、改标点不换风格、换题材才换
+  28  （v0.5.0）声线计划：4 句样片 >=2 把声音，legacy 仍是单声线
+  29  （v0.5.0）字体族与主题字幕：换族换缓存键，浅色主题不画黑背板
 """
 import argparse
 import io
@@ -514,6 +519,152 @@ def t_qa_frames():
     return "5 个函数齐全"
 
 
+
+def t_style_kits():
+    """25 风格层：8 套主题过对比度门禁 + 自动选风格能把 8 类题材分开。"""
+    import stylekit as ST
+    bad = ST.lint_all()
+    assert not bad, "内置主题没过对比度门禁: %s" % bad
+    topics = {
+        "tech": "AI 算法 模型 数据 架构 开源 编程 大模型 代码 系统",
+        "report": "报告 复盘 年度 总结 研究 分析 调研 白皮书 趋势 发布",
+        "craft": "手工 自然 历史 传统 木 田野 匠 古 茶 手艺 山河",
+        "launch": "活动 上新 招募 挑战 年轻 潮流 种草 福利 开箱 限量",
+        "truth": "观点 为什么 本质 真相 极简 反思 边界 定义 取舍",
+        "story": "故事 记忆 城市 深夜 旅行 纪实 情绪 时代 变迁 命运",
+        "night": "深夜 学习 效率 专注 写作 整理 笔记 书 日常 房间",
+        "epic": "史诗 爆发 冲击 巅峰 决战 荣耀 震撼 传奇 极限 突破",
+    }
+    got = {}
+    for key, text in topics.items():
+        s = {"title": text, "style": "auto",
+             "lines": [{"id": "l01", "kind": "hook", "text": text},
+                       {"id": "l02", "kind": "body", "text": text}]}
+        got[key] = ST.resolve_script_style(s)["style"]
+    assert len(set(got.values())) >= 6, "8 类题材只分出 %d 套风格: %s" % (len(set(got.values())), got)
+    return "%d 套主题 + %d 类题材 -> %d 种风格" % (len(ST.STYLE_IDS), len(topics), len(set(got.values())))
+
+
+def t_style_legacy():
+    """26 legacy 兼容：没写 style 字段必须精确落回 v0.4 的配乐/旁白参数。"""
+    import stylekit as ST
+    s = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
+    p = ST.resolve_script_style(s)
+    assert p["legacy"] is True, "没有 style 字段却没走 legacy"
+    assert p["music"]["bpm"] == 120.0, "legacy BPM 应为 120，收到 %r" % (p["music"]["bpm"],)
+    assert p["music"]["key"] == "Dm", "legacy 调性应为 Dm，收到 %r" % (p["music"]["key"],)
+    assert p["music"]["seed_effective"] == 7, "legacy seed 应为 7（不做内容派生）"
+    assert p["music"]["seed_from_content"] is False
+    assert p["voice"]["map"] == {}, "legacy 不该有声线映射"
+    assert p["voice"]["policy"]["jitter"] == 0.0 and p["voice"]["policy"]["auto"] is False
+    # legacy 的节奏必须等于 render.py v0.4 的函数默认值，否则"没写 lead 的老剧本"会变节奏
+    assert (p["pacing"]["lead"], p["pacing"]["tail"], p["pacing"]["min_dur"]) == (0.55, 0.85, 3.0), p["pacing"]
+    # 显式 "legacy" 也必须是同一档
+    s2 = dict(s, style="legacy")
+    assert ST.resolve_script_style(s2)["legacy"] is True
+    # 显式风格则必须真的换掉三件套
+    s3 = dict(s, style="cinema")
+    p3 = ST.resolve_script_style(s3)
+    assert p3["legacy"] is False and p3["music"]["bpm"] in ST.STYLES["cinema"]["music"]["bpm_ladder"]
+    assert p3["music"]["key"] in ST.STYLES["cinema"]["music"]["keys"]
+    return "bpm=%g key=%s seed=%d / cinema: bpm=%g key=%s" % (
+        p["music"]["bpm"], p["music"]["key"], p["music"]["seed_effective"],
+        p3["music"]["bpm"], p3["music"]["key"])
+
+
+def t_style_determinism():
+    """27 指纹确定性：同剧本同结果；改错别字不换风格；改题材才换。"""
+    import stylekit as ST
+    base = {"title": "AI 大模型的三年", "style": "auto",
+            "lines": [{"id": "l01", "kind": "hook", "text": "大模型改变了什么"},
+                      {"id": "l02", "kind": "body", "text": "算法和数据的规模一起上去了"}]}
+    a = ST.resolve_script_style(base)
+    b = ST.resolve_script_style(json.loads(json.dumps(base)))
+    assert json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str), \
+        "同一剧本两次解析结果不同（不确定性）"
+    typo = json.loads(json.dumps(base))
+    typo["lines"][1]["text"] += "。"
+    c = ST.resolve_script_style(typo)
+    assert c["style"] == a["style"], "改一个标点就换了风格: %s -> %s" % (a["style"], c["style"])
+    assert c["music"]["bpm"] == a["music"]["bpm"], "改一个标点就换了 BPM"
+    assert c["fingerprint"]["full"] != a["fingerprint"]["full"], "full 指纹没变（内容派生失效）"
+    other = {"title": "深夜学习指南", "style": "auto",
+             "lines": [{"id": "l01", "kind": "hook", "text": "为什么深夜反而能专注"},
+                       {"id": "l02", "kind": "body", "text": "整理笔记，写作，阅读都更安静"}]}
+    d = ST.resolve_script_style(other)
+    assert d["style"] != a["style"], "换了一部片风格却相同: %s" % d["style"]
+    return "%s -> %s（同一剧本稳定），换片 -> %s" % (a["style"], c["style"], d["style"])
+
+
+def t_voice_plan():
+    """28 声线计划：legacy 保持单声线；风格化时按 kind 换声线且确定性。"""
+    try:
+        import voicekit as VK
+    except Exception:                                       # noqa: BLE001
+        return "skip"
+    import stylekit as ST
+    s = {"title": "AI 大模型", "style": "auto",
+         "lines": [{"id": "l01", "kind": "hook", "text": "大模型改变了什么"},
+                   {"id": "l02", "kind": "body", "text": "算法和数据的规模一起上去了"},
+                   {"id": "l03", "kind": "quote", "text": "他说：这不可能"},
+                   {"id": "l04", "kind": "outro", "text": "它已经在我们身边了"}]}
+    plan = ST.resolve_script_style(s)
+    vp = VK.voice_plan(s, plan)
+    assert len(vp) == 4, "计划行数应为 4，收到 %d" % len(vp)
+    assert json.dumps(vp, sort_keys=True, default=str) == json.dumps(
+        VK.voice_plan(s, plan), sort_keys=True, default=str), "voice_plan 不确定"
+    personas = {r["persona"] for r in vp}
+    assert len(personas) >= 2, "4 句样片只用了一个声线: %s" % personas
+    tones = {r["tone"] for r in vp}
+    assert len(tones) >= 2, "语气档没有变化: %s" % tones
+    for r in vp:
+        for fld in ("voice", "rate", "pitch", "volume", "lead", "tail"):
+            assert r.get(fld) not in (None, ""), "计划行缺 %s: %r" % (fld, r.get("id"))
+    # legacy：单声线、body 语气、无抖动
+    leg = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
+    lp = ST.resolve_script_style(leg)
+    lvp = VK.voice_plan(leg, lp)
+    assert len({r["voice"] for r in lvp}) == 1, "legacy 出现多声线"
+    assert all(r["tone"] == "body" for r in lvp), "legacy 不该换语气档"
+    return "%d 句 / %d 把声音 / %d 档语气" % (len(vp), len(personas), len(tones))
+
+
+def t_font_family():
+    """29 字体族 + 字幕主题：换族必须换缓存键，主题字幕不能是黑底白字。"""
+    fams = list(getattr(K, "FAMILY_IDS", ()))
+    assert fams, "filmkit 没有 FONT_FAMILIES（v0.5 字体族没生效）"
+    widths = {}
+    for fam in fams:
+        f = K.font(40, "bold", fam)
+        assert f is not None
+        widths[fam] = K.text_w("中文测试ABC", f)
+        assert K.font(40, "bold", fam).size == 40
+    assert len(set(round(v, 3) for v in widths.values())) >= 2, \
+        "四个字体族量出来的宽度完全一样，缓存键很可能没带 family: %s" % widths
+    # 缓存键必须区分 family（否则 wrap 与绘制会用不同字体，文字溢出安全区）
+    a = K.wrap_cn_cached("这是一句用来测试换行缓存键的话", 40, 300, "reg", "sans")
+    b = K.wrap_cn_cached("这是一句用来测试换行缓存键的话", 40, 300, "reg", "kai")
+    assert isinstance(a, list) and isinstance(b, list)
+    # 旧签名必须仍然可用（用户脚本里有大量 font(46,"reg")）
+    assert K.font(46, "reg") is not None
+    assert K.wrap_cn_cached("旧调用", 40, 500) is not None
+    # 字幕主题：浅色主题不该画黑背板
+    from PIL import Image
+    try:
+        import stylekit as ST
+        th = ST.THEMES["magazine"]
+    except Exception:                                       # noqa: BLE001
+        th = None
+    if th is not None:
+        img = Image.new("RGB", (K.W, K.H), th["bg"])
+        K.draw_subtitle(img, "浅色主题字幕", theme=th)
+        px = img.getpixel((960, int((K.SUB_BAND[1] + K.SUB_BAND[3]) / 2)))
+        assert sum(px) > 200, "浅色主题的字幕背板是深色（%s），说明 theme 没生效" % (px,)
+    img2 = Image.new("RGB", (K.W, K.H), (0, 0, 0))
+    K.draw_subtitle(img2, "旧调用", theme=None)
+    return "%d 个字体族；最宽 %dpx 最窄 %dpx" % (len(fams), max(widths.values()), min(widths.values()))
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -539,6 +690,11 @@ CASES = [
     ("22 webengine 页面契约", t_webengine),
     ("23 qa_frames 函数齐全", t_qa_frames),
     ("24 配乐来源判定（off 不读旧配乐）", t_music_plan),
+    ("25 风格层：8 套主题过对比度", t_style_kits),
+    ("26 风格 legacy 兼容", t_style_legacy),
+    ("27 内容指纹确定性", t_style_determinism),
+    ("28 声线计划", t_voice_plan),
+    ("29 字体族与主题字幕", t_font_family),
 ]
 
 

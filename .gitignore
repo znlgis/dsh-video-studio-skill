@@ -11,6 +11,11 @@ out/
 work/
 tmp_scratch_*/
 .team/
+.tmpcheck/
+.demo/
+.smoke/
+tmp_visual_dev/
+undefined/
 
 # Python
 __pycache__/

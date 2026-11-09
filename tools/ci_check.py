@@ -41,7 +41,7 @@ REFS = SKILL / "references"
 ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
-                 "scenes", "scenes_demo"}
+                 "stylekit", "voicekit", "scenes", "scenes_demo"}
 MAX_FILE_BYTES = 400 * 1024
 
 _results: list[tuple[bool, str, str]] = []

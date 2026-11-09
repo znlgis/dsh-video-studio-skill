@@ -32,15 +32,20 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .            # 剧本模板（改文字即可）
 cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
-cp <SKILL_DIR>/scripts/{filmkit.py,render.py,selfcheck.py} .
+cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py} .
 # 可选（v0.3）：要程序化音效/配乐就一并拷；要走浏览器渲染再拷 webengine.py + assets/web/
-cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,qa_frames.py} .
+cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：24 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：29 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
-# 3) 改 film.json 的 lines[].text / sub / big / items
+# 3) 【v0.5 新步骤】先确认风格，再改文字
+#    film.json 的 "style": "auto" 会按内容自动选一套（画风+配乐+旁白一起变）；
+#    想锁定就写死风格 id。这条命令打印"为什么选这套"，并落盘 work/style.json。
+python render.py --script film.json --stage style
+
+# 3b) 改 film.json 的 lines[].text / sub / big / items
 #    text = 朗读文本（自然口语）；sub = 上屏字幕（短，一行优先）
 
 # 4) 母版预览（P6）：先只渲几张关键帧看构图/配色，别一上来渲全片
@@ -60,6 +65,7 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 分阶段跑（**每个 stage 只做自己的事**，不会再顺手重渲全片）：
 
 ```bash
+python render.py ... --stage style    # 只解析风格 -> work/style.json（画风/配乐/旁白/节奏一次定死）
 python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
 python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口）
 python render.py ... --stage cues     # 只出提示点 -> work/cues.json（声音跟着画面走）
@@ -72,7 +78,7 @@ python render.py ... --stage qa       # 只质检（只读输入，只写 work/q
 python render.py ... --stage stills   # 只渲母版静帧 + 联系表
 ```
 
-`--stage all` 的完整顺序：`tts → layout → cues → score → sfx → audio → frames → mux → qa`。
+`--stage all` 的完整顺序：`style → tts → layout → cues → score → sfx → audio → frames → mux → qa`。
 **任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
 
 长片渲染（分块并行 + 断点续跑）：
@@ -94,8 +100,9 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 
 | 阶段 | 产出 | 关键动作 | 常见错误 |
 |---|---|---|---|
+| **P0.5 定风格** | `work/style.json` | `--stage style`：按内容选风格包，打印"为什么选这套" | 跳过 → 画风/配乐/旁白全片一个样（v0.4 的通病） |
 | **P0 定基准** | `CONVENTIONS.md` | 分辨率/帧率/时长/BPM→帧换算一次算死，全项目引用同一份 | 各文件自己写 `150` 这种魔数 → 幕边界对不齐 |
-| **P1 写剧本** | `film.json` | 每句拆 `text`（朗读）与 `sub`（字幕）；每段一个 `kind` | 一个字段两头用 → 字幕太长或读起来生硬 |
+| **P1 写剧本** | `film.json` | 每句拆 `text`（朗读）与 `sub`（字幕）；每段一个 `kind`；定 `style`（auto 或风格 id） | 一个字段两头用 → 字幕太长或读起来生硬；不写 style → 每部片长一个样 |
 | **P2 事实核查** | `FACTS.md` | 上屏的每个数字/年份有出处编号；建"不能上屏"黑名单 | 跳过这步 → 画面和旁白数字打架，评论区第一条就是你错了 |
 | **P3 TTS** | `work/tts/*.mp3` + `tts.json` | edge-tts 逐句合成，`ffmpeg -f f32le` 实测时长，磁盘缓存 | 按字数估时长 → 字幕漂移 |
 | **P4 排时间轴** | `work/timeline.json` + `sub.srt` | `dur = lead + 实测语音 + tail`，句读必须在本段内 | 段太短 → 旁白被下一段截断 |
@@ -115,6 +122,10 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 
 > 上面两行是**本机空载**实测口径（换机、重负载画面都会变；详见 §12）。别把区间当保证。
 | 纯数据动画 | **manim**（若已安装） | 视场景而定 | 数学/公式推导 |
+
+> **v0.5 注意**：风格包的主题化目前只覆盖 **PIL 引擎**（`engine: pil`，默认）。
+> `--engine web` 的页面（`assets/web/`）仍是 v0.4 的深蓝橙配色，不跟随 `style`；
+> 用 web 引擎时画风不会随内容变化，但配乐与旁白**照样**跟随风格包（它们不依赖渲染引擎）。
 
 **默认走 PIL**：依赖少（numpy+Pillow 就够）、启动快、确定性强、调试成本低。
 需要"一镜到底的粒子形变 / 实时着色器质感"才上浏览器方案——**v0.3 起它是真的可用了**，不再是"文档里说有"：
@@ -207,9 +218,14 @@ python render.py ... --engine web --stage cues   # 自动导出 work/cues.json
 
 ### 5.3 配乐（scorekit）
 
+> **v0.5 起先看 §5.5。** 配乐的"身份"（调式/调性/BPM/进行/音色/律动）由风格包决定，
+> 你通常只需要在 film.json 写 `"style": "auto"` 或一个风格 id，不用手调下面这些参数。
+
 ```json
-"bpm": 120,
-"music": {"enabled": true, "mode": "score", "key": "Dm", "gain_db": -1.5, "duck_db": 3.0,
+"bpm": "auto",
+"music": {"enabled": true, "mode": "score", "style": "auto", "mood": "auto",
+          "key": "auto", "seed": 7, "seed_from_content": true,
+          "gain_db": -1.5, "duck_db": 3.0,
           "sections": [{"at": "l01", "name": "intro", "energy": 0.3},
                        {"at": "l03", "name": "drive", "energy": 0.8}]}
 ```
@@ -251,7 +267,58 @@ python -c "import sfxkit; print(sfxkit.render('whoosh', dur=1.2).shape)"
    它的定位是**环境声**：基准电平要比同刻配乐低 10 dB 以上。
 3. **音量一律在成片混音里量**，不要按配方内部音量推断——混音时每个音效会先按峰值归一，配方里的"响"是没用的。
 
-### 5.5 混音链（照着做，别自创）
+### 5.5 风格包：画风 + 配乐 + 旁白一起变（v0.5 新增）
+
+**这是 v0.5 最重要的一节。** v0.4 及以前的通病是"内容换了、气质没换"：
+画风锁死在 scenes.py 的深蓝橙、配乐锁死在 Dm/120、旁白锁死在同一个 voice。
+用户的原话是「背景音乐风格都差不多、旁白声音都差不多、整体画风也差不多」。
+
+v0.5 引入 **风格包**：一个 `style` id **同时**决定画风、配乐、旁白声线和节奏。
+
+```json
+{"style": "auto"}
+```
+
+- `"auto"` = 按标题/章节/正文关键词自动选；零命中时按内容指纹稳定落桶
+  （同一份稿子永远同一个风格，不同稿子大概率不同）。
+- 写死 id 就锁定：`tech-deep` / `magazine` / `paper` / `vivid` / `mono` / `cinema` / `lo-fi` / `epic`。
+- **不写 `style` 字段 = `legacy`**：画风/配乐/旁白全部等于 v0.4，配乐逐样本一致（老项目无痛）。
+
+查表与环境：
+
+```bash
+python stylekit.py --list          # 8 套风格（含画风/配乐/旁白/节奏与对比度）
+python stylekit.py --show cinema   # 单套风格的完整字段
+python render.py ... --stage style # 用某份 film.json 解析风格并打印"为什么选这套"
+```
+
+| 风格 | 画风 | 配乐 | 旁白 |
+|---|---|---|---|
+| tech-deep | 深蓝渐变 + 橙 | 小调 100–124 / 琶音 + 铃声 | 男声叙述 + 青年开场 |
+| magazine | 米白 + 朱红，衬线 | 大调 88–100 / 电钢 | 女声叙述 + 权威引用 |
+| paper | 牛皮纸 + 靛青，楷体 | 大调 84–92 / 马林巴 | 软糯女声 + 男声引用 |
+| vivid | 深紫 + 柠檬黄，大字 | 大调 120–132 / 短促和弦 | 活泼女声开场 |
+| mono | 纯白 + 黑，超宽字距 | 极简 60–68 / 钢片琴 | 沉稳男声 + 女声引用 |
+| cinema | 近黑 + 青橙，扫描线 | 小调 76–84 / 弦乐铺底 | 纪录片男声 |
+| lo-fi | 暖灰 + 薄荷 | 大调 72–84 / 电钢 + 轻鼓 | 温柔女声 |
+| epic | 近黑 + 金，衬线 | 小调 88–96 / 铜管 + 人声铺 | 有力男声 |
+
+**片内也要有呼吸**（不是整片一个死样子）：
+
+- 版式按章节轮换（同一章内不变）：left-stack / center-stack / split-right；
+- 镜头缓推、入场位移、条目落位步长都由主题决定（`item_stagger` 与 `cues()` 共用同一个值，音效不会错位）；
+- 旁白按 kind 换语气档（hook/body/quote/outro/emphasis/calm），引号句会自动换声线；
+- 配乐逐小节有能量弧线、配器渐入渐出、主奏轮换。
+
+**三条硬约束**（违反会让片子"花"或者被门禁拦）：
+
+1. 同一部片**不许跨明暗族**换主题（深蓝段直接切暖白段会精确触发闪烁门禁，观众也看着像换片）。
+2. 主题必须过 `stylekit.theme_lint` 的对比度体检（ink≥7 / muted≥4.5 / dim≥3 / accent≥4.5）。
+3. 旁白全片最多 2–3 把声音（`voice.max_distinct`），相邻句不换人——否则像广播剧而不是旁白。
+
+字段、指纹规则、加第 9 套风格的步骤见 **references/style-packs.md**。
+
+### 5.6 混音链（照着做，别自创）
 
 ```
 旁白(单声道, 居中) ─┐
@@ -293,7 +360,7 @@ python -c "import sfxkit; print(sfxkit.render('whoosh', dur=1.2).shape)"
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（24 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（29 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 ```
 
@@ -462,7 +529,7 @@ v0.4 给了两条真正能用的路：
 |---|---|
 | `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
 | `scripts/render.py` | 编排器：**10 个独立 stage**、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
-| `scripts/selfcheck.py` | 回归自检：**24 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
+| `scripts/selfcheck.py` | 回归自检：**29 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
 | `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
@@ -504,7 +571,7 @@ v0.4 给了两条真正能用的路：
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 24 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 11 / FAIL 0
+> 自检：selfcheck PASS 29 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 11 / FAIL 0
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```
@@ -614,7 +681,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 24 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 29 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（24 项，会真起无头浏览器，约 15 秒）

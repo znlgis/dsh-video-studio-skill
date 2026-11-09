@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""render.py — 一条命令从剧本到成片（v0.3.0）。
+"""render.py — 一条命令从剧本到成片（v0.5.0）。
 
     python render.py --script film.json --scenes scenes.py --out out/film.mp4 [--stage all]
 
 阶段（每个 stage 只做自己的事，不顺手重渲全片）：
-    tts     逐句合成旁白 + 实测时长（带输入校验的缓存）
+    style   解析风格包 -> work/style.json（画风/配乐/旁白/节奏一次定死，v0.5）
+    tts     逐句合成旁白 + 实测时长（带输入校验的缓存；按声线计划换人换语气）
     layout  由实测时长排时间轴 -> timeline.json / sub.srt / sub.ass（含停留窗口 hold）
     cues    画面提示点 -> work/cues.json（web 引擎从页面导出，pil 引擎从 film.json 生成）
     score   程序化配乐 -> work/music.wav（scorekit；无则跳过）
@@ -15,7 +16,7 @@
     qa      质检 + 抽帧 + 联系表 + 帧级深检（闪烁/空窗/音画同步）
     stills  只渲染若干关键帧做母版预览（不生成视频）
 
-依赖顺序：tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa。
+依赖顺序：style -> tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa。
 --stage all 按顺序跑完；单跑某个 stage 时，若前置产物缺失会明确报错并提示先跑哪个。
 --engine 覆盖 film.json 的 engine：pil = Pillow 逐帧（默认，依赖最少）；web = 无头浏览器逐帧。
 """
@@ -37,7 +38,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import filmkit as K
 
-STAGES = ("tts", "layout", "cues", "score", "sfx", "audio", "frames", "mux", "qa", "stills", "all")
+STAGES = ("style", "tts", "layout", "cues", "score", "sfx", "audio", "frames",
+          "mux", "qa", "stills", "all")
+
+# _render_range 每帧都要主题：按 script 对象缓存一次，避免每帧重新解析（几百毫秒的浪费）
+_THEME_CACHE = {}
 
 
 def _setup_stdio():
@@ -152,12 +157,18 @@ def load_script(p) -> dict:
     for k in ("music", "sfx", "web"):
         if s.get(k) is not None and not isinstance(s.get(k), dict):
             raise SystemExit("film.json 的 %s 必须是对象（当前是 %s）" % (k, type(s[k]).__name__))
-    if s.get("bpm") not in (None, ""):
+    # v0.5：bpm 允许 "auto"（由 stylekit 按风格梯度 + 内容指纹决定）。
+    # 同时允许写在 music.bpm 里（优先级更高）。
+    for _k, _v in (("bpm", s.get("bpm")),
+                   ("music.bpm", (s.get("music") or {}).get("bpm"))):
+        if _v in (None, "") or (isinstance(_v, str) and _v.strip().lower() == "auto"):
+            continue
         try:
-            if float(s["bpm"]) <= 0:
+            if float(_v) <= 0:
                 raise ValueError("必须大于 0")
         except (TypeError, ValueError) as e:
-            raise SystemExit("film.json 的 bpm 必须是正数（收到 %r：%s）" % (s["bpm"], e)) from e
+            raise SystemExit("film.json 的 %s 必须是正数或 \"auto\"（收到 %r：%s）"
+                             % (_k, _v, e)) from e
     seen = set()
     for i, ln in enumerate(lines):
         if not isinstance(ln, dict):
@@ -181,10 +192,108 @@ def _need(cond, msg):
         raise SystemExit("[前置产物缺失] " + msg)
 
 
+# ---------------------------------------------------------------- 风格解析（v0.5.0）
+def _stylekit():
+    """惰性 import stylekit；缺文件时给一句能照着做的错，而不是 ModuleNotFoundError。"""
+    try:
+        import stylekit as ST
+        return ST
+    except Exception as e:                                  # noqa: BLE001
+        raise SystemExit("[缺少 stylekit] v0.5 起 render.py 需要同目录的 stylekit.py"
+                         "（skills/video-studio/scripts/stylekit.py）：%s" % e)
+
+
+def resolve_style(script, work=None, verbose=True):
+    """解析风格计划并挂到 script["_style"] 上（同一进程内各 stage 共享）。
+
+    纯函数 + 落盘 work/style.json（审计用：用户能看到"为什么是这套风格"）。
+    """
+    if isinstance(script.get("_style"), dict):
+        return script["_style"]
+    ST = _stylekit()
+    plan = ST.resolve_script_style(script)
+    # 主题体检：坏主题现在拦，不要等渲完 300 帧
+    bad = ST.theme_lint(ST.THEMES[plan["theme_id"]])
+    if bad:
+        raise SystemExit("[主题体检失败] %s：%s" % (plan["theme_id"], "；".join(bad)))
+    script["_style"] = plan
+    if work and verbose:
+        path = os.path.join(work, "style.json")
+        try:
+            os.makedirs(work, exist_ok=True)
+            json.dump(plan, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] style.json 落盘失败：%s" % e)
+    return plan
+
+
+def _theme_for(script):
+    """返回当前片的主题字典；legacy 返回 None（= v0.4 的硬编码外观，逐字节兼容）。"""
+    plan = script.get("_style") if isinstance(script.get("_style"), dict) else None
+    if plan is not None and plan.get("legacy"):
+        return None
+    plan = resolve_style(script)
+    if plan.get("legacy"):
+        return None
+    return _stylekit().THEMES[plan["theme_id"]]
+
+
+def _print_style(plan):
+    m = plan["music"]
+    v = plan["voice"]
+    print("   风格: %s（%s）%s" % (plan["style"], plan["style_source"],
+                                  "" if plan["legacy"] else " / " + plan["style_name"]))
+    print("        理由: %s" % "；".join(plan["style_reason"]))
+    print("        主题: %s  版式: %s" % (plan["theme_id"],
+                                         ",".join(sorted(set(plan["chapter_layout"].values())))
+                                         or plan["layout_default"]))
+    print("        配乐: %s  BPM %g（%s）  调性 %s（%s）  mood %s"
+          % (m["style"], m["bpm"], m["bpm_source"], m["key"], m["key_source"], m["mood"]))
+    if v["map"]:
+        print("        旁白: %s" % "  ".join("%s=%s" % kv for kv in sorted(v["map"].items())))
+    p = plan["pacing"]
+    print("        节奏: lead %.2f / tail %.2f / min_dur %.1f / 条目步长 %.2f"
+          % (p["lead"], p["tail"], p["min_dur"], p["item_stagger"]))
+
+
+def st_style(script, work):
+    print("== Style")
+    plan = resolve_style(script, work)
+    _print_style(plan)
+    return plan
+
+
 # ---------------------------------------------------------------- TTS
+def _voice_plan(script, plan):
+    """声线计划（voicekit）。缺 voicekit 时返回 None -> tts_batch 走 v0.4 单声线路径。"""
+    try:
+        import voicekit as VK
+    except Exception as e:                                  # noqa: BLE001
+        print("   [WARN] 没有 voicekit.py，本次旁白单声线（v0.4 行为）：%s" % e)
+        return None
+    try:
+        vp = VK.voice_plan(script, plan)
+    except Exception as e:                                  # noqa: BLE001
+        print("   [WARN] voicekit 解析失败，退回单声线：%s" % e)
+        return None
+    return vp
+
+
 def st_tts(script, work, force=False):
     lines = script["lines"]
+    plan = resolve_style(script, work)
     print("== TTS (%d 句)" % len(lines))
+    if plan["legacy"]:
+        print("   声线: v0.4 兼容（单一声线 %s）" % script.get("voice", "zh-CN-YunxiNeural"))
+        vp = None
+    else:
+        vp = _voice_plan(script, plan)
+        if vp:
+            import voicekit as VK
+            print(VK.describe(vp))
+            json.dump({"style": plan["style"], "policy": plan["voice"]["policy"], "lines": vp},
+                      open(os.path.join(work, "voice_plan.json"), "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=1)
     if force:
         shutil.rmtree(os.path.join(work, "tts"), ignore_errors=True)
     done = K.tts_batch(lines, work,
@@ -192,7 +301,12 @@ def st_tts(script, work, force=False):
                        rate=script.get("rate", "+0%"),
                        pitch=script.get("pitch", "+0Hz"),
                        workers=int(script.get("tts_workers", 4)),
-                       trim=bool(script.get("trim_silence", True)))
+                       trim=bool(script.get("trim_silence", True)),
+                       plan=None if vp is None else
+                       [{"voice": r["voice"], "rate": r["rate"], "pitch": r["pitch"],
+                         "volume": r.get("volume", "+0%"),
+                         "persona": r.get("persona"), "tone": r.get("tone")} for r in vp],
+                       trim_db=float(script.get("trim_db", -42.0)))
     json.dump(done, open(os.path.join(work, "tts.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     total = sum(float(x["dur"]) for x in done)
@@ -203,21 +317,46 @@ def st_tts(script, work, force=False):
 # ---------------------------------------------------------------- 排版
 def st_layout(script, work, lines=None):
     lines = lines or json.load(open(os.path.join(work, "tts.json"), encoding="utf-8"))
+    plan = resolve_style(script, work)
     print("== Layout")
+    pace = plan["pacing"]
+    # 逐句 lead/tail：voicekit 的 voice_plan 已经算好每句的停顿，这里只负责喂给时间轴。
+    # 旧项目（legacy）没有 voice_plan.json，lead_map/tail_map 都是 None -> 全局常数，v0.4 行为。
+    vp = None
+    vp_path = os.path.join(work, "voice_plan.json")
+    if not plan["legacy"] and os.path.exists(vp_path):
+        try:
+            vp = json.load(open(vp_path, encoding="utf-8"))["lines"]
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] voice_plan.json 读不了，逐句停顿退回全局值：%s" % e)
+    lead_map = {r["id"]: float(r["lead"]) for r in vp} if vp else None
+    tail_map = {r["id"]: float(r["tail"]) for r in vp} if vp else None
+    if vp and script.get("tail_map"):
+        tail_extra = script["tail_map"]
+        for lid, v in tail_extra.items():
+            if lid in tail_map:
+                tail_map[lid] = float(v)
     tl = K.build_timeline(lines,
-                          lead=script.get("lead", 0.55),
-                          tail=script.get("tail", 0.85),
-                          min_dur=script.get("min_dur", 3.0),
-                          tail_map=script.get("tail_map"),
+                          lead=script.get("lead", pace["lead"]),
+                          tail=script.get("tail", pace["tail"]),
+                          min_dur=script.get("min_dur", pace["min_dur"]),
+                          tail_map=tail_map or script.get("tail_map"),
+                          lead_map=lead_map,
+                          hold=script.get("hold", pace["hold"]),
                           max_dur=script.get("max_dur"))
     tl["title"] = script["title"]
     tl["voice"] = script.get("voice", "zh-CN-YunxiNeural")
     tl["crf"] = script.get("crf", 18)
     tl["preset"] = script.get("preset", "medium")
+    tl["style"] = {"style": plan["style"], "theme_id": plan["theme_id"],
+                   "legacy": plan["legacy"],
+                   "chapter_layout": plan["chapter_layout"],
+                   "item_stagger": pace["item_stagger"]}
     json.dump(tl, open(os.path.join(work, "timeline.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
-    n_ass = K.write_ass(tl["scenes"], os.path.join(work, "sub.ass"))
+    theme = (K._stylekit().THEMES[plan["theme_id"]] if not plan["legacy"] else None)
+    n_ass = K.write_ass(tl["scenes"], os.path.join(work, "sub.ass"), theme=theme)
     print("   总时长 %.2fs / %d 帧 / %d 段 / srt %d 条 / ass %d 条"
           % (tl["total"], tl["frames"], len(tl["scenes"]), n_srt, n_ass))
     # 安全区自查：字幕一旦越界，mux 前就能发现
@@ -359,10 +498,31 @@ def st_score(script, work, tl):
                 s2["start"] = K.cue_time(s2.pop("at"), tl["scenes"])
             fixed.append(s2)
         sections = fixed
+    plan_s = resolve_style(script)
+    mp = plan_s["music"]
     t0 = time.time()
-    samples, report = sk.render(float(tl["total"]), bpm=float(script["bpm"]),
-                                key=str(mus.get("key") or "Dm"), anchors=anchors,
-                                sections=sections, seed=int(mus.get("seed", 7)))
+    style_arg = None if plan_s["legacy"] else str(mp.get("style") or plan_s["style"])
+    kwargs = dict(bpm=float(mp["bpm"]), key=str(mp["key"] or "Dm"), anchors=anchors,
+                  sections=sections, seed=int(mp["seed_effective"]))
+    # scorekit 0.5 起：style/mood + music_plan（一次把 bpm/key/mood/seed 全交出去，
+    # 免得两处默认值打架）+ pace（把过碎的段落并进前一段）。
+    # 旧 scorekit 没有这些 kwargs -> TypeError -> 自动退回老接口，不阻断出片。
+    pace = {"min_dur": float(plan_s["pacing"]["min_dur"]),
+            "hold": float(plan_s["pacing"]["hold"])}
+    try:
+        samples, report = sk.render(float(tl["total"]), style=style_arg,
+                                    mood=str(mp.get("mood") or "steady"),
+                                    music_plan=mp, pace=pace, **kwargs)
+    except TypeError:
+        try:
+            samples, report = sk.render(float(tl["total"]), style=style_arg,
+                                        mood=str(mp.get("mood") or "steady"), **kwargs)
+        except TypeError:
+            samples, report = sk.render(float(tl["total"]), **kwargs)
+    if report and not plan_s["legacy"]:
+        print("   配乐风格: %s / mood %s / %s BPM / %s"
+              % (report.get("style") or style_arg, mp.get("mood"),
+                 report.get("bpm"), report.get("key")))
     out = os.path.join(work, "music.wav")
     sk.save(out, samples)
     if report:
@@ -407,13 +567,18 @@ def st_sfx(script, work, tl):
 
 
 def _voice_track(tl, script):
-    """把逐句旁白铺成一条总线，返回 (n,) 单声道。"""
+    """把逐句旁白铺成一条总线，返回 (n,) 单声道。
+
+    v0.5.0 修一个 v0.4 的静默 bug：voice_gain 原来在这里和 mix_film 里**各乘一次**
+    （净效果 voice_gain^2，默认 1.0 时看不出来）。现在全局增益只在 mix_film 乘一次，
+    这里只负责**逐句**增益（voicekit 的 gain_db，默认 0 dB -> 1.0，与 v0.4 一致）。
+    """
     bus = K.AudioBus(tl["total"])
     for s in tl["scenes"]:
         pcm = K.decode_pcm(s["path"])
-        bus.place(pcm, s["voice_start"], gain=script.get("voice_gain", 1.0),
+        gdb = float(s.get("gain_db", 0.0) or 0.0)
+        bus.place(pcm, s["voice_start"], gain=10.0 ** (gdb / 20.0),
                   fade_in=0.02, fade_out=0.06)
-        # 记录真实语音范围，给后续"停顿处补呼吸"之类的处理用
     return bus.bus[: int(round(float(tl["total"]) * K.SR))].copy()
 
 
@@ -487,11 +652,18 @@ def st_audio(tl, work, script):
         sfx = bus.bus[: int(round(total * K.SR))].copy()
         print("   音效: 旧版转场 whoosh（没有 cues.json）")
 
+    plan_s = resolve_style(script)
+    # 风格化的 duck 深度：轻快/极简风格的配乐更"薄"，让位可以浅一点；
+    # 电影/史诗要压得更狠。用户显式写 music.duck_db 时永远以用户为准。
+    duck_default = 3.0
+    if not plan_s["legacy"]:
+        duck_default = {"mono": 2.0, "lo-fi": 2.5, "magazine": 2.5,
+                        "cinema": 4.5, "epic": 4.5}.get(plan_s["style"], 3.0)
     samples = K.mix_film(voice, music, sfx, total=total,
                          voice_gain=float(script.get("voice_gain", 1.0)),
                          music_gain_db=float(mus.get("gain_db", -1.5)),
                          sfx_gain_db=float((script.get("sfx") or {}).get("mix_gain_db", 0.0)),
-                         duck_db=float(mus.get("duck_db", 3.0)))
+                         duck_db=float(mus.get("duck_db", duck_default)))
     out = os.path.join(work, "audio.wav")
     peak = K.wav_write(out, samples)
     print("   audio.wav %.2fs  峰值 %.3f  声道 %d" % (K.wav_dur(out), peak, 2))
@@ -516,14 +688,23 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
         frame = mod.draw_frame(s, lt, s["dur"], t, script, fi)
         if frame is None:
             raise RuntimeError("场景 %s 在 t=%.2fs 返回 None" % (s.get("id"), t))
-        frame = K.draw_subtitle(frame, K.sub_at(scenes, t, script.get("sub_max_hold")))
+        th = _theme_for(script) if _THEME_CACHE.get("k") != id(script) else _THEME_CACHE.get("th")
+        if id(script) != _THEME_CACHE.get("k"):
+            _THEME_CACHE.update(k=id(script), th=th)
+        frame = K.draw_subtitle(frame, K.sub_at(scenes, t, script.get("sub_max_hold")),
+                                theme=th)
         fade = 1.0
         if t < 0.5:
             fade *= K.ease_out(t / 0.5)
         if t > total - 0.8:
             fade *= max(0.0, (total - t) / 0.8)
         if fade < 0.999:
-            frame = K.Image.blend(K.Image.new("RGB", (K.W, K.H), (0, 0, 0)), frame, fade)
+            # 浅色主题淡入淡出到纯黑会出现"闪一下黑"，非常廉价。
+            # transition=wash 时淡向主题底色，观感是"渐显"而不是"黑场"。
+            wipe = (0, 0, 0)
+            if th is not None and str(th.get("transition") or "black") == "wash":
+                wipe = tuple(th["bg2"])
+            frame = K.Image.blend(K.Image.new("RGB", (K.W, K.H), wipe), frame, fade)
         sink.write(frame)
         if progress and fi - last_rep >= 300:
             last_rep = fi
@@ -550,6 +731,9 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
         return _st_frames_web(tl, work, script, jobs=jobs, resume=resume)
     script = dict(script)
     script["_total"] = tl["total"]           # 场景算全局进度条要用
+    # 分块 worker 是 spawn 出来的新进程：主题必须随快照走，否则子进程算出的
+    # _theme_for 与父进程不一致 -> 拼接处出现"半部片换了配色"。
+    script.setdefault("_style", resolve_style(script))
     crf = int(script.get("crf", 18))
     preset = script.get("preset", "medium")
     total_frames = tl["frames"]
@@ -701,6 +885,7 @@ def st_mux(silent, audio, out, script):
 
 def st_qa(film, tl, work, scenes_mod=None, script=None):
     print("== QA")
+    th = _theme_for(script) if script is not None else None
     shots, refs = [], []             # refs: [(frac 下标, PIL 原图)]
     fracs = (0.08, 0.3, 0.55, 0.78)
     ref_script = dict(script) if script is not None else None
@@ -723,7 +908,8 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
             try:
                 fr = scenes_mod.draw_frame(s, sec - s["start"], s["dur"], sec, ref_script,
                                            int(round(sec * tl["fps"])))
-                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, ref_script.get("sub_max_hold")))
+                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, ref_script.get("sub_max_hold")),
+                                     theme=th)
                 refs.append((k, fr))
             except Exception as e:      # noqa: BLE001
                 print("   [WARN] 参考帧渲染失败:", e)
@@ -739,7 +925,7 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
         print("   [WARN] 没有场景函数参考帧（web 引擎或 scenes.py 缺失），锐度比门禁本次跳过")
     rep = K.qa_report(film, expect_frames=tl["frames"], ref_img=ref_img,
                       ref_sec=ref_sec, expected_subtitles=len(tl["scenes"]),
-                      notes=os.path.join(work, "sub.srt"))
+                      notes=os.path.join(work, "sub.srt"), theme=th)
     pr = rep["probe"]
     f = pr.get("format", {})
     print("   时长 %.2fs  大小 %.1f MB  码率 %.2f Mbps" % (
@@ -819,6 +1005,7 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
     print("== Stills")
     script = dict(script)
     script["_total"] = tl["total"]
+    script.setdefault("_style", resolve_style(script))
     outdir = os.path.join(work, "stills")
     os.makedirs(outdir, exist_ok=True)
     by_id = {s["id"]: s for s in tl["scenes"]}
@@ -844,7 +1031,8 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
         if tuple(fr.size) != (K.W, K.H):
             raise RuntimeError("场景 %s 在 t=%.2fs 返回 %dx%d，期望 %dx%d（stills 与 FrameSink 一样严格）"
                                % (sid, tg, fr.size[0], fr.size[1], K.W, K.H))
-        fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, script.get("sub_max_hold")))
+        fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, script.get("sub_max_hold")),
+                             theme=_theme_for(script))
         p = os.path.join(outdir, "%s_%05.1f.png" % (sid, float(lt)))
         fr.save(p)
         made.append(p)
@@ -924,6 +1112,14 @@ def main():
         return mod
 
     stage = a.stage
+    if stage in ("all", "style"):
+        resolve_style(script, a.work)
+        if stage == "style":
+            print("== Style")
+            _print_style(script["_style"])
+            _need(os.path.exists(os.path.join(a.work, "style.json")), "style.json 没写出来")
+            return 0
+
     if stage in ("all", "tts"):
         lines = st_tts(script, a.work, force=a.force_tts)
         tl = st_layout(script, a.work, lines)

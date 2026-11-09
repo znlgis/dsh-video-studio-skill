@@ -137,7 +137,35 @@ trimmed = K.trim_silence(pcm, thresh_db=-42.0, keep_ms=80)   # 不是 trim_tail�
 # 轻 EQ：200 Hz 以下衰减 2 dB（去闷），3 kHz 提 1 dB（清晰度）
 ```
 
-角色多时固定音色映射：少年 YunxiaNeural、成年男 YunjianNeural、叙述 YunyangNeural、女声 XiaoxiaoNeural；同一角色全片不换。
+### 7.1 声线（persona）与语气（tone）—— v0.5.0
+
+v0.4 及以前全片只有一个 `voice/rate/pitch`，于是"每部片的旁白都差不多"。
+v0.5 引入 **persona（声线）× tone（语气档）**，由 `voicekit.py` 解析成逐句 spec：
+
+```json
+{"voice": {"map": {"hook": "bright_female", "body": "narrator_female", "quote": "authority_male"},
+           "jitter": 0.35, "max_distinct": 3}}
+```
+
+```bash
+python voicekit.py --list          # 9 个 persona + 6 个 tone（含实测响度补偿 gain_db）
+python voicekit.py --plan film.json  # 打印某份剧本的逐句声线计划（不发请求）
+```
+
+- **persona** 决定 edge-tts 音色 id + 基线 rate/pitch/volume/gain_db；
+- **tone** 决定相对偏移与句前/句后停顿：hook / body / quote / outro / emphasis / calm
+  （`body` 严格等于 v0.4 基准：lead 0.62 / tail 0.92 / 所有 delta=0）；
+- **内容规则**会自动升级语气：引号句 -> quote（并换到 quote 声线）、数字密集 -> emphasis、
+  问句/感叹 -> 稍快稍亮、长句 -> 降速加尾部留白；显式 `lines[].voice/tone` 优先级最高；
+- **jitter**（默认 0.35）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感；
+- **governor** 限制全片最多 `max_distinct` 把声音、相邻句不换人 —— 超过就变成广播剧，不是旁白。
+
+**响度校准**：不同音色的响度天然差 3–7 dB（实测 narrator_female 比 narrator_male 响约 5.7 dB），
+persona 表里的 `gain_db` 是**实测回填**的（`voicekit.py --calibrate` 可复测）。
+混音侧每句只应用一次增益（v0.5 顺手修掉了 v0.4 `voice_gain` 被乘两次的静默 bug）。
+
+**缓存键 v2**：`sha1(v2|text|voice|rate|pitch|volume|trim|trim_db)`。v0.4 的 key 不含 trim，
+于是把 `trim_silence` 改成 false 仍会命中旧的裁剪版 —— "关了裁剪其实没关"。v1 key 仍然保留给老缓存。
 
 ## 8. 混音自检（必做）
 

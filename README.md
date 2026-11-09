@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.5.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -16,7 +16,11 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > **v0.4.0**：修掉 4 处"门禁看着干净、其实没在查"的静默问题（`--resume` 复用旧分块、
 > `music.mode=off` 仍混入旧配乐、PIL 路线音画同步恒空、亮度静止判据误报 4 段），
 > 补上仓库级体检（`tools/ci_check.py`）、CI、`requirements.txt`，并修掉管道中文乱码。
-> 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §13。
+> **v0.5.0（风格包）**：解决"每部片都长一个样"。一个 `style` id 同时决定画风（8 套主题 ×
+> 3 种版式）、配乐（8 套风格：调池/BPM 梯度/进行/动机/配器/鼓型）、旁白（9 个声线 × 6 档语气）
+> 与节奏；`"style": "auto"` 按内容自动选，三级内容指纹保证"改错别字不换整首曲子"。
+> 不写 `style` 字段 = v0.4 行为（配乐 PCM 逐样本一致，selfcheck 有断言）。
+> 详见 [CHANGELOG.md](CHANGELOG.md)、SKILL.md §5.5 与 references/style-packs.md。
 
 ## 安装
 
@@ -53,6 +57,24 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 **时长 30.10 s / 1920×1080 / 30 fps / h264+aac 48 kHz / -16.0 LUFS / 真峰 -1.2 dBTP / 黑帧 0 /
 帧级深检：闪烁 0、空窗 0、画面静止 0**（音画同步在 PIL 路线上需要写 `visual_at` 才会真的查，见 SKILL.md §7）。
 
+## 效果：同一个模板，八种气质（v0.5）
+
+同一份文字，只改 `"style"`（画风 / 配乐 / 旁白 / 节奏一起变）：
+
+<p align="center"><img src="docs/styles/sheet-8-styles.png" width="100%" alt="8 套风格对比：科技深蓝 / 杂志暖白 / 手绘纸感 / 活力撞色 / 极简黑白 / 电影青橙 / 暖灰薄荷 / 深黑鎏金"></p>
+
+三份**不同题材**的短片（全流程真跑：TTS → 排轴 → 配乐 → 音效 → 混音 → 逐帧 → 编码 → 质检）：
+
+| 题材 | 自动选中的风格 | 配乐 | 旁白声线 | 质检 |
+|---|---|---|---|---|
+| AI 大模型的三年 | tech-deep 科技深蓝 | 小调 116BPM / Em | 青年开场 → 男声正文 → 女声引用 | PASS（17.3s，-16.0 LUFS） |
+| 手工木作的一天 | paper 手绘纸感 | 大调 84BPM / C | 女声 + 软糯女声正文 | PASS（19.9s） |
+| 深夜学习指南 | lo-fi 暖灰薄荷 | 大调 84BPM / G | 温柔女声 + 女声开场 | PASS（20.1s） |
+
+<p align="center"><img src="docs/styles/sheet-ai.png" width="32%" alt="AI 题材"><img src="docs/styles/sheet-craft.png" width="32%" alt="手作题材"><img src="docs/styles/sheet-night.png" width="32%" alt="深夜题材"></p>
+
+三片的联系表（左→右为时间顺序）肉眼可见不是同一套风格：深蓝科技 / 牛皮纸手作 / 冷灰薄荷深夜。
+
 ## 用法
 
 触发词：做一个视频 / 生成宣传片 / 把报告变成视频 / 做动画 / 配音配字幕 / 出成片 /
@@ -62,12 +84,12 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 
 ```bash
 mkdir -p myfilm && cd myfilm
-cp <SKILL_DIR>/assets/film.json .                       # 剧本模板
+cp <SKILL_DIR>/assets/film.json .                       # 剧本模板（"style": "auto"）
 cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
-cp <SKILL_DIR>/scripts/*.py .                           # filmkit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
+cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 24 条环境/回归断言（20 秒，不联网）
+python selfcheck.py                                     # 29 条环境/回归断言（20 秒，不联网）
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 ```
@@ -124,7 +146,7 @@ skills/video-studio/
                              quality-gates · pitfalls
   scripts/filmkit.py         生产内核（字体/排版/字幕/音频总线/CueBus/TTS/时间轴/编码/质检）
   scripts/render.py          编排器（10 个独立 stage、pil|web 双引擎、分块并行、断点续跑、母版预览）
-  scripts/selfcheck.py       回归自检（24 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（29 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）

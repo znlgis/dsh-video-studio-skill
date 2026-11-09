@@ -1,0 +1,76 @@
+{
+ "generated": "2026-11-09",
+ "demos": [
+  {
+   "demo": "ai",
+   "title": "科技深蓝",
+   "style": "tech-deep",
+   "bpm": 116,
+   "key": "Em",
+   "mood": "steady",
+   "duration": 17.26,
+   "personas": [
+    "young_male",
+    "narrator_male",
+    "narrator_female"
+   ],
+   "tones": [
+    "emphasis",
+    "body",
+    "quote",
+    "outro"
+   ],
+   "layouts": [
+    "left-stack",
+    "split-right"
+   ],
+   "spectral_centroid_hz": 5784
+  },
+  {
+   "demo": "craft",
+   "title": "手绘纸感",
+   "style": "paper",
+   "bpm": 88,
+   "key": "G",
+   "mood": "hopeful",
+   "duration": 19.855,
+   "personas": [
+    "narrator_female",
+    "warm_female"
+   ],
+   "tones": [
+    "hook",
+    "body",
+    "outro"
+   ],
+   "layouts": [
+    "left-stack",
+    "center-stack"
+   ],
+   "spectral_centroid_hz": 4899.4
+  },
+  {
+   "demo": "night",
+   "title": "暖灰薄荷",
+   "style": "lo-fi",
+   "bpm": 84,
+   "key": "F",
+   "mood": "calm",
+   "duration": 20.108,
+   "personas": [
+    "warm_female",
+    "narrator_female"
+   ],
+   "tones": [
+    "hook",
+    "body",
+    "outro"
+   ],
+   "layouts": [
+    "left-stack",
+    "split-right"
+   ],
+   "spectral_centroid_hz": 5573.8
+  }
+ ]
+}

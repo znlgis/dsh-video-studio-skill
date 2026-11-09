@@ -1,13 +1,12 @@
 {
+ "_comment": "v0.5 模板：style 决定画风+配乐+旁白+节奏。'auto' = 按内容自动选；写死风格 id 可锁定（tech-deep/magazine/paper/vivid/mono/cinema/lo-fi/epic）。删掉 style 字段 = 回到 v0.4 行为（逐样本兼容）。节奏（lead/tail/min_dur/hold）默认由风格给，想覆盖就自己加字段。",
  "title": "测试片 demo",
  "end_text": "完",
+ "style": "auto",
  "voice": "zh-CN-YunxiNeural",
  "rate": "+6%",
- "lead": 0.62,
- "tail": 0.92,
- "min_dur": 3.2,
- "hold": 0.0,
- "bar": 0.0,
+ "pitch": "+0Hz",
+ "bar": 0,
  "sub_max_hold": null,
  "trim_silence": true,
  "tts_workers": 4,
@@ -19,28 +18,63 @@
  "music": {
   "enabled": true,
   "mode": "score",
-  "key": "Dm",
+  "style": "auto",
+  "mood": "auto",
+  "bpm": "auto",
+  "key": "auto",
   "seed": 7,
+  "seed_from_content": true,
   "gain_db": -1.5,
-  "duck_db": 3.0,
-  "seg": 4.0,
+  "duck_db": 3,
+  "seg": 4,
   "amp": 0.05,
   "gain": 0.9,
   "xfade": 1.2,
-  "chords": [[220, 261.63, 329.63], [174.61, 220, 261.63], [196, 246.94, 293.66]]
+  "chords": [
+   [
+    220,
+    261.63,
+    329.63
+   ],
+   [
+    174.61,
+    220,
+    261.63
+   ],
+   [
+    196,
+    246.94,
+    293.66
+   ]
+  ]
  },
  "sfx": {
   "enabled": true,
-  "gain_db": 0.0,
+  "gain_db": 0,
   "cues": [
-   {"at": "l02-0.15", "type": "whoosh", "dur": 0.9, "gain": -2},
-   {"at": "l03", "type": "riser", "dur": 2.0, "gain": -4},
-   {"at": "l03+0.05", "type": "impact", "size": 1.0, "gain": -3}
+   {
+    "at": "l02-0.15",
+    "type": "whoosh",
+    "dur": 0.9,
+    "gain": -2
+   },
+   {
+    "at": "l03",
+    "type": "riser",
+    "dur": 2,
+    "gain": -4
+   },
+   {
+    "at": "l03+0.05",
+    "type": "impact",
+    "size": 1,
+    "gain": -3
+   }
   ]
  },
  "web": {
   "entry": "",
-  "chunk_s": 30.0
+  "chunk_s": 30
  },
  "whoosh": true,
  "whoosh_amp": 0.055,
@@ -63,11 +97,26 @@
    "big": "五步成片",
    "hold": 0.6,
    "items": [
-    {"text": "剧本 film.json", "ok": true},
-    {"text": "旁白 edge-tts 实测时长", "ok": true},
-    {"text": "时间轴 timeline.json", "ok": true},
-    {"text": "逐帧 PIL 渲染", "ok": true},
-    {"text": "numpy 采样级混音", "ok": true}
+    {
+     "text": "剧本 film.json",
+     "ok": true
+    },
+    {
+     "text": "旁白 edge-tts 实测时长",
+     "ok": true
+    },
+    {
+     "text": "时间轴 timeline.json",
+     "ok": true
+    },
+    {
+     "text": "逐帧 PIL 渲染",
+     "ok": true
+    },
+    {
+     "text": "numpy 采样级混音",
+     "ok": true
+    }
    ]
   },
   {
@@ -79,10 +128,22 @@
    "sub": "直通编码 / 安全区 / 响度",
    "big": "画质三件事",
    "items": [
-    {"text": "rawvideo -> libx264 CRF17", "ok": true},
-    {"text": "字幕不越出安全区", "ok": true},
-    {"text": "-16 LUFS / -1.5 dBTP", "ok": true},
-    {"text": "每帧确定性可复现", "ok": true}
+    {
+     "text": "rawvideo -> libx264 CRF17",
+     "ok": true
+    },
+    {
+     "text": "字幕不越出安全区",
+     "ok": true
+    },
+    {
+     "text": "-16 LUFS / -1.5 dBTP",
+     "ok": true
+    },
+    {
+     "text": "每帧确定性可复现",
+     "ok": true
+    }
    ]
   },
   {

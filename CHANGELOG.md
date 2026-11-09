@@ -2,6 +2,63 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.5.0 — 风格包：让每部片的画风 / 配乐 / 旁白都不一样
+
+> 这一版解决的是**同质化**，不是加功能。用户的原话：
+> 「背景音乐风格都差不多、旁白声音都差不多、整体画风也差不多，希望随内容变化，生动活泼不死板。」
+>
+> 根因不是"参数不够多"，而是**身份参数全是模块级常量**：画风锁死在 scenes.py 的 THEME、
+> 配乐锁死在 scorekit 的 Dm/120、旁白锁死在 render.py 的单个 voice，而 SKILL.md 教的流程
+> 是"拷模板 -> 只改 lines[].text" —— 内容换了，气质不可能换。
+
+### 新增：风格包（style packs）
+
+| 层 | 之前 | 现在 |
+|---|---|---|
+| 画风 | 深蓝底 + 橙，3 个写死的绘制函数 | 8 套主题（8 组配色/材质/字体族/版式/HUD）+ 3 种版式骨架 |
+| 配乐 | Dm / 120BPM / 3 套进行 / 固定动机 | 8 套配乐风格（调池/BPM 梯度/进行/动机/配器/鼓型/空间）+ 大调与七和弦 |
+| 旁白 | 全片一个 voice/rate/pitch | 9 个 persona × 6 档 tone，按 kind 与文本规则自动切换 |
+| 节奏 | 全局 lead/tail/min_dur | 每个风格一套 pacing，逐句可覆盖 |
+
+- **一个 style id 同时决定三者**（不允许各配各的，否则会"极简黑白画面 + 史诗管弦"）。
+  内置 `tech-deep / magazine / paper / vivid / mono / cinema / lo-fi / epic`。
+- `"style": "auto"` 按内容自动选：关键词命中即锁定，零命中按指纹稳定落桶。
+- **三级内容指纹**（full/tempo/style）：改一个错别字不会换整首曲子，换一部片三个都变。
+- 片内也有变化：版式按章节轮换、镜头缓推、入场位移、配器渐入渐出、主奏轮换、语气档切换。
+
+### 新增文件
+
+- `scripts/stylekit.py`（909 行，纯标准库）：8 套主题 + 8 套风格包 + 内容指纹 + 对比度门禁 + CLI。
+- `scripts/voicekit.py`（872 行）：9 个 persona + 6 档 tone + 逐句 voice_plan + 实测响度校准。
+- `references/style-packs.md`：字段表、指纹规则、加第 9 套风格、常见误用。
+
+### 修掉的两个静默 bug
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 把 `trim_silence` 改成 false，旁白仍是被裁过的 | 缓存 key `sha1(text|voice|rate|pitch)` 不含 trim，旧 meta 的 trimmed=True 仍命中 | 升 v2 key（含 volume/trim/trim_db）；v1 key 保留给老缓存 |
+| `voice_gain` 一调就偏（1.2 变成 1.44） | 在 `_voice_track` 和 `mix_film` 里**各乘一次** | 全局增益只在 mix_film 乘一次；逐句 gain 只在 voice bus 乘一次 |
+
+### 门禁与回归
+
+- **新增对比度门禁**：`stylekit.theme_lint()` 在 `--stage style` 就拦
+  （ink≥7 / muted≥4.5 / dim≥3 / accent≥4.5 / bg-bg2 亮度差≥0.002）。
+  8 套主题全部实测通过；v0.4 全仓 `grep 对比度` 是 0 处命中。
+- **selfcheck 24 → 29 条**：新增风格层一致性、legacy 精确兼容、指纹确定性、声线计划、
+  字体族与主题字幕 5 条。
+- **legacy 逐字节兼容**（实测，不是承诺）：`scorekit.render(style=None)` 的 PCM sha256
+  与 v0.4 完全一致（两个用例：12s 无锚点 + 10s 带锚点）；`assets/scenes.py` 的 hook/body/outro
+  三帧 sha256 与 v0.4 一致；没问题就是没问题，不是"应该一样"。
+- **性能**：styled 配乐比 legacy 慢 2–3 倍（24s 约 5.2s、60s 约 15–25s），仍在原预算内。
+
+### 升级须知（v0.4 -> v0.5）
+
+1. **老项目不用改**：film.json 里没有 `style` 字段就自动走 legacy，配乐逐样本一致。
+2. 想用新特性：加 `"style": "auto"`（或一个风格 id）；模板 film.json 已经是 auto。
+3. 新工作目录要多拷两个文件：`scripts/stylekit.py`（必需）、`scripts/voicekit.py`（可选）。
+4. `--stage` 多了一个 `style`，且 `all` 的顺序变成 `style -> tts -> ...`（style 必须先跑，它决定声线）。
+5. 改过 `trim_silence`/`voice_gain` 的项目，第一次跑会重新合成 TTS（key 变了），属预期。
+
 ## 0.4.0
 
 > 这一版不是加功能，而是**修"门禁看着干净、其实没在查"**。上一版（0.3.0）把四条质检腿都补齐了，

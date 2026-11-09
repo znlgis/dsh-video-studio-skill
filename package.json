@@ -1,7 +1,7 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "0.4.0",
-  "description": "Video Studio skill plugin for DeepSeek Harness: code-generated Chinese videos with measured TTS timeline, deterministic PIL/browser frame rendering, programmatic SFX and score, cue-driven sound sync, ffmpeg encoding, sample-level mixing and multi-layer QA gates.",
+  "version": "0.5.0",
+  "description": "Video Studio skill plugin for DeepSeek Harness: style-pack driven code-generated Chinese videos — one style id decides palette/typography/music style/voice persona/pacing, measured TTS timeline, deterministic PIL/browser rendering, programmatic SFX and score, cue-driven sound sync, ffmpeg encoding, sample-level mixing and multi-layer QA gates.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -26,7 +26,12 @@
     "THIRD_PARTY_NOTICES.md",
     "skills",
     "!skills/**/__pycache__",
-    "!skills/**/*.pyc"
+    "!skills/**/*.pyc",
+    "docs/styles/sheet-8-styles.png",
+    "docs/styles/sheet-ai.png",
+    "docs/styles/sheet-craft.png",
+    "docs/styles/sheet-night.png",
+    "docs/styles/demo-results.json"
   ],
   "publishConfig": {
     "access": "public"
