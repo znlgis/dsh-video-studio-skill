@@ -42,6 +42,17 @@ HERE = Path(__file__).resolve().parent
 # ============================================================================
 
 KINDS = ("hook", "body", "quote", "outro", "emphasis", "calm")   # 也是 voicekit 的语气 id
+
+# 视觉场景类型（v0.9）：决定"这段画面长成什么构图"，与叙事 kind **正交**——
+#   kind 管声线/语气/配乐能量（voicekit / scorekit 读它）；
+#   type 只管构图（assets/scenes.py 的 _DRAWERS 读它）。
+# 所以**不新增 kind 值**：hero/stat/... 不是语气，硬塞进 KINDS 会撞 voicekit 的 tone id
+# （TONE_IDS 与 KINDS 是同一组 6 个）。缺省（不写 lines[].type）= 由 grammar.py 按内容推导。
+SCENE_TYPES = ("hero", "statement", "list", "stat", "compare", "process",
+               "quote", "chapter", "chart", "outro")
+# 与 assets/scenes.py 的 _DRAWERS 键对齐，改一边必须改另一边。
+# （grammar.SCENE_TYPES 是同一组 10 个值，但那份顺序用于"平手取位"；这里只做成员校验，
+#  本元组的顺序只影响报错信息里的枚举列举，不影响判定。三处不要再各写一份新名单。）
 PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
            "medium", "slow", "slower", "veryslow")
 MUSIC_MODES = ("score", "bed", "file", "off")
@@ -200,6 +211,59 @@ LINE_ITEM_SPEC = {
     },
 }
 
+# ---- v0.9 视觉场景字段的嵌套结构（写法照抄 LINE_ITEM_SPEC）----
+# 这些对象的键由 scenes.py 的 10 个绘制器读：拼错就是"写了不生效"，所以**不**用
+# open=True（那是留给 sfx 配方参数那种真·透传的）。每层列全 props，才能把拼错报成
+# unknown_key（WARN + "是不是想写 X"），把类型写错报成 ERROR。
+# required 与 schema 表里的问号标记一致：必填 = 绘制器没有它就没法画。
+LINE_STAT_SPEC = {                   # type=stat 的数字卡
+    "t": "dict", "required": ["value"],
+    "props": {
+        # 数字或字符串（"92"、">3x"、"1/2" 这类写法只能当字符串）
+        "value": {"t": ("num", "str"), "nonempty": True},
+        "unit": {"t": "str"},
+        "label": {"t": "str"},
+        "note": {"t": "str"},
+    },
+}
+
+LINE_SERIES_SPEC = {                 # type=chart 的数据条
+    "t": "dict", "required": ["label", "value"],
+    "props": {
+        "label": {"t": "str", "nonempty": True},
+        "value": {"t": ("num", "str"), "nonempty": True},
+        "unit": {"t": "str"},
+    },
+}
+
+LINE_STEP_SPEC = {                   # type=process 的流程节点
+    "t": "dict", "required": ["label"],
+    "props": {
+        "label": {"t": "str", "nonempty": True},
+        "note": {"t": "str"},
+    },
+}
+
+# 对比卡的一侧：items 每项可以写字符串，也可以写 {text}（短条目直接写字符串更省事，两种都认）
+LINE_SIDE_SPEC = {
+    "t": "dict",
+    "props": {
+        "head": {"t": "str"},
+        "items": {"t": "list", "item": {
+            "t": ("str", "dict"), "required": ["text"],
+            "props": {"text": {"t": "str", "nonempty": True}},
+        }},
+    },
+}
+
+LINE_SIDES_SPEC = {                  # type=compare 的左右对比（left/right 都可省略）
+    "t": "dict",
+    "props": {
+        "left": LINE_SIDE_SPEC,
+        "right": LINE_SIDE_SPEC,
+    },
+}
+
 LINE_SPEC = {
     "t": "dict", "required": ["text"],
     "props": {
@@ -218,6 +282,16 @@ LINE_SPEC = {
         "persona": {"t": "str"},
         "tone": {"t": "str", "enum": KINDS},
         "voice": {"t": "str"},
+        # ---- v0.9 视觉场景字段（7 个全可选）----
+        # type 缺省由 grammar.py 按内容推导；其余字段是给绘制器的原料，不写就不画。
+        # 注意这些字段与 kind **正交**，不是新 kind：kind 仍只有上面 6 个（voicekit 的语气 id）。
+        "type": {"t": "str", "enum": SCENE_TYPES},
+        "quote": {"t": "str"},
+        "by": {"t": "str"},
+        "stats": {"t": "list", "item": LINE_STAT_SPEC},
+        "series": {"t": "list", "item": LINE_SERIES_SPEC},
+        "steps": {"t": "list", "item": LINE_STEP_SPEC},
+        "sides": LINE_SIDES_SPEC,
     },
 }
 
@@ -570,6 +644,29 @@ def check_cross(script, script_path, rep, ctx):
                 "voice_plan（--stage tts 落 work/voice_plan.json，st_layout 会并进 "
                 "tail_map）。例如 %s: 1.4" % lid),
                 "inert_line_tail")
+
+    # ---- v0.9 场景语法：绘制器的容量上限（超了会被静默截断） ----
+    # 这是本项目最忌讳的一类坑：作者写对了、跑得通、但画面上少了几条，而没有任何提示。
+    # 容量由 assets/scenes.py 的实现决定（stats 取前 3 条、series 前 6 条、steps 前 5 条、
+    # sides 每侧前 3 条），改那边要同步改这里。
+    _CAP = (("stats", 3), ("series", 6), ("steps", 5))
+    for i, ln in enumerate(lines):
+        for fld, cap in _CAP:
+            v = ln.get(fld)
+            if isinstance(v, list) and len(v) > cap:
+                rep.warn("lines[%d].%s" % (i, fld),
+                         "%s 有 %d 条，但 %s 构图只画前 %d 条（其余不会出现在画面上）。"
+                         "要全画请拆成多段，或减到 %d 条以内"
+                         % (fld, len(v), fld, cap, cap), "scene_capacity")
+        sides = ln.get("sides")
+        if isinstance(sides, dict):
+            for side in ("left", "right"):
+                blk = sides.get(side)
+                its = blk.get("items") if isinstance(blk, dict) else None
+                if isinstance(its, list) and len(its) > 3:
+                    rep.warn("lines[%d].sides.%s.items" % (i, side),
+                             "sides.%s 有 %d 条，但左右对比构图每侧只画前 3 条"
+                             % (side, len(its)), "scene_capacity")
 
     # ---- v0.8 video 块：只支持 16:9 横屏 + 下采样输出 ----
     # **不要在这里重写一遍规则**：允许列表 / 宽高比 / 上采样拒绝的权威实现在

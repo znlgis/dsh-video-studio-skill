@@ -239,6 +239,173 @@
           "voice": {
             "type": "string",
             "description": "显式 edge-tts voice id（覆盖 persona 底子）"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "hero",
+              "statement",
+              "list",
+              "stat",
+              "compare",
+              "process",
+              "quote",
+              "chapter",
+              "chart",
+              "outro"
+            ],
+            "description": "视觉场景类型（v0.9，可选）：决定这段画面长成什么构图——hero 封面 / statement 金句 / list 要点列表 / stat 数字卡 / compare 左右对比 / process 流程轴 / quote 引语 / chapter 章节卡 / chart 数据条 / outro 收尾。与 kind **正交**：kind 管声线、语气、配乐能量，type 只管构图，所以没有新增 kind 值；不写 = 由 grammar.py 按内容自动推导（写错值 filmcheck.py 会报 error）。枚举真值来自 grammar.SCENE_TYPES 与 assets/scenes.py 的 _DRAWERS 键，改那边要同步这里"
+          },
+          "quote": {
+            "type": "string",
+            "description": "引语原文（type=quote 时用）：打在屏幕上的引文。它和 text 是两件事——text 是 TTS 念的那句，quote 是画面上那句话本身"
+          },
+          "by": {
+            "type": "string",
+            "description": "引语出处/作者（type=quote 时用），如“—— 某本书 · 某作者”；与 quote 配套，缺省不画署名"
+          },
+          "stats": {
+            "type": "array",
+            "description": "数字卡原料（type=stat）：每项 {value, unit, label, note}。value 必填（数字或字符串，字符串用于“>3x”“1/2”这类写法）；unit 是单位后缀，label 是指标名，note 是小字补充",
+            "items": {
+              "type": "object",
+              "required": [
+                "value"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "value": {
+                  "type": [
+                    "number",
+                    "string"
+                  ],
+                  "description": "数字主体（必填）：数字，或“>3x”“1/2”这类字符串写法"
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "单位/后缀，如“秒”“%”“fps”"
+                },
+                "label": {
+                  "type": "string",
+                  "description": "指标名，如“帧率”"
+                },
+                "note": {
+                  "type": "string",
+                  "description": "补充说明（小字），可省略"
+                }
+              }
+            }
+          },
+          "series": {
+            "type": "array",
+            "description": "数据条原料（type=chart）：每项 {label, value, unit}。label 是条形名（必填），value 是条长（必填，数字或数值字符串）",
+            "items": {
+              "type": "object",
+              "required": [
+                "label",
+                "value"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "description": "条形名（必填）"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "string"
+                  ],
+                  "description": "条长（必填）：数字或数值字符串（“0.8”“80%”由绘制器解析）"
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "单位/后缀，如“GB”“%”"
+                }
+              }
+            }
+          },
+          "steps": {
+            "type": "array",
+            "description": "流程轴原料（type=process）：每项 {label, note}，数组顺序即节点顺序",
+            "items": {
+              "type": "object",
+              "required": [
+                "label"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "description": "节点名（必填）"
+                },
+                "note": {
+                  "type": "string",
+                  "description": "节点补充说明（小字），可省略"
+                }
+              }
+            }
+          },
+          "sides": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "左右对比原料（type=compare）：{left, right}，每侧 {head, items[]}；items 里每项可写字符串，也可写对象 {text}（两种都认：短条目直接写字符串更省事）",
+            "properties": {
+              "left": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "左侧",
+                "properties": {
+                  "head": {
+                    "type": "string",
+                    "description": "左侧小标题"
+                  },
+                  "items": {
+                    "type": "array",
+                    "description": "左侧条目：字符串或对象 {text} 两种写法都行",
+                    "items": {
+                      "type": [
+                        "string",
+                        "object"
+                      ],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "description": "条目文字（写对象时用它；写字符串时字符串本身就是文字）"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "right": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "右侧",
+                "properties": {
+                  "head": {
+                    "type": "string",
+                    "description": "右侧小标题"
+                  },
+                  "items": {
+                    "type": "array",
+                    "description": "右侧条目：字符串或对象 {text} 两种写法都行",
+                    "items": {
+                      "type": [
+                        "string",
+                        "object"
+                      ],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "description": "条目文字（写对象时用它；写字符串时字符串本身就是文字）"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

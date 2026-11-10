@@ -314,6 +314,18 @@ def resolve_style(script, work=None, verbose=True):
     bad = ST.theme_lint(plan.get("theme") or ST.THEMES[plan["theme_id"]])
     if bad:
         raise SystemExit("[主题体检失败] %s：%s" % (plan["theme_id"], "；".join(bad)))
+    # v0.9：结构签名（视觉语言包）随计划一起解析，并同样在 --stage style 就体检。
+    # 为什么不能等渲染：装饰母题名写错/转场时长越界，都要等渲到第 300 帧才发现，
+    # 而这两类错误恰恰会让整片观感崩掉（转场 1 秒 = 每段都在"糊过去"）。
+    try:
+        plan["language"] = ST.visual_language(plan["style"])
+        vbad = ST.visual_lint(plan["style"])
+    except AttributeError:
+        # 老 stylekit（没有 VISUAL_LANGUAGES）-> 不阻塞渲染，scenes.py 会退到默认语言
+        plan["language"] = None
+        vbad = []
+    if vbad:
+        raise SystemExit("[视觉语言体检失败] %s：%s" % (plan["style"], "；".join(vbad)))
     script["_style"] = plan
     if work and verbose:
         path = os.path.join(work, "style.json")
@@ -353,6 +365,18 @@ def _print_style(plan):
     print("        主题: %s  版式: %s" % (plan["theme_id"],
                                          ",".join(sorted(set(plan["chapter_layout"].values())))
                                          or plan["layout_default"]))
+    # v0.9：视觉语言（结构签名）也要能在这里看到 —— 用户判断"这套风格是不是只是换色"
+    # 的第一现场就是 --stage style 的打印，藏起来等于让他去读 style.json。
+    vl = plan.get("language") if isinstance(plan.get("language"), dict) else None
+    if vl:
+        mf = vl.get("motif") or {}
+        tr = vl.get("transition") or {}
+        ty = vl.get("typography") or {}
+        bi = vl.get("bias") or {}
+        print("        视觉语言: 母题=%s 转场=%s(%.2fs) 字距=%.1f 编号=%s 重心=(%+.0f,%+.0f)"
+              % (mf.get("kind"), tr.get("kind"), float(tr.get("dur") or 0.0),
+                 float(ty.get("tracking") or 0.0), ty.get("number"),
+                 float(bi.get("x") or 0.0), float(bi.get("y") or 0.0)))
     print("        配乐: %s  BPM %g（%s）  调性 %s（%s）  mood %s"
           % (m["style"], m["bpm"], m["bpm_source"], m["key"], m["key_source"], m["mood"]))
     if v["map"]:
@@ -511,6 +535,27 @@ def st_layout(script, work, lines=None):
                    "legacy": plan["legacy"],
                    "chapter_layout": plan["chapter_layout"],
                    "item_stagger": pace["item_stagger"]}
+    # ---- v0.9 场景语法：内容 -> 构图选型（落 timeline.scenes[] 与 work/storyboard.json） ----
+    # legacy 不注入：v0.4 的三个老绘制器只读 kind，注入新字段等于给基线加噪声。
+    if not plan["legacy"]:
+        try:
+            import grammar as G
+        except Exception as e:                              # noqa: BLE001
+            G = None
+            print("   [WARN] 没有 grammar.py，本次全部按 kind 走兼容构图：%s" % e)
+        if G is not None:
+            sb = G.plan_scenes(tl["scenes"], script, plan)
+            try:
+                json.dump(sb, open(os.path.join(work, "storyboard.json"), "w", encoding="utf-8"),
+                          ensure_ascii=False, indent=1)
+            except Exception as e:                          # noqa: BLE001
+                print("   [WARN] storyboard.json 落盘失败：%s" % e)
+            print("   分镜: %s" % G.describe(sb))
+            for r in sb["scenes"]:
+                print("     %-6s %-8s -> %-9s v%d d%d  %s"
+                      % (r["id"], r["kind"], r["type"], r["variant"], r["decor"],
+                         "；".join(r["reason"][:2]) or "-"))
+            tl["storyboard"] = {"type_counts": sb["type_counts"]}
     json.dump(tl, open(os.path.join(work, "timeline.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))

@@ -57,7 +57,9 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  # v0.6.0：门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
                  "gates", "stagewatch", "filmcheck",
                  # v0.8.0：渲染前资源闸门、全片 VMAF/SSIM 门禁、ASR 回读门禁
-                 "preflight", "qavmaf", "qaasr"}
+                 "preflight", "qavmaf", "qaasr",
+                 # v0.9.0：场景语法（内容 -> 构图选型）。纯标准库，可被 scenes.py 反向 import
+                 "grammar"}
 MAX_FILE_BYTES = 400 * 1024
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。

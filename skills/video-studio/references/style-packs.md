@@ -180,3 +180,104 @@ stylekit.theme_lint(theme) 在 --stage style 就拦，不用等渲完 300 帧：
 | 改台词后配乐变了 | 改了标题或 kind 结构 -> tempo 指纹变（BPM/调性跟着换） | 写死 music.key / music.bpm（`seed_from_content:false` 只管音色 seed，压不住 BPM/调性变化） |
 | 旁白听感像广播剧 | max_distinct 太大 / 相邻句频繁换人 | 降到 2，靠 tone 而不是换人做变化 |
 | 字幕在浅色主题上看不清 | 用了 v0.4 的黑底白字 | 传 theme= 给 draw_subtitle（render.py 已自动传） |
+
+## 9. 视觉语言包（v0.9）：结构签名，不只是配色
+
+### 9.1 为什么还要这一层
+
+v0.5 的 `STYLES` / `THEMES` 管的是**皮肤**：配色、字体族、纹理、颗粒、字距、缓动、HUD、
+3 种版式几何。8 套风格共用同一批绘制器与同一套装饰，于是"换风格"在画面上只剩换色——
+灰度量出来的构图骨架（前景占比 / 重心 / 边缘占用 / 左右对称）几乎不动。
+
+`stylekit.VISUAL_LANGUAGES` 补的是**结构签名**：同一段内容在两套风格下，剪影必须能区分。
+它是纯数据（不 import PIL / filmkit，否则与 `scenes.py` 成环），与 `STYLES` 同层，
+`--stage style` 一起体检。
+
+### 9.2 五组签名字段
+
+| 组 | 字段 | 取值 / 例子 | 谁读它 |
+|---|---|---|---|
+| `motion` | `ease` | `out3` / `out5` / `inOut3` / `outBack` | `scenes.py`（所有绘制器的入场缓动） |
+| | `breathe_hz` | 0.28–1.10（Hz） | `scenes.py`（强调线/下划线/光点呼吸频率） |
+| | `enter` | `(起, 止)` 秒，如 `(0.70, 1.20)` | **已声明、visual_lint 会查、绘制器暂未读** |
+| | `push` | 0–0.16（背景缓推幅度） | **已声明、visual_lint 会查、绘制器暂未读**（主题自带的 `push` 仍生效） |
+| `motif` | `kind` | `brackets` / `hairlines` / `handdrawn` / `slabs` / `minimal` / `letterbox` / `signal` / `rays` | `scenes._motif_layer` 烘焙母题、`scenes._plate` 合成进背景底版；v0.9.1 起逐帧只 copy/EXTENT（约 1.3–2.0 ms），不再逐帧 paste（实测 5.6 ms） |
+| | `density` | 0–1（母题浓度；0 只允许 `minimal`） | `scenes._decor_scale`（再乘片内密度档 0.55/0.75/1.0） |
+| | `detail` | 母题专属参数（`corner`/`rule_step`/`wobble`/`top`/`bars`/`rays` …） | 同上 |
+| `transition` | `kind` | `dip` / `wash` / `paper` / `wipe` / `cut` / `iris` | `scenes._apply_veil`（段首 ≤0.45 s 内生效） |
+| | `dur` | 0–0.60 秒 | 同上；超过 0.60 s 会糊掉 3–6 s 节奏下限 |
+| `typography` | `tracking` | 0–8 px（字距；与主题自带字距相加） | `scenes._tracking` |
+| | `line_gap` | 1.15–1.55（行高倍数） | `scenes._gap` |
+| | `number` | `dim` / `serif` / `cn` / `block` / `roman` / `timecode` / `dot` / `gilt` | `scenes._number_text`（章节编号、列表序号、流程节点号） |
+| | `align` / `ratio` | `left`/`center`/`right`；display:body 字号比 1.0–3.6 | **已声明、visual_lint 会查、绘制器暂未读** |
+| `bias` | `x` / `y` / `inset` | px，如 `{"x": -150, "y": 80, "inset": 40}` | `scenes._bias`（整体重心偏移；`inset` 只作用于左对齐起点） |
+
+两条设计约束（改的时候别破）：
+
+1. **每条签名都要"能被剪影看出差别"**：只改颜色/字重/描边的项不算签名。
+2. **受单帧预算约束**：装饰必须在烘焙阶段合成进底版（`_plate`），逐帧只剩 copy/EXTENT；
+   禁每帧全屏 GaussianBlur（实测 30–60 ms）、全屏双线性 resize（29 ms）与全屏 RGBA paste
+   （实测 5.6 ms——0.9.0 就是栽在这，0.9.1 才改掉），预算 25 ms。
+
+### 9.3 8 套风格的签名摘要
+
+| 风格 | motion（ease / 呼吸） | motif（母题 / 密度） | transition | typography（字距 / 行高 / 编号） | bias(x,y,inset) |
+|---|---|---|---|---|---|
+| tech-deep | out3 / 0.85 | brackets / 1.00（四角 L 括角 + 刻度尺 + 扫描线） | dip 0.28 s | 0 / 1.30 / dim | (0, 0, 0) |
+| magazine | out5 / 0.50 | hairlines / 0.85（双横线页眉 + 栏间线 + 页码位） | wash 0.35 s | 2 / 1.34 / serif | (+60, −20, 0) |
+| paper | inOut3 / 0.42 | handdrawn / 1.00（手绘内框 + 胶带 + 印章） | paper 0.35 s | 1 / 1.36 / cn（一、二、三） | (−150, +80, 40) |
+| vivid | outBack / 1.10 | slabs / 1.00（粗色块 + 斜切 + 贴纸） | wipe 0.20 s | 1 / 1.26 / block | (0, +40, 0) |
+| mono | inOut3 / 0.35 | minimal / 0.55（极细线 + 直角框） | cut 0.00 s | 6 / 1.40 / roman | (0, 0, 0) |
+| cinema | inOut3 / 0.30 | letterbox / 1.00（上下遮幅 + 光斑） | dip 0.45 s | 3 / 1.38 / timecode | (0, +30, 0) |
+| lo-fi | out3 / 0.60 | signal / 0.90（信号条 + 时间戳） | wash 0.30 s | 1 / 1.36 / dot | (+60, −70, 0) |
+| epic | out5 / 0.28 | rays / 1.00（放射射线 + 金线框） | iris 0.40 s | 4 / 1.32 / gilt | (0, −30, 0) |
+| legacy | out3 / 0.85 | brackets / 1.00（detail 为空） | cut 0.00 s | 0 / 1.30 / dim | 不参与（走老绘制器） |
+
+`layout_cycle` 字段也写在每套里（版式轮换顺序），但**当前没有消费者**——
+按章节轮换版式的逻辑在 `STYLES[style]["layouts"]` 那一层（见 §5 与 SKILL §5.5）。
+
+### 9.4 `visual_lint` 查什么
+
+在 `--stage style` 就拦（`render.py` 解析风格时调用，坏配置直接 `SystemExit`），
+不用等渲到第 300 帧才发现"每段转场糊 1 秒"：
+
+| 检查 | 线 |
+|---|---|
+| `motif.kind` | 必须在 `VISUAL_MOTIFS` 的 8 个里 |
+| `transition.kind` | 必须在 `VISUAL_TRANSITIONS` 的 6 个里 |
+| `transition.dur` | 0–0.60 s |
+| `typography.number` | 必须在 `NUMBER_STYLES` 的 8 个里 |
+| `typography.ratio` | 1.0–3.6 |
+| `typography.tracking` | 0–8 px |
+| `typography.line_gap` | 1.15–1.55 |
+| `motif.density` | 0–1；为 0 只允许 `minimal` |
+| `motion.enter` | `(起, 止)` 且 0 < 起 ≤ 止 ≤ 1.6 s |
+| `motion.push` | 0–0.16（超过会把内容推出安全区） |
+
+`selfcheck` 第 53 条另查两件 `visual_lint` 查不到的：8 套签名齐全（motion / typography 都有），
+且**母题 / 转场 / 重心三元组不重复**（全同 = 这套语言只是复制粘贴）。
+
+剪影是否真的可区分，由 `tools/silhouette_qa.py`（门禁 G13）量：同内容同段落在两套风格下
+各渲 3 帧 → 灰度 → 480×270 → 四角亮度中位数三值化 → 比前景占比 F / 质心 (Cx,Cy) /
+四边覆盖率 B / 左右对称度 S；五项里任一项达标即 PASS（ΔF≥6pp、|ΔCx|≥8pp、|ΔCy|≥8pp、
+ΔB≥14pp、ΔS≥0.20），同一指标必须 3 帧全达标。当前实测 **28 对全过（同明暗族 12/12）**；
+改造前基线同族只过 8/12。
+
+### 9.5 加第 9 套风格时，视觉语言要补什么
+
+主题与风格包的 5 步见 §7；v0.9 起还要多做四步，**否则新风格在剪影上仍然只是换色**：
+
+1. **`stylekit.VISUAL_LANGUAGES["my-style"]` 写全五组**：motion（ease / enter / push /
+   breathe_hz）、motif（kind + density + detail）、transition（kind + dur）、
+   typography（tracking / line_gap / align / number / ratio）、bias（x / y / inset）。
+   照抄一套现有签名再改配色 = 白做，第 53 条会报"母题/转场/重心完全相同"。
+2. **母题不要临时发明新名字**：`motif.kind` 必须是 `VISUAL_MOTIFS` 里的 8 个之一。
+   确实需要新图形语言时，先在 `scenes._motif_layer` 里实现一个分支、加进 `VISUAL_MOTIFS`，
+   再在风格里引用——顺序反了会 `visual_lint` 直接拦。
+3. **跑 `python stylekit.py --lint`**（主题对比度）与**单独跑 `visual_lint`**
+   （写个三行的 `.py` 调 `stylekit.visual_lint("my-style")`，或直接 `--stage style`）。
+4. **跑剪影门禁**：`python tools/silhouette_qa.py --styles my-style,tech-deep,...`，
+   确认新风格与其余 8 套两两可区分；再跑 `selfcheck`（第 53 条会要求三元组不重复）。
+5. **看片**：`--stage stills` 渲 3 段亲眼确认母题/转场/字距不是"看着像另一套"——
+   数字过了不等于观感对了（铁律 6）。
+

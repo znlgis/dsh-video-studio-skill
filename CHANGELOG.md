@@ -6,6 +6,164 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 0.9.1 — 把装饰母题烘焙进底版：消掉 5.6 ms/帧的固定开销（2026-11-10）
+
+> 0.9.0 落地后量了一笔账：单帧预算 25 ms，而"逐帧把全屏 RGBA 母题 paste 到画面上"
+> 实测是 **5.6 ms/帧**（Pillow 13 / 1080p），是预算里最大的一笔固定开销——
+> 比 list/hero 的绘制本体（约 3 ms）还贵。
+>
+> 0.9.0 的注释写的是"paste 只要 0.3 ms"，这是估算不是实测；这次用
+> `draw_frame` 分段计时才发现差了近 20 倍。**估算当实测写进文档，就是下一个坑。**
+
+### 改了什么
+
+| 项 | 0.9.0 | 0.9.1 |
+|---|---|---|
+| 装饰母题的合成方式 | 母题单独烘焙成 RGBA 图层，**逐帧 `img.paste(lay, (0,0), lay)`** | 母题直接烘焙进**背景底版**（`_plate`），逐帧只 `copy` + `EXTENT`，不再单独 paste |
+| 单帧固定开销 | 约 5.6 ms（paste） | 约 **1.3–2.0 ms**（底版 copy） |
+| 装饰与镜头缓推 | 背景推、装饰不动（cinema / epic 的强 push 下会穿帮：框线留在原地，背景在动） | 装饰跟着底版一起推，两者同一张图，**不再穿帮** |
+
+实现位置：`assets/scenes.py` 的 `_motif_key` / `_motif_layer` / `_plate`（母题图层与
+合成底版共用同一把缓存键，改主题色时一起失效，否则会拿到"新图层 + 旧底版"的错配画面）。
+
+### 实测数据（本机 Windows 11 / Python 3.12 / ffmpeg 9.0.2；换机请重测）
+
+| 项 | 实测 |
+|---|---|
+| 模板片 frames 阶段 | **54–61 fps（约 16.7 s / 870 帧 ≈ 19 ms/帧）**；v0.8.1 约 75 fps（约 13 ms/帧）；0.9.0 未优化时 41–50 fps |
+| `draw_frame` 本体（1080p） | `list` **3.1 ms** / `hero` **3.0 ms**（优化前 7.4 / 7.3 ms） |
+| 最贵组合（10 类场景 + 字幕 + `tobytes`） | `epic·outro` **15.1 ms**，仍在 25 ms/帧预算内 |
+| 金帧基线 | 再次重录（3 帧）；最终以仓库里的 `assets/golden_frames.json` 为准 |
+
+### 结论口径（写文档时别写反）
+
+**仍在预算内（约 19 ms/帧 vs 25 ms），但比 v0.8.1 的约 13 ms/帧慢**。
+慢的原因是 10 类构图各自多了装饰与几何——这是功能换来的，不是回退；
+0.9.1 只是把其中那笔 5.6 ms 的固定开销收掉了。
+
+### 行为变化
+
+| 变化 | 0.9.0 | 0.9.1 | 影响 |
+|---|---|---|---|
+| frames 速度 | 约 41–50 fps | **约 54–61 fps** | 更接近 v0.8.1，但仍慢于它 |
+| 强 push 风格（cinema / epic） | 装饰层不随镜头推，边框与背景分离 | 装饰与背景一起推 | 观感更整；这两个风格的静帧像素与 0.9.0 不同 |
+| 金帧基线 | v0.9.0 的 3 帧 | **重录** | 自己复刻过基线快照的要再 `--write` 一次 |
+
+## 0.9.0 — 场景语法 + 视觉语言包：换风格不再只是换色（2026-11-10）
+
+> 本轮解决的是 v0.5 没有解决的那一半问题。v0.5 的风格包让"画风/配乐/旁白一起变"，
+> 但它只覆盖**皮肤**：配色、字体、纹理、颗粒、字距、缓动、HUD、3 种版式几何。
+> 画面骨架（剪影）没变——用户的原话是"每个视频都差不多，只是主题和颜色不同"。
+>
+> 根因在代码里摆着：`assets/scenes.py` 当时只有 3 个绘制器（hook / body / outro），
+> quote / emphasis / calm 三种 kind 全部回落到 body；三个绘制器共用同一套"背景板 → 眉标 →
+> 大字 → 副标 → 强调线 → HUD"骨架，8 套风格换完只剩配色不同。
+> 用剪影判据量改造前的 HEAD 快照：8 套风格两两 28 对里 **4 对完全不达标**（同明暗族 12 对里
+> 只过 8 对）——换风格真的只是换色，这不是审美口水。
+>
+> v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"独立成一层，
+> 再给每套风格补**结构签名**。三层正交：场景语法（选构图）→ 视觉语言包（怎么画）→
+> 片内编排（同一部片里不复制粘贴）。
+
+### 一、改了什么：三层正交
+
+| 层 | 新增/改动 | 落点 |
+|---|---|---|
+| **① 场景语法** | 新模块 `scripts/grammar.py`（纯标准库，可单测、可被 `scenes.py` 反向 import）。按内容给 **10 类构图**打分选型：`hero` / `statement` / `list` / `stat` / `compare` / `process` / `quote` / `chapter` / `chart` / `outro`。规则：字段存在性 > 关键词 > 结构位置；段长门（每类有最短时长）；连续同类型 ≤2 段；平手按固定顺序取位 | `grammar.SCENE_TYPES`（grammar.py:30）、`MIN_DUR`（:49）、`DOWNGRADE`（:63）、`plan_scenes` → `work/storyboard.json` |
+| **② 视觉语言包** | `stylekit.VISUAL_LANGUAGES`：8 套风格 + legacy，每套在主题色之上补**五组结构签名**——`motion`（缓动/入场区间/镜头 push/呼吸频率）、`motif`（装饰母题：brackets / hairlines / handdrawn / slabs / minimal / letterbox / signal / rays）、`transition`（段界转场：dip / wash / paper / wipe / cut / iris）、`typography`（字距/行高/对齐/编号写法/字号比）、`bias`（整体重心偏移 px）。装饰母题**预烘焙**成一张全屏 RGBA 图层，逐帧 paste。当时注释写的是"paste 约 0.3 ms"——**这是估算不是实测**，0.9.1 实测为 5.6 ms/帧，随即改成烘焙进底版（见 0.9.1 段） | `stylekit.py:568`（`VISUAL_LANGUAGES`）、`:681`（`visual_lint`）、`scenes.py:888`（`_motif_layer`）、`scenes.py:1020`（`_plate`，v0.9.1）、`:1068`（`_apply_veil`） |
+| **③ 片内编排** | 版式变体（每类型 3 个、相邻段强制不同）、装饰密度 3 档（0.55 / 0.75 / 1.0，每 3 段回落）、相位偏移（防同频"复印"）。全部由 sha1 派生，**不读 random / time / hash()** | `grammar.variant_of / decor_of / phase_of`，写进 timeline 的 `scene_variant / scene_decor / scene_phase` |
+
+配套改动：
+
+- **`assets/scenes.py` 第三节重写**：3 个老绘制器 → **10 类构图绘制器**（`_DRAWERS`，
+  scenes.py:1979），每类独立的视觉重心、留白与持续动效；新增段内 veil 转场
+  （`_apply_veil`，只在段首 ≤0.45 s 内生效——相邻两段可能是完全不同的构图，整屏瞬切会
+  精确触发闪烁门禁）。
+- **film.json 新增 7 个行级可选字段**：`type` / `quote` / `by` / `stats[]` / `series[]` /
+  `steps[]` / `sides{}`。全部可选；不写就从 `text` / `items` 推导（`grammar.derive_*`）。
+  `type` 与 `kind` **正交**：kind 管声线与配乐能量，type 只管构图。**没有新增 kind 值**
+  （会撞 voicekit 的语气 id 与 filmcheck 的 `KINDS`）。
+- **`--stage layout` 打印分镜**：每段一行"id / kind → type / 变体 / 密度 / 为什么"，
+  同时落 `work/storyboard.json`（审计产物：能看到每段为什么选这个构图
+  → render.py:553）。
+- **`--stage style` 打印视觉语言**：母题 / 转场 / 字距 / 编号写法 / 重心偏移各一行，
+  `visual_lint` 在同一个 stage 就拦坏配置（render.py:322）。
+- **新工具 `tools/silhouette_qa.py`**：跨风格剪影可区分门禁 **G13**（见下"门禁与兼容"）。
+
+### 二、门禁与兼容
+
+| 项 | 内容 |
+|---|---|
+| **legacy 逐字节不变** | 不写 `style` 字段 = 走 v0.4 三个老绘制器（`_LEGACY_DRAWERS`，scenes.py:232），timeline 不注入场景字段、不写 storyboard。selfcheck 第 26 条查 legacy 的配乐/旁白/节奏参数；**逐字节**另有实测：用 `git show HEAD` 取 v0.8.1 的 scenes/stylekit/filmkit，与当前树对同一份 legacy 剧本（4 句：hook/body/quote/outro，且故意塞入 `scene_type` 等新字段）各渲 4 帧比 sha256，**4/4 完全一致**（证据 `.team/legacy_byte_compare.json`，可复跑 `.team/legacy_evidence.py`）。注意金帧基线**不覆盖**这条——它渲的是 `style: auto` 的模板片，不走 legacy 路径 |
+| **新判据 G13（剪影可区分）** | 同一份合成剧本只换 style，每个场景类型渲 3 帧（t=0.05/0.5/0.9×dur）→ 灰度 → 降采样 480×270 → 以四角亮度中位数为基准三值化 → 量五项：前景占比 F / 前景质心 (Cx,Cy) / 四边覆盖率 B / 左右对称度 S。两两五项里**至少一项达标**即算可区分（ΔF≥6pp、|ΔCx|≥8pp、|ΔCy|≥8pp、ΔB≥14pp、ΔS≥0.20），且同一指标必须在 3 帧上全部达标。判据写死在 `tools/silhouette_qa.py:125` |
+| **G13 挂在哪** | 可选离线工具 + `selfcheck` 第 55 条（缺工具则 skip，不阻塞 CI）；**不进 `--stage qa` 的账本**——它渲的是合成剧本，不是成片。口径见 `references/scene-grammar.md` 与 `references/style-packs.md` |
+| **`visual_lint`** | 母题名 / 转场名 / 转场时长（0–0.60 s）/ 编号写法 / 字号比（1.0–3.6）/ 字距（0–8 px）/ 行高（1.15–1.55）/ 母题密度 / 入场区间 / push（0–0.16）越界，`--stage style` 直接 `SystemExit`，不等到渲完 300 帧 |
+| **ci_check** | `LOCAL_MODULES` 加 `grammar`（第 5 项依赖白名单）；`package.json` 的 `files` 加 `tools/silhouette_qa.py`（第 6 项打包卫生）。仍是 12 项 |
+| **schema / filmcheck** | `lines[].type` 枚举 + 四个嵌套结构（stats / series / steps / sides）写进 `schemas/film.schema.json` 与 `filmcheck.py`。`type` 写错会被 filmcheck 报 **ERROR**；嵌套键拼错报 WARN（"是不是想写 X"） |
+| **金帧基线** | 已重录（3 帧，人工看过帧再 `--write`，不是盲写）。`assets/golden_frames.json` 的 `env_fp` 与三个 sha256 同时更新 |
+| **selfcheck** | 51 → **55** 条：52 场景语法（10 类分流/确定性/段长门/显式 type）、53 视觉语言包（8 套签名齐全且无重复）、54 场景类型单真值（4 处集合相等）、55 剪影可区分（G13） |
+
+### 三、行为变化（升级前先看这几条）
+
+| 变化 | v0.8.1 | v0.9.0 | 影响 |
+|---|---|---|---|
+| 画面骨架 | 8 套风格共用 3 个绘制器，换风格只换色 | 全新构图 + 结构签名；同一段内容可画成 10 类构图 | **升级后必须重看静帧**：`--stage stills` 的图会明显不同，这是本次的目的 |
+| `work/golden_frames.json` 基线 | 3 帧 sha256（v0.8 值） | 已重录为 v0.9 值 | 自己复刻过金帧基线的项目要 `--write` 重录一次 |
+| `lines[].type` 写错 | 字段不存在，filmcheck 报未知键 WARN | **ERROR**（枚举校验） | 以前"写了不生效"的脚本会当场失败——这是契约兑现 |
+| 场景数据超容量 | 静默截断，无提示 | filmcheck 报 **`scene_capacity` WARN**：`stats` >3 / `series` >6 / `steps` >5 / `sides` 每侧 >3（绘制器只画前几条） | 有 WARN 不阻断，但那些条目**不会出现在画面上**，该拆段就拆段 |
+| `--stage style` 输出 | 风格 / 主题 / 配乐 / 旁白 / 节奏 | 多一行"视觉语言: 母题=… 转场=… 字距=… 编号=… 重心=(+x,+y)" | grep 旧输出的脚本不受影响（只多不少） |
+| `--stage layout` 输出 | 时间轴统计 | 多"分镜: N 段 / 类型×次数"与每段选型理由 | 同上 |
+| 渲染速度 | 模板片 frames 约 75 fps（约 13 ms/帧） | **约 41–50 fps（约 20–24 ms/帧）**；0.9.1 优化后回到 **54–61 fps（约 19 ms/帧）** | 单帧预算 25 ms。如实说：**比 v0.8.1 慢**，慢在 10 类构图各自多了装饰与几何；换机必须重测 |
+| `selfcheck` 条数 | 51 | **55** | `grep 'PASS 51'` 的脚本要改 |
+| `ci_check` 项数 | 12 | 12（白名单扩展） | 本地模块白名单加 `grammar`；打包 `files` 加 `tools/silhouette_qa.py` |
+
+### 四、已知限制（本版没做，写下来别装看不见）
+
+- **web 引擎不跟随场景语法**：`--engine web` 的页面由用户自己写（`assets/web/film.js`），
+  本次不改造。web 路线的画风仍只有主题色，没有 10 类构图；剪影门禁也只覆盖 PIL 渲染器。
+- **同一部片仍锁一个明暗族**：段界跨明暗族会整屏换底、精确触发闪烁门禁，观感也像换片。
+  主题覆盖（`scene["theme"]`）只允许同族。
+- **`lines[].type` 写错只有 filmcheck 拦**：grammar 对非法值**静默回落**（当没写，按内容
+  自动选）。不跑 filmcheck 的流水线，写错就只是"没生效"。
+- **场景类型有 4 份真值来源**（`filmcheck.SCENE_TYPES` / `grammar.SCENE_TYPES` /
+  `scenes._DRAWERS` / schema enum），靠 selfcheck 第 54 条断言"集合相等"兜底。
+  **顺序允许不同**：grammar 的那份顺序用于平手取位，另外三份只看成员。
+- **版式变体只有 4 类绘制器读**：`variant_of` 对每段都算并写进 storyboard，
+  但当前只有 hero / statement / list / stat 消费它，其余六类构图唯一。
+  "每类型 3 个变体"目前只在四类上成立。
+- **部分视觉语言字段"已声明、已体检、但绘制器没读"**：`motion.enter`、`motion.push`、
+  `typography.align`、`typography.ratio`、`layout_cycle`——写了不报错，也不改变画面。
+  详见 `references/style-packs.md`。
+- **`work/storyboard.json` 是审计产物，不是输入**：改它不改变渲染结果；要固定构图请写
+  `film.json` 的 `lines[].type`。
+
+### 五、验证数据（本机 Windows 11 / Python 3.12 / ffmpeg 9.0.2；换机请重测）
+
+| 项 | 实测 |
+|---|---|
+| 场景语法自检 | `selfcheck` 第 52 条：10 段稿子分出 ≥5 种构图、同一稿两次选型与变体一致、2 秒段里的 chart 被降级且理由写明、显式 `type=hero` 生效 |
+| 视觉语言自检 | 第 53 条：8 套风格签名齐全、`visual_lint_all` 全过、无重复签名（母题/转场/重心三元组不撞） |
+| 单真值自检 | 第 54 条：grammar / filmcheck / `scenes._DRAWERS` / schema enum 四处集合一致 |
+| **剪影 G13（改造后）** | **28 对全部通过**（同明暗族 **12/12**，跨族 16/16）；同族对靠 Cx/Cy/S 等结构指标通过，不是靠明暗差 |
+| **剪影 G13（改造前基线，同一工具跑 HEAD 快照）** | 28 对通过 **24**、失败 **4**（`vivid×epic` / `cinema×epic` / `paper×lo-fi` / `vivid×cinema`）；同明暗族只过 **8/12**。这 4 对就是"换风格=换色"的直接证据 |
+| 模板片渲染 | 0.9.0 落地时 frames 阶段约 **41–50 fps（约 20–24 ms/帧）**；0.9.1 把装饰烘焙进底版后为 **54–61 fps（约 19 ms/帧）**，v0.8.1 约 **75 fps（约 13 ms/帧）**。见 0.9.1 段 |
+| 金帧 | 3 帧（36 / 270 / 369）重录后与当前渲染像素逐位一致；legacy 路径仍走基线 |
+| 自检 / 仓库体检 | `selfcheck` **PASS 55 / FAIL 0 / SKIP 0**；`ci_check` **PASS 12 / FAIL 0**；`filmcheck` 模板片 0 error / 0 warning |
+
+### 六、升级须知（v0.8.1 → v0.9.0）
+
+1. **画面一定会变**。这是本次的目的，不是回归。升级后先跑
+   `--stage stills --stills "l01:3,l02:5,l03:2.5"` 亲眼看静帧，再决定要不要调 `lines[].type`。
+2. **想要稳定的观感，写显式 `style`**（不要 `"auto"`）：`auto` 会按内容换风格，
+   而不同风格现在连骨架都不同；锁定 id 才能保证"这一版和上一版看起来是同一部片"。
+3. **想沿用老画面**：`film.json` 不写 `style` 字段即可回到 v0.4 三个老绘制器（逐字节不变），
+   代价是同时失去 v0.5 的配乐/旁白风格包。
+4. **跑一遍 `filmcheck`**：`lines[].type` 拼错会变成 ERROR，`stats/series/steps/sides`
+   超容量会给 `scene_capacity` WARN——这两类以前都不会报。
+5. **金帧基线变了**：自己维护过基线快照的，要按当前渲染重新 `--write`（先人工看帧）。
+6. **新增模块要一起拷**：`scripts/grammar.py`（纯标准库，缺了 `scenes.py` 会退到兼容构图
+   并打 WARN）。`tools/silhouette_qa.py` 只在仓库工具链里，不进技能目录。
+
 ## 0.8.1 — 全项目深审：修掉 60+ 处「看着没问题、其实没在查」（2026-11-10）
 
 > 本轮没有新功能。起因是一次**全量复核**：把 14 个 Python 模块（约 3.4 万行）、5 个前端文件、

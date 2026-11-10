@@ -243,5 +243,5 @@ python webengine.py textqa ./web/index.html --step 0.2
 信号：-16.3 LUFS / 真峰 -1.2 dBTP / 锐度比 0.94 / 黑帧 0 / 字幕 86 条 = 剧本 86 句
 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步最大偏差 38 ms
 页面：文字重叠 0 / 出画 0 / 一闪而过 0 / 从没露面 0
-自检：python selfcheck.py -> PASS 51 / FAIL 0 / SKIP 0
+自检：python selfcheck.py -> PASS 55 / FAIL 0 / SKIP 0
 ```

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.8.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.9.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -58,6 +58,22 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > ④ `visual.layout` 与 `qa.vmaf.sample_step` 写了**完全没人读**；⑤ `selfcheck` 第 51 条把金帧
 > 的 skipped 当 PASS（**这条门禁从没真的比过一帧**）；⑥ `ci_check` 把"跳过（没装 node）"记成 PASS。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 的 0.8.1 段（含行为变化表与升级须知）。
+> **v0.9.0（换风格不再只是换色）**：v0.5 的风格包只覆盖"皮肤"（配色/字体/纹理/字距/缓动），
+> 8 套风格共用同样的构图骨架，用户反馈"每个视频都差不多，只是主题和颜色不同"。
+> v0.9 把这条链路拆成三层：**场景语法**（按内容选 10 类构图：hero / statement / list / stat /
+> compare / process / quote / chapter / chart / outro，落 `work/storyboard.json` 可审计）、
+> **视觉语言包**（每套风格补五组结构签名：motion / motif / transition / typography / bias，
+> 母题预烘焙并合成进背景底版，逐帧只 copy/EXTENT）、**片内编排**（版式变体 / 装饰密度 / 相位偏移，防"复印"）。
+> 新门禁 **G13 剪影可区分**（`tools/silhouette_qa.py`）：8 套风格两两 **28 对全部通过**，
+> 改造前同明暗族 12 对只过 8 对。**代价如实说**：模板片 frames 约 **19 ms/帧（54–61 fps）**，
+> 仍在 25 ms 预算内，但比 v0.8.1 的约 13 ms/帧（约 75 fps）慢——慢在 10 类构图各自多了装饰与几何。
+> 0.9.1 已经把装饰母题从"逐帧 paste（实测 5.6 ms）"改成"烘焙进背景底版（1.3–2.0 ms）"，
+> 这也是它比 0.9.0 首版快回来一截的原因。web 引擎本次不跟随场景语法；
+> legacy（不写 `style`）仍逐字节不变。selfcheck 51 → **55 条**。
+> **v0.9.1** 把"逐帧全屏贴装饰"（实测 5.6 ms/帧）改成"装饰烘焙进背景底版"（1.3–2.0 ms），
+> 顺带让装饰跟着镜头缓推一起动（cinema / epic 的强 push 下不再穿帮）。
+> 详见 [CHANGELOG.md](CHANGELOG.md) 的 0.9.0 / 0.9.1 段与
+> [references/scene-grammar.md](skills/video-studio/references/scene-grammar.md)。
 
 ## 安装
 
@@ -101,11 +117,18 @@ TTS 实测时长、AAC 编码都会让真峰/响度/锐度浮动，**别 chasing
 29.00 s / -16.5 LUFS / -1.4 dBTP / 锐度比 1.01（2026-11-10 另一台 Windows 机器复测）——
 **不同机器、不同 TTS 结果，两组都对，别混着引用**。
 
-## 效果：同一个模板，八种气质（v0.5）
+## 效果：同一个模板，八种气质（v0.5 → v0.9）
 
-同一份文字，只改 `"style"`（画风 / 配乐 / 旁白 / 节奏一起变）：
+同一份文字、同一个场景类型（`list`），只改 `"style"`。**v0.9 起不只是换色**：
+每套风格有自己的装饰母题（括角 / 手绘框 / letterbox / 信号条 / 放射线…）、
+字距与编号写法、段界转场、整体重心偏移，所以同一屏的骨架与留白也不同：
 
 <p align="center"><img src="docs/styles/sheet-8-styles.png" width="100%" alt="8 套风格对比：科技深蓝 / 杂志暖白 / 手绘纸感 / 活力撞色 / 极简黑白 / 电影青橙 / 暖灰薄荷 / 深黑鎏金"></p>
+
+> 这张图是 v0.9 用新代码重渲的（8 套风格 × 同一段内容），**换图不是换滤镜**：
+> 标题锚点、装饰语言、编号写法、重心都在变。要看"这一段为什么画成这样"，
+> 跑 `--stage style` 会打印视觉语言（母题/转场/字距/编号/重心），
+> 跑 `--stage layout` 会打印分镜（每段选哪类构图、为什么）并落 `work/storyboard.json`。
 
 三份**不同题材**的短片（全流程真跑：TTS → 排轴 → 配乐 → 音效 → 混音 → 逐帧 → 编码 → 质检；数据见
 `docs/styles/demo-results.json`，是 v0.5 时期的实测快照，片源脚本未随仓库分发，**不可直接复现**；
@@ -137,7 +160,7 @@ cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voice
                                                          #   v0.8 还含 preflight/qaasr/qavmaf（可选：缺了对应门禁记 skipped）
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 51 条环境/回归断言（20 秒内，不联网）
+python selfcheck.py                                     # 55 条环境/回归断言（20 秒内，不联网）
 python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块（仓库/包里的工具，
                                                          #     不在 skills/video-studio/ 内，quickstart 拷出来的目录没有它）
                                                          #     v0.8：已含 preflight/vmaf/asr 三段；29 s 模板片
@@ -230,7 +253,7 @@ skills/video-studio/
   scripts/preflight.py       v0.8 渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          v0.8 全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           v0.8 ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（51 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（55 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）

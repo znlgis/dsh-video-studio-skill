@@ -48,15 +48,18 @@ cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp <SKILL_DIR>/scripts/{preflight.py,qavmaf.py,qaasr.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：51 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：55 条回归护栏（v0.9 新增 52–55），20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
 #    film.json 的 "style": "auto" 会按内容自动选一套（画风+配乐+旁白一起变）；
-#    想锁定就写死风格 id。这条命令打印"为什么选这套"，并落盘 work/style.json。
+#    想锁定就写死风格 id。这条命令打印"为什么选这套"与"视觉语言"（v0.9），并落盘 work/style.json。
 python render.py --script film.json --stage style
 
 # 3b) 改 film.json 的 lines[].text / sub / big / items
+#    v0.9：每段还能写 type（10 类构图之一）与 quote/by/stats/series/steps/sides；
+#    不写就由 grammar 按内容选。排完轴看分镜：--stage layout 会打印"每段为什么是这个构图"，
+#    并落 work/storyboard.json（详见 <SKILL_DIR>/references/scene-grammar.md）。
 #    text = 朗读文本（自然口语）；sub = 上屏字幕（短，一行优先）
 
 # 4) 母版预览（P6）：先只渲几张关键帧看构图/配色，别一上来渲全片
@@ -111,7 +114,7 @@ python render.py --script film.json --work work --stage accept --gate release   
 ```bash
 python render.py ... --stage style    # 只解析风格 -> work/style.json（画风/配乐/旁白/节奏一次定死）
 python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
-python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口）
+python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口；v0.9 还选构图、打印分镜、落 work/storyboard.json）
 python render.py ... --stage cues     # 只出提示点 -> work/cues.json（声音跟着画面走）
 python render.py ... --stage score    # 只出配乐 -> work/music.wav（scorekit）
 python render.py ... --stage sfx      # 只出音效轨 -> work/sfx.wav（sfxkit，按 cues.json）
@@ -375,6 +378,60 @@ python render.py ... --stage style # 用某份 film.json 解析风格并打印"�
 
 字段、指纹规则、加第 9 套风格的步骤见 **references/style-packs.md**。
 
+### 5.5b 场景语法与视觉语言（v0.9）：换风格不再只是换色
+
+v0.5 解决了"画风/配乐/旁白一片一样"，但只到**皮肤**层。骨架没变：当时 `assets/scenes.py`
+只有 3 个绘制器（hook / body / outro），quote / emphasis / calm 全部回落到 body，
+三个绘制器共用"背景板 → 眉标 → 大字 → 副标 → 强调线 → HUD"同一套结构。
+于是 8 套风格换完，灰度量出来的构图骨架（前景占比/重心/边缘/对称）几乎不动——
+用户说的"每个视频都差不多，只是主题和颜色不同"就是这么来的。
+
+v0.9 把这件事拆成三层**正交**的：
+
+| 层 | 决定什么 | 谁读它 | 产物 |
+|---|---|---|---|
+| 叙事 `kind` | 声线、语气、配乐能量 | voicekit / scorekit | 本版**没有新增 kind 值** |
+| 场景 `type`（10 类构图） | 这段画面长什么样 | `assets/scenes.py` 的 10 个绘制器（`_DRAWERS`） | timeline 的 `scene_type`、`work/storyboard.json` |
+| 视觉语言（风格 id） | 这套风格怎么画（母题/转场/字距/重心） | `stylekit.VISUAL_LANGUAGES` | `work/style.json` 的 `language` |
+
+场景类型有 10 个：`hero` 封面 / `statement` 金句 / `list` 要点 / `stat` 数字卡 /
+`compare` 左右对比 / `process` 流程轴 / `quote` 引语 / `chapter` 章节卡 /
+`chart` 数据条 / `outro` 收尾。**不写就不管**——grammar 按内容自动选（字段存在性 >
+关键词 > 结构位置，段长不足按固定表降级，连续同类型 ≤2 段）；
+要锁定就写行级 `lines[].type`。
+
+看选型与环境：
+
+```bash
+python render.py --script film.json --scenes scenes.py --work work --stage layout
+#   分镜: 4 段 / 封面×1 要点列表×2 收尾×1
+#     l01    hook     -> hero      v0 d0  首段/开场
+#     l02    body     -> list      v0 d2  items>=3
+#     ...
+#   同时落 work/storyboard.json：每段的 type / 变体 / 装饰密度 / 理由，可审计
+
+python render.py --script film.json --stage style
+#        视觉语言: 母题=brackets 转场=dip(0.28s) 字距=0.0 编号=dim 重心=(+0,+0)
+#   （坏配置在这里就拦，不等渲完 300 帧）
+```
+
+**legacy 边界（必须记住）**：不写 `style` 字段 = 走 v0.4 三个老绘制器，逐字节不变，
+timeline 里不会出现场景字段。想要新构图，写 `"style": "auto"` 或任意风格 id。
+
+**三条代价与边界**：
+
+1. **比 v0.8.1 慢，但仍在预算内**：模板片 frames 约 **19 ms/帧（54–61 fps）**，预算 25 ms；
+   v0.8.1 约 13 ms/帧（约 75 fps）。慢在 10 类构图各自多了装饰与几何。
+   0.9.0 首版还要慢一截（约 20–24 ms/帧），0.9.1 把装饰母题从"逐帧 paste（实测 5.6 ms）"
+   改成"烘焙进背景底版（1.3–2.0 ms）"才回到现在这个数。换机必须重测。
+2. **同一部片仍锁一个明暗族**：段界跨族会整屏换底、触发闪烁门禁，也像换片。
+3. **web 引擎不跟随**：`--engine web` 的页面由你自己写，本次没有 10 类构图，
+   画风仍只有主题色。
+
+选型规则、`storyboard.json` 字段、加第 11 类构图的步骤、常见误用，见
+[scene-grammar.md](references/scene-grammar.md)；五组视觉语言签名与加第 9 套风格要补什么，
+见 [style-packs.md](references/style-packs.md)。
+
 ### 5.6 混音链（照着做，别自创）
 
 ```
@@ -507,7 +564,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（51 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（55 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -838,7 +895,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**51 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷（legacy 必须回落）/ 51 金帧回归（调 `tools/golden_frames.py`） |
+| `scripts/selfcheck.py` | 回归自检：**55 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷（legacy 必须回落）/ 51 金帧回归（调 `tools/golden_frames.py`）。v0.9 新增 4 条：52 场景语法（10 类分流/确定性/段长门）/ 53 视觉语言包（8 套签名无重复）/ 54 场景类型单真值（4 处集合相等）/ 55 剪影可区分（调 `tools/silhouette_qa.py`） |
 | `scripts/preflight.py` | **（v0.8）渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
@@ -895,7 +952,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 > 词级：4 句 / 64 词 / 末词偏差最大 0.09 s（G10）
 > 画质：VMAF 97.22 / SSIM 0.9928 / 870 帧（G11，参考帧由场景函数重渲）
 > 回读：字符召回 0.803（G12，faster-whisper small；中英混排专名会掉分，< 0.72 才 fail）
-> 自检：selfcheck PASS 51 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 自检：selfcheck PASS 55 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
 > 音频：work/score.json 的 variation 非 0（指纹参与了结构变奏）、audio_similarity --strict 全 PASS
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
@@ -973,7 +1030,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 | v0.8.0 → **v0.8.1** | ① **删一次 `work/segments`**：`--resume` 的分块指纹新增 timeline 内容，旧计划会判"已变化"。② **退出码变严**：`--stage style/stills/frames/mux` 的门禁 fail（或 `--strict-gates` 下有 skipped）现在真的返回 1——靠退出码判定的交付脚本会开始"失败"。③ **`ci_check` 汇总变三档**：`PASS n / FAIL n / SKIP n`，用 `grep 'PASS 12'` 的脚本要改；要"没执行也算失败"加 `--strict`。④ **`filmcheck` 变严**：`video` 块走 `filmkit.video_plan`（1600x900 之类报 error），`qa.vmaf.enabled`/`qa.require_vmaf`/`qa.ssim.enabled` 三个惰性键报 WARN。⑤ **`webengine` 两处改成 fail-closed**：`style=None` + 720p 不再静默裁切、页面 FPS 与注入值不一致会报错。⑥ 金帧基线**不用重录**（像素逐位一致）。 | CHANGELOG 0.8.1「升级须知（v0.8.0 → v0.8.1）」+「行为变化」表 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
-> 升级后建议按 §14 重跑一次自检（51 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+> 升级后建议按 §14 重跑一次自检（55 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
 >
 > **v0.7.2 → v0.8.0 的具体迁移动作**（表里那一行的展开）：
 > 1. 从 `<SKILL_DIR>/scripts/` 拷 `preflight.py` / `qavmaf.py` / `qaasr.py` 过来（不拷也能出片，只是三项门禁 `skipped`）。
@@ -1034,7 +1091,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 51 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 55 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（35 项，会真起无头浏览器，约 60 秒）

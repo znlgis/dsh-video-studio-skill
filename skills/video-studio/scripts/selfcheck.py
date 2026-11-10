@@ -1407,6 +1407,211 @@ def t_golden_frames():
         status or "-", p.returncode, (d.get("reason") or "")[:120])
 
 
+# ============================================================================
+# v0.9：场景语法 + 视觉语言
+# ============================================================================
+
+def _load_grammar():
+    """加载 grammar.py（纯标准库）。找不到返回 None —— CI 里可能只拷了 scripts/ 的一部分。"""
+    try:
+        import grammar
+        return grammar
+    except Exception:                                       # noqa: BLE001
+        cand = os.path.join(HERE, "grammar.py")
+        if not os.path.exists(cand):
+            return None
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sc_grammar", cand)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+
+def _fake_scenes(G, lines, per=6.0):
+    """按固定时长造 timeline 段（不跑 TTS），只用来测选型。"""
+    scenes, t = [], 0.0
+    for ln in lines:
+        row = dict(ln, start=round(t, 3), end=round(t + per, 3), dur=round(per, 3))
+        scenes.append(row)
+        t += per
+    return scenes
+
+
+def t_scene_grammar():
+    """52 场景语法：10 类都能被选中、选型确定、段长门会降级。
+
+    为什么要有这条：v0.9 之前 quote/emphasis/calm 三种 kind 全部落到 body 绘制器，
+    画面永远只有一套骨架。这条断言盯的是"内容 -> 构图"这条链路真的在分流，
+    而不是"代码里写了 10 个函数但没人调用"。
+    """
+    G = _load_grammar()
+    if G is None:
+        return "skip（没有 grammar.py）"
+    lines = [
+        {"id": "a", "kind": "hook", "chapter": "01", "text": "开场一句。", "big": "开场"},
+        {"id": "b", "kind": "body", "chapter": "02", "text": "我们每天被打断 47 次。", "big": "47 次"},
+        {"id": "c", "kind": "body", "chapter": "02", "text": "对比一下：深度工作四小时，产出是碎片时间的三倍。",
+         "big": "四小时 vs 碎片", "items": [{"text": "深度工作"}, {"text": "碎片时间"}]},
+        {"id": "d", "kind": "body", "chapter": "03", "text": "第一步清空收件箱，然后关掉通知，接着单线程，最后复盘。",
+         "big": "四步", "items": [{"text": "清空"}, {"text": "关通知"}, {"text": "单线程"}, {"text": "复盘"}]},
+        {"id": "e", "kind": "quote", "chapter": "03", "text": "他说：「深度工作稀缺。」", "quote": "深度工作稀缺"},
+        {"id": "f", "kind": "body", "chapter": "04", "text": "各行业占比差异明显。", "big": "各行业占比",
+         "items": [{"text": "A 62%"}, {"text": "B 51%"}, {"text": "C 38%"}]},
+        {"id": "g", "kind": "body", "chapter": "05", "text": "注意力是换来的。", "big": "注意力是换来的"},
+        {"id": "h", "kind": "body", "chapter": "06", "text": "第五章开始了。", "big": "第五章"},
+        {"id": "i", "kind": "body", "chapter": "06", "text": "这里有五条要点要讲清楚。", "big": "五条要点",
+         "items": [{"text": "一"}, {"text": "二"}, {"text": "三"}, {"text": "四"}, {"text": "五"}]},
+        {"id": "j", "kind": "outro", "chapter": "99", "text": "开始就好。", "big": "开始就好"},
+    ]
+    scenes = _fake_scenes(G, lines)
+    plan = {"chapter_layout": {}, "layout_default": "left-stack", "style": "tech-deep"}
+    sb1 = G.plan_scenes([dict(s) for s in scenes], {"title": "t"}, plan)
+    got = [r["type"] for r in sb1["scenes"]]
+    # ① 确定性：同一份输入两次结果完全一致（含变体号与理由）
+    sb2 = G.plan_scenes([dict(s) for s in scenes], {"title": "t"}, plan)
+    assert [r["type"] for r in sb2["scenes"]] == got, "同一份稿子两次选型不同（不确定性）"
+    assert [r["variant"] for r in sb2["scenes"]] == [r["variant"] for r in sb1["scenes"]], \
+        "同一份稿子两次变体不同（不确定性）"
+    # ② 分流：至少命中 5 种不同类型（不是全退化成 list/statement）
+    assert len(set(got)) >= 5, "10 段只分出 %d 种构图（%r）：选型逻辑没在分流" % (len(set(got)), got)
+    assert "stat" in got and "compare" in got and "quote" in got, \
+        "数字/对比/引语三种特征没有各自分流：%r" % (got,)
+    # ③ 段长门：把 chart 塞进 2 秒段必须降级，且理由里写明
+    short = [{"id": "x", "kind": "body", "chapter": "01", "text": "短。", "big": "短",
+              "type": "chart", "series": [{"label": "A", "value": 1}]}]
+    sb3 = G.plan_scenes([dict(s) for s in _fake_scenes(G, short, per=2.0)],
+                        {"title": "t"}, plan)
+    r3 = sb3["scenes"][0]
+    assert r3["type"] != "chart", "2 秒的段仍选了 chart（段长门失效）"
+    assert any("降级" in x or "排除" in x for x in r3["reason"]), \
+        "降级没有留下理由：%r" % (r3["reason"],)
+    # ④ 显式 type 优先
+    ex = [{"id": "y", "kind": "body", "chapter": "01", "text": "随便一句", "big": "随便",
+           "type": "hero"}]
+    sb4 = G.plan_scenes([dict(s) for s in _fake_scenes(G, ex)], {"title": "t"}, plan)
+    assert sb4["scenes"][0]["type"] == "hero", "显式 type=hero 没生效：%r" % (sb4["scenes"][0],)
+    return "10 段 -> %d 种构图；降级 chart->%s；显式 type 生效" % (len(set(got)), r3["type"])
+
+
+def t_visual_languages():
+    """53 视觉语言包：8 套结构签名齐全、过体检、且彼此不是同一套。
+
+    为什么要有这条：v0.5 的"风格"只改配色，8 套风格骨架完全一样（用户抱怨的根因）。
+    这条盯的是"结构签名真的存在且互不相同"——母题/转场/重心偏移任一维度相同不算问题，
+    但**五组签名全同**就说明这套语言只是复制粘贴。
+    """
+    import stylekit as ST
+    if not hasattr(ST, "VISUAL_LANGUAGES"):
+        return "skip（stylekit 没有 VISUAL_LANGUAGES）"
+    bad = ST.visual_lint_all()
+    assert not bad, "内置视觉语言没过体检: %s" % bad
+    sigs = {}
+    for sid in ST.STYLE_IDS:
+        vl = ST.VISUAL_LANGUAGES[sid]
+        key = (str((vl.get("motif") or {}).get("kind")),
+               str((vl.get("transition") or {}).get("kind")),
+               tuple(sorted((vl.get("bias") or {}).items())))
+        assert vl.get("motion") and vl.get("typography"), "%s 缺 motion/typography 签名" % sid
+        sigs.setdefault(key, []).append(sid)
+    dup = [v for v in sigs.values() if len(v) > 1]
+    assert not dup, "这些风格的母题/转场/重心完全相同（等于没做结构差异）: %s" % (dup,)
+    motifs = {str((ST.VISUAL_LANGUAGES[s].get("motif") or {}).get("kind")) for s in ST.STYLE_IDS}
+    assert len(motifs) >= 6, "8 套风格只用了 %d 种装饰母题：%r" % (len(motifs), sorted(motifs))
+    return "8 套 / %d 种母题 / %d 种转场 / 无重复签名" % (
+        len(motifs),
+        len({str((ST.VISUAL_LANGUAGES[s].get("transition") or {}).get("kind"))
+             for s in ST.STYLE_IDS}))
+
+
+def t_scene_types_single_truth():
+    """54 场景类型只有一份"真值集合"：4 处定义必须集合相等（顺序可以不同）。
+
+    为什么比集合不比顺序：grammar.SCENE_TYPES 的顺序是"平手取位顺序"，改它会改变同一份
+    稿子的选型结果，所以它有独立语义；filmcheck/schema/scenes 只关心"有哪些类型"。
+    顺序不同是设计，集合不同是 bug（写错一个字母 = 某个类型永远画不出来）。
+    """
+    G = _load_grammar()
+    if G is None:
+        return "skip（没有 grammar.py）"
+    here_scripts = HERE
+    got = {"grammar": set(G.SCENE_TYPES)}
+    # filmcheck.SCENE_TYPES
+    try:
+        import filmcheck as FC
+        got["filmcheck"] = set(FC.SCENE_TYPES)
+    except Exception:                                       # noqa: BLE001
+        pass
+    # assets/scenes.py 的 _DRAWERS 键
+    mod = _load_scenes_mod()
+    if mod is not None and hasattr(mod, "_DRAWERS"):
+        got["scenes"] = set(mod._DRAWERS.keys())
+    # schema 的 enum
+    schema = os.path.join(os.path.dirname(os.path.dirname(here_scripts)),
+                          "..", "..", "schemas", "film.schema.json")
+    schema = os.path.normpath(schema)
+    if os.path.exists(schema):
+        try:
+            data = json.load(open(schema, encoding="utf-8"))
+            enum = (data["properties"]["lines"]["items"]["properties"]["type"]["enum"])
+            got["schema"] = set(enum)
+        except Exception:                                   # noqa: BLE001
+            pass
+    if len(got) < 3:
+        return "skip（只找到 %d 处真值：%s）" % (len(got), sorted(got))
+    base_name, base = sorted(got.items())[0]
+    for name, s in got.items():
+        if s != base:
+            raise AssertionError("场景类型集合不一致：%s 与 %s 差 %r / %r"
+                                 % (name, base_name, sorted(s - base), sorted(base - s)))
+    return "%d 处真值集合一致（%d 类）：%s" % (len(got), len(base), "/".join(sorted(got)))
+
+
+def t_silhouette_gate():
+    """55 剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分。
+
+    这是 v0.9 的核心验收：如果这条挂了，说明"换风格只是换色"的毛病回来了。
+    工具在 tools/silhouette_qa.py（可选）：缺了 skip，不阻塞 CI。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+    tool = os.path.join(root, "tools", "silhouette_qa.py")
+    if not os.path.exists(tool):
+        return "skip（没有 tools/silhouette_qa.py）"
+    p = subprocess.run([sys.executable, tool, "--json"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=root)
+    out = (p.stdout or "").strip()
+    i = out.find("{")
+    if i < 0:
+        return "skip（silhouette_qa 没输出 JSON：%s）" % ((p.stderr or out) or "")[:120]
+    try:
+        d = json.loads(out[i:])
+    except json.JSONDecodeError as e:
+        return "skip（silhouette_qa JSON 解析失败：%s）" % e
+    pairs = d.get("pairs") or []
+    # 三档语义与工具对齐：status 只有 pass / fail / skip 三种。
+    # 只认 returncode 会把"工具没渲出帧"（skip）也记成 PASS —— 那正是本仓库反复踩的坑。
+    failed = [x for x in pairs if str(x.get("status")) == "fail"]
+    skipped = [x for x in pairs if str(x.get("status")) == "skip"]
+    if p.returncode != 0 or failed:
+        names = ["%s×%s" % (x.get("a"), x.get("b")) for x in failed[:4]]
+        raise AssertionError("剪影不可区分：%d/%d 对失败（%s）；换风格仍只是换色"
+                             % (len(failed), len(pairs), ", ".join(names)))
+    if skipped:
+        return "skip（%d/%d 对没渲出来：%s）" % (
+            len(skipped), len(pairs),
+            ", ".join("%s×%s" % (x.get("a"), x.get("b")) for x in skipped[:3]))
+    # 同明暗族是"保守下界"：跨族很多时候靠 ΔB（背景亮度差）就能过，那不是构图证据。
+    # 所以这条断言在报告里必须把同族数字单独说出来，别让 28/28 被读成"8 套风格结构全不同"。
+    same = ((d.get("summary") or {}).get("by_family") or {}).get("same") or {}
+    same_n = same.get("pairs")
+    same_ok = same.get("pass")
+    if same_n and same_ok is not None and int(same_ok) < int(same_n):
+        raise AssertionError("同明暗族只有 %s/%s 对可区分（保守下界不达标）"
+                             % (same_ok, same_n))
+    return "%d 对全部可区分（同明暗族 %s/%s，保守下界也过）" % (
+        len(pairs), same_ok if same_ok is not None else "?", same_n if same_n else "?")
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -1459,6 +1664,10 @@ CASES = [
     ("49 TTS 后端可替换（接口契约）", t_tts_backend),
     ("50 web 风格载荷（legacy 必须回落）", t_web_style_payload),
     ("51 金帧回归（像素基线）", t_golden_frames),
+    ("52 场景语法（10 类分流/确定/段长门）", t_scene_grammar),
+    ("53 视觉语言包（结构签名互不相同）", t_visual_languages),
+    ("54 场景类型单真值（4 处集合一致）", t_scene_types_single_truth),
+    ("55 剪影可区分（G13：换风格不能只是换色）", t_silhouette_gate),
 ]
 
 

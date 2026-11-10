@@ -531,6 +531,205 @@ STYLES[LEGACY_STYLE] = {
     "pacing": {"lead": 0.55, "tail": 0.85, "min_dur": 3.0, "hold": 0.0},
 }
 
+# ============================================================================
+# 四、视觉语言包（VISUAL_LANGUAGES）：v0.9
+# ============================================================================
+#
+# 为什么还要一层
+# -------------
+# v0.5 的 THEMES 只管"皮肤"：配色、字体族、纹理、颗粒、字距、缓动、HUD、3 种版式几何。
+# 8 套风格共用同一批版式与同一套装饰（开场放射线 + 收尾光点环），所以换风格只是换色，
+# 构图骨架（剪影）没变 —— 这正是"每个视频都差不多"的根因。
+#
+# 这一层补的是**结构签名**，四组：
+#   motion     入场怎么进、镜头怎么推、呼吸元素多快
+#   motif      这套风格独有的装饰图形语言（直角括角 / 手绘内框 / letterbox / 信号条 …）
+#   transition 段与段之间怎么过（dip / wash / 纸卷 / 斜擦 / 硬切 / 放射环）
+#   typography 字距、行高、对齐、编号写法、display:body 字号比
+#
+# 设计原则（与 THEMES 一致）
+#   1. 纯数据：不 import PIL / filmkit，scenes.py 反过来读我，成环就炸。
+#   2. 只追加不改顺序：新风格往 STYLE_IDS 末尾追加，老风格的指纹映射不漂。
+#   3. 每条签名都必须"能被剪影看出差别"：只改颜色/字重的项不算签名。
+#   4. 全部受 PIL 预算约束：装饰要么预烘焙成静态层，要么是 O(几) 次 ImageDraw 调用；
+#      禁每帧全屏 GaussianBlur（实测 30–60ms）与全屏双线性 resize（29ms），预算 25ms。
+#
+# 剪影判据（tools/silhouette_qa.py 用的口径，也是 P1 的验收标准）
+#   同一段内容在两种风格下渲 3 帧 → 灰度 → 以四角亮度中位数为基准三值化 →
+#   比较 前景占比 F / 前景质心 (Cx,Cy) / 四边覆盖率 B / 左右对称度 S。
+#   五项里至少一项达标才算"这套风格真的不一样"：
+#     ΔF ≥ 6pp、|ΔCx| ≥ 8pp、|ΔCy| ≥ 8pp、ΔB ≥ 14pp、ΔS ≥ 0.20
+
+VISUAL_MOTIFS = ("brackets", "hairlines", "handdrawn", "slabs",
+                 "minimal", "letterbox", "signal", "rays")
+VISUAL_TRANSITIONS = ("dip", "wash", "paper", "wipe", "cut", "iris")
+NUMBER_STYLES = ("dim", "serif", "cn", "block", "roman", "timecode", "dot", "gilt")
+
+VISUAL_LANGUAGES = {}
+
+VISUAL_LANGUAGES["tech-deep"] = {
+    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
+    "motif": {"kind": "brackets", "density": 1.0,
+              "detail": {"corner": 24, "rule_step": 120, "scan": True}},
+    "transition": {"kind": "dip", "dur": 0.28},
+    "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
+                   "number": "dim", "ratio": 1.50},
+    "bias": {"x": 0, "y": 0, "inset": 0},
+    "layout_cycle": ("left-stack", "split-right", "center-stack"),
+}
+
+VISUAL_LANGUAGES["magazine"] = {
+    "motion": {"ease": "out5", "enter": (0.60, 1.10), "push": 0.001, "breathe_hz": 0.50},
+    "motif": {"kind": "hairlines", "density": 0.85,
+              "detail": {"header_rule": True, "column_rule": True, "pageno": True}},
+    "transition": {"kind": "wash", "dur": 0.35},
+    "typography": {"tracking": 2.0, "line_gap": 1.34, "align": "right",
+                   "number": "serif", "ratio": 1.53},
+    "bias": {"x": 60, "y": -20, "inset": 0},
+    "layout_cycle": ("split-right", "left-stack", "center-stack"),
+}
+
+VISUAL_LANGUAGES["paper"] = {
+    "motion": {"ease": "inOut3", "enter": (0.55, 1.00), "push": 0.03, "breathe_hz": 0.42},
+    "motif": {"kind": "handdrawn", "density": 1.0,
+              "detail": {"wobble": 3.0, "seal": True, "tape": True}},
+    "transition": {"kind": "paper", "dur": 0.35},
+    "typography": {"tracking": 1.0, "line_gap": 1.36, "align": "left",
+                   "number": "cn", "ratio": 1.53},
+    # 重心偏移（px）：paper 是"手账"气质——内容整体压在左下、右侧留出大片空白给框与胶带；
+    # 这不是配色能表达的差异，是构图差异（剪影 Cx/Cy 直接反映它）。
+    "bias": {"x": -150, "y": 80, "inset": 40},
+    "layout_cycle": ("left-stack", "center-stack", "split-right"),
+}
+
+VISUAL_LANGUAGES["vivid"] = {
+    "motion": {"ease": "outBack", "enter": (0.35, 0.70), "push": 0.10, "breathe_hz": 1.10},
+    "motif": {"kind": "slabs", "density": 1.0,
+              "detail": {"bar_h": 24, "slant": 18, "sticker": True}},
+    "transition": {"kind": "wipe", "dur": 0.20},
+    "typography": {"tracking": 1.0, "line_gap": 1.26, "align": "center",
+                   "number": "block", "ratio": 2.97},
+    "bias": {"x": 0, "y": 40, "inset": 0},
+    "layout_cycle": ("center-stack", "left-stack", "split-right"),
+}
+
+VISUAL_LANGUAGES["mono"] = {
+    "motion": {"ease": "inOut3", "enter": (0.50, 0.90), "push": 0.02, "breathe_hz": 0.35},
+    "motif": {"kind": "minimal", "density": 0.55,
+              "detail": {"rule_h": 2, "box_radius": 0}},
+    "transition": {"kind": "cut", "dur": 0.0},
+    "typography": {"tracking": 6.0, "line_gap": 1.40, "align": "center",
+                   "number": "roman", "ratio": 3.15},
+    "bias": {"x": 0, "y": 0, "inset": 0},
+    "layout_cycle": ("center-stack", "center-stack", "center-stack"),
+}
+
+VISUAL_LANGUAGES["cinema"] = {
+    "motion": {"ease": "inOut3", "enter": (0.70, 1.20), "push": 0.12, "breathe_hz": 0.30},
+    "motif": {"kind": "letterbox", "density": 1.0,
+              "detail": {"top": 40, "bottom": 44, "flares": True}},
+    "transition": {"kind": "dip", "dur": 0.45},
+    "typography": {"tracking": 3.0, "line_gap": 1.38, "align": "center",
+                   "number": "timecode", "ratio": 1.62},
+    "bias": {"x": 0, "y": 30, "inset": 0},
+    "layout_cycle": ("center-stack", "left-stack", "split-right"),
+}
+
+VISUAL_LANGUAGES["lo-fi"] = {
+    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.05, "breathe_hz": 0.60},
+    "motif": {"kind": "signal", "density": 0.90,
+              "detail": {"bars": 12, "radius": 18, "note": True}},
+    "transition": {"kind": "wash", "dur": 0.30},
+    "typography": {"tracking": 1.0, "line_gap": 1.36, "align": "left",
+                   "number": "dot", "ratio": 1.48},
+    # lo-fi 是"桌面便签"气质：整体右移、内容偏上，底部留给信号条与时间戳。
+    "bias": {"x": 60, "y": -70, "inset": 0},
+    "layout_cycle": ("left-stack", "split-right", "center-stack"),
+}
+
+VISUAL_LANGUAGES["epic"] = {
+    "motion": {"ease": "out5", "enter": (0.70, 1.20), "push": 0.14, "breathe_hz": 0.28},
+    "motif": {"kind": "rays", "density": 1.0,
+              "detail": {"rays": 18, "rule_gap": 26, "frame": True}},
+    "transition": {"kind": "iris", "dur": 0.40},
+    "typography": {"tracking": 4.0, "line_gap": 1.32, "align": "center",
+                   "number": "gilt", "ratio": 3.18},
+    "bias": {"x": 0, "y": -30, "inset": 0},
+    "layout_cycle": ("center-stack", "center-stack", "center-stack"),
+}
+
+# legacy：v0.4 行为，没有视觉语言（scenes.py 走 _LEGACY_DRAWERS，不会读到这张表）
+VISUAL_LANGUAGES[LEGACY_STYLE] = {
+    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
+    "motif": {"kind": "brackets", "density": 1.0, "detail": {}},
+    "transition": {"kind": "cut", "dur": 0.0},
+    "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
+                   "number": "dim", "ratio": 1.50},
+    "layout_cycle": ("left-stack",),
+}
+
+
+def visual_language(style_id):
+    """取风格的结构签名；未知 id 退到默认风格（不让拼写错误炸掉渲染）。"""
+    sid = str(style_id or "").strip()
+    got = VISUAL_LANGUAGES.get(sid)
+    if got is not None:
+        return got
+    return VISUAL_LANGUAGES[DEFAULT_STYLE]
+
+
+def visual_lint(style_id):
+    """结构签名体检（--stage style 就拦，不等到渲完 300 帧）。返回问题列表，空 = 过。"""
+    bad = []
+    sid = str(style_id or "")
+    if sid not in VISUAL_LANGUAGES:
+        return ["风格 %r 没有视觉语言包" % sid]
+    vl = VISUAL_LANGUAGES[sid]
+    mo = vl.get("motion") or {}
+    mf = vl.get("motif") or {}          # 注意：mo = motion，mf = motif，别混用
+    tr = vl.get("transition") or {}
+    ty = vl.get("typography") or {}
+    if str(mf.get("kind")) not in VISUAL_MOTIFS:
+        bad.append("motif.kind=%r 不在 %s 里" % (mf.get("kind"), " / ".join(VISUAL_MOTIFS)))
+    if str(tr.get("kind")) not in VISUAL_TRANSITIONS:
+        bad.append("transition.kind=%r 不在 %s 里"
+                   % (tr.get("kind"), " / ".join(VISUAL_TRANSITIONS)))
+    if not 0.0 <= float(tr.get("dur") or 0.0) <= 0.60:
+        # 段界 veil 超过 0.6s 会吃掉 3–6s 节奏下限，也会把两段内容糊在一起
+        bad.append("transition.dur=%r 必须在 0~0.60s（段界 veil 上限）" % tr.get("dur"))
+    if str(ty.get("number")) not in NUMBER_STYLES:
+        bad.append("typography.number=%r 不在 %s 里"
+                   % (ty.get("number"), " / ".join(NUMBER_STYLES)))
+    if not 1.0 <= float(ty.get("ratio") or 0.0) <= 3.6:
+        bad.append("typography.ratio=%r 必须在 1.0~3.6（display:body 字号比）" % ty.get("ratio"))
+    if not 0.0 <= float(ty.get("tracking") or 0.0) <= 8.0:
+        bad.append("typography.tracking=%r 必须在 0~8px" % ty.get("tracking"))
+    if not 1.15 <= float(ty.get("line_gap") or 0.0) <= 1.55:
+        bad.append("typography.line_gap=%r 必须在 1.15~1.55" % ty.get("line_gap"))
+    if not 0.0 <= float(mf.get("density") or 0.0) <= 1.0:
+        bad.append("motif.density=%r 必须在 0~1" % mf.get("density"))
+    if float(mf.get("density") or 0.0) <= 0.0 and str(mf.get("kind")) != "minimal":
+        bad.append("motif.density=0 只允许用于 minimal（否则等于没有装饰语言）")
+    enter = mo.get("enter") or (0.45, 0.85)
+    if (not isinstance(enter, (list, tuple)) or len(enter) != 2
+            or not 0.0 < float(enter[0]) <= float(enter[1]) <= 1.6):
+        bad.append("motion.enter=%r 必须是 (起, 止) 且 0 < 起 <= 止 <= 1.6 秒" % (enter,))
+    if not 0.0 <= float(mo.get("push") or 0.0) <= 0.16:
+        # push > 0.16 时背景层放大后内容会被推出 SAFE（_bg_plate 只裁不缩）
+        bad.append("motion.push=%r 必须在 0~0.16（超过会把内容推出安全区）" % mo.get("push"))
+    return bad
+
+
+def visual_lint_all():
+    """全部内置风格的视觉语言体检，返回 {style_id: [问题]}（只有有问题的才在里面）。"""
+    out = {}
+    for sid in STYLE_IDS:
+        bad = visual_lint(sid)
+        if bad:
+            out[sid] = bad
+    return out
+
+
 ALL_STYLE_IDS = (LEGACY_STYLE,) + STYLE_IDS
 
 

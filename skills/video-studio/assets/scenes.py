@@ -748,75 +748,471 @@ def _hud(img, th, chapter, progress, title):
 
 
 # ============================================================================
-# 三、三段场景（hook / body / outro）
+# 三、场景语法（v0.9：10 类构图 × 8 套视觉语言）
 # ============================================================================
+#
+# 为什么重写这一节
+# ---------------
+# v0.5 的 _draw_hook / _draw_body / _draw_outro 是"一套骨架 + 换色"：背景板 → 眉标 →
+# 大字 → 副标题 → 强调线 → HUD，三种 kind 只差字号与位置。于是 8 套风格换完只剩配色不同。
+# v0.9 把"画什么"（scene type，由 grammar.py 按内容选）与"怎么画"（视觉语言，由 stylekit
+# 的 VISUAL_LANGUAGES 给）拆开：
+#   · 10 类构图各自有独立的视觉重心与留白（hero 偏左上 / statement 正中 / compare 强制对称 …）
+#   · 每套风格有自己的装饰母题（括角 / 手绘内框 / letterbox / 信号条 …）与转场签名
+#   · 片内还有 variant 轮换，避免"每屏同一个骨架"
+#
+# 性能纪律（这一节最容易把 25ms 预算吃光）
+#   · 装饰母题全部**预烘焙**成一张 RGBA 图层，逐帧只 paste（~0.3ms）
+#   · 文字用 _draw_text（字号不重采样，只过视差坐标）
+#   · 禁每帧全屏 GaussianBlur（30–60ms）/ 全屏双线性 resize（29ms）/ np.array 往返（8–11ms）
+#   · 段界 veil 只在段首 ≤0.45s 内生效，用 base plate 直接 paste/blend，不新增模糊
+
+# ---------------- 视觉语言 / 场景字段 ----------------
+
+_DEFAULT_LANG = {
+    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
+    "motif": {"kind": "minimal", "density": 0.0, "detail": {}},
+    "transition": {"kind": "cut", "dur": 0.0},
+    "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
+                   "number": "dim", "ratio": 1.50},
+    "layout_cycle": ("left-stack",),
+}
+
+_DECOR_LEVELS = (0.55, 0.75, 1.0)
+
+
+def _lang(plan, th):
+    """本片的视觉语言包。plan["language"] 由 stylekit 解析时塞进来；没有就按主题 id 查。"""
+    got = (plan or {}).get("language")
+    if isinstance(got, dict):
+        return got
+    try:
+        return ST.visual_language(str((th or {}).get("id") or "tech-deep"))
+    except Exception:                                    # noqa: BLE001 - 老 stylekit 没有这一层
+        return _DEFAULT_LANG
+
+
+def _scene_type(scene):
+    """本段用哪个绘制器：优先 timeline 里 grammar 写好的 scene_type，其次按 kind 映射。"""
+    t = str(scene.get("scene_type") or "").strip()
+    if t:
+        return t
+    kind = str(scene.get("kind") or "body")
+    return {"hook": "hero", "outro": "outro", "quote": "quote",
+            "emphasis": "statement", "calm": "statement"}.get(kind, "list")
+
+
+def _decor_scale(scene, lang):
+    """装饰强度 = 片内密度档（0/1/2 -> 0.55/0.75/1.0）× 该风格母题密度。"""
+    try:
+        lvl = int(scene.get("scene_decor") or 0)
+    except (TypeError, ValueError, OverflowError):
+        lvl = 0
+    lvl = max(0, min(2, lvl))
+    base = _DECOR_LEVELS[lvl]
+    dens = float((lang.get("motif") or {}).get("density") or 1.0)
+    return base * dens
+
 
 def _progress(tg, script):
+    """全片进度（0..1），HUD 进度条用。_total 由 render.py 注入（st_frames/st_stills）。"""
     return clamp(float(tg) / max(0.1, float(script.get("_total") or 1.0)))
 
 
-def _deco_rings(img, th, v, t, cx, cy, strength):
-    """开场放射线 + 光点（位置过视差；颜色/透明度按主题）。"""
-    d = ImageDraw.Draw(img, "RGBA")
+def _phase(scene):
+    """段相位（弧度）。NaN/Inf 一律当 0 —— 它们会让 int(round()) 直接抛
+    ValueError: cannot convert float NaN to integer，而那是在渲染第 N 帧才炸。"""
+    try:
+        v = float(scene.get("scene_phase") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v or v in (float("inf"), float("-inf")):        # NaN / ±Inf
+        return 0.0
+    return v
+
+
+def _variant(scene):
+    try:
+        return int(scene.get("scene_variant") or 0) % 3
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _scene_layout(scene, th):
+    """本段版式：grammar 按 chapter 写好的 scene_layout 优先，其次主题默认。"""
+    name = str(scene.get("scene_layout") or th.get("layout") or "left-stack")
+    return ST.LAYOUTS.get(name) or ST.LAYOUTS["left-stack"]
+
+
+def _typo(lang):
+    return lang.get("typography") or _DEFAULT_LANG["typography"]
+
+
+def _bias(lang):
+    """该风格的整体重心偏移 (dx, dy, inset)，单位 px。
+
+    为什么需要它：剪影判据里 Cx/Cy 是"前景质心"，而"同样左对齐、同样字号"的两套浅色主题
+    （paper / lo-fi）即使装饰不同，质心也几乎重合——实测这对 ΔCx 只有 2.3pp。
+    把"这套风格的画面重心往哪偏"做成数据，是最便宜、也最像"导演习惯"的差异化手段。
+    """
+    b = (lang or {}).get("bias") or {}
+    try:
+        return (float(b.get("x") or 0.0), float(b.get("y") or 0.0), float(b.get("inset") or 0.0))
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0)
+
+
+def _tracking(th, lang):
+    return float(th.get("tracking") or 0.0) + float(_typo(lang).get("tracking") or 0.0)
+
+
+def _gap(th, lang):
+    return float(th.get("line_gap") or _typo(lang).get("line_gap") or 1.3)
+
+
+# ---------------- 装饰母题（一次烘焙，逐帧只 paste） ----------------
+
+def _motif_key(th, lang):
+    """母题图层/底版的缓存键（主题 + 母题 + 密度 + 参与绘制的颜色）。
+
+    单独抽出来是为了让 _motif_layer（RGBA 图层）与 _plate（合成后的底版）用同一把钥匙：
+    两者必须一起失效，否则改了主题色会拿到"新图层 + 旧底版"的错配画面。
+    """
+    mf = lang.get("motif") or _DEFAULT_LANG["motif"]
+    return _hashable(("motif", th.get("id"), mf.get("kind"),
+                      tuple(sorted((str(k), _hashable(v)) for k, v in (mf.get("detail") or {}).items())),
+                      round(float(mf.get("density") or 0.0), 3),
+                      th["accent"], th["rule"], th["bg"], th["bg2"]))
+
+
+def _motif_layer(th, lang):
+    """把该风格独有的装饰图形烘焙成一张全屏 RGBA 图层（不含动态）。
+
+    为什么烘焙：这些图形是静态的（括角、页眉线、letterbox、信号条），
+    逐帧重画一次就是 3–8ms。注意：v0.9.0 这里写的是"paste 只要 0.3ms"，
+    实测全屏 RGBA paste 是 **5.6ms**（Pillow 13 / 1080p），所以 v0.9.1 起
+    装饰直接烘焙进底版（见 _plate），逐帧只 copy 底版，不再单独 paste。
+    """
+    mf = lang.get("motif") or _DEFAULT_LANG["motif"]
+    key = _motif_key(th, lang)
+    got = _CACHE.get(key)
+    if got is not None:
+        return got
+    kind = str(mf.get("kind") or "minimal")
+    det = mf.get("detail") or {}
+    dens = float(mf.get("density") or 0.0)
+    lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(lay, "RGBA")
+    accent = th["accent"]
     rule = th["rule"]
-    p = smooth(rng(t, 0.15, 2.6))
-    opacity = clamp(0.30 if not ST.is_dark(th) else 0.27) * strength
-    for i in range(18):
-        a = (i / 18.0) * 2 * math.pi + 0.2
-        rr = 60 + 420 * p * (0.55 + 0.45 * K.hash2(i, 11))
-        x2 = cx + math.cos(a) * rr
-        y2 = cy + math.sin(a) * rr * 0.62
-        d.line([v.x(cx), v.y(cy), v.x(x2), v.y(y2)],
-               fill=_rgba(rule, 255 * opacity * p), width=1)
-        if K.hash2(i, 9) > 0.45:
-            img = _soft_dot(img, v.x(x2), v.y(y2), 3 + 5 * K.hash2(i, 5),
-                            th["accent2"], 0.50 * p * strength)
-    img = _soft_dot(img, v.x(cx), v.y(cy), 24 + 5 * math.sin(t * 2.2),
-                    th["accent"], 0.85 * rng(t, 0.1, 0.7) * strength)
+    ink = th["ink"]
+    dark = ST.is_dark(th)
+
+    def a(v):
+        return int(max(0, min(255, round(v))))
+
+    if kind == "brackets":
+        # 四角 L 形括角 + 右侧数据刻度尺：科技风的"仪器感"
+        c = int(det.get("corner") or 24)
+        t = 2
+        for (x, y, dx, dy) in ((48, 40, 1, 1), (W - 48, 40, -1, 1),
+                               (48, H - 48, 1, -1), (W - 48, H - 48, -1, -1)):
+            d.line([(x, y), (x + dx * c, y)], fill=_rgba(accent, a(150 * dens)), width=t)
+            d.line([(x, y), (x, y + dy * c)], fill=_rgba(accent, a(150 * dens)), width=t)
+        step = int(det.get("rule_step") or 120)
+        for i, yy in enumerate(range(150, 860, step)):
+            long = (i % 3 == 0)
+            d.line([(W - 34, yy), (W - 34 + (18 if long else 10), yy)],
+                   fill=_rgba(rule, a(70 * dens)), width=1)
+        if det.get("scan"):
+            d.rectangle([0, 120, W, 124], fill=_rgba(rule, a(18 * dens)))
+    elif kind == "hairlines":
+        # 杂志：双横线页眉 + 栏间细线 + 右上页码位
+        d.rectangle([64, 112, W - 64, 114], fill=_rgba(rule, a(120 * dens)))
+        d.rectangle([64, 118, W - 64, 119], fill=_rgba(rule, a(60 * dens)))
+        if det.get("column_rule"):
+            d.rectangle([W // 2, 160, W // 2 + 1, 820], fill=_rgba(rule, a(26 * dens)))
+        d.rectangle([64, 838, W - 64, 839], fill=_rgba(rule, a(70 * dens)))
+    elif kind == "handdrawn":
+        # 纸感：不规则内框（vnoise 抖动）+ 四角胶带 + 方印
+        wob = float(det.get("wobble") or 3.0)
+        # 底边收在 1016：字幕带从 872 开始，外框若画到 1024 会被字幕底板压住一截，
+        # 看起来像"框没画完"。
+        x0, y0, x1, y1 = 56, 52, W - 56, 1016
+        n = 10
+        pts = []
+        for i in range(n):                       # 上边
+            pts.append((x0 + (x1 - x0) * i / (n - 1.0), y0 + wob * (K.vnoise(i * 0.7, 5) - 0.5)))
+        for i in range(n):                       # 右边
+            pts.append((x1 + wob * (K.vnoise(i * 0.9, 7) - 0.5), y0 + (y1 - y0) * i / (n - 1.0)))
+        for i in range(n):                       # 下边
+            pts.append((x1 - (x1 - x0) * i / (n - 1.0), y1 + wob * (K.vnoise(i * 0.6, 9) - 0.5)))
+        for i in range(n):                       # 左边
+            pts.append((x0 + wob * (K.vnoise(i * 0.8, 11) - 0.5), y1 - (y1 - y0) * i / (n - 1.0)))
+        d.line(pts + [pts[0]], fill=_rgba(rule, a(120 * dens)), width=2, joint="curve")
+        if det.get("tape"):
+            for (tx, ty, ww, hh) in ((44, 40, 96, 26), (W - 140, 40, 96, 26)):
+                d.polygon([(tx, ty + 4), (tx + ww, ty), (tx + ww, ty + hh), (tx, ty + hh + 4)],
+                          fill=_rgba(_mix(ink, th["bg"], 0.72), a(70 * dens)))
+        if det.get("seal"):
+            sx, sy = W - 150, 128
+            d.rectangle([sx, sy, sx + 58, sy + 58], outline=_rgba(th["accent2"], a(150 * dens)),
+                        width=3)
+    elif kind == "slabs":
+        # 撞色：粗色条横贯 + 斜切块 + 圆形贴纸
+        bh = int(det.get("bar_h") or 24)
+        d.rectangle([0, 118, W, 118 + bh], fill=_rgba(accent, a(200 * dens)))
+        sl = int(det.get("slant") or 18)
+        d.polygon([(0, 118 + bh), (W, 118 + bh), (W, 118 + bh + sl), (0, 118 + bh + sl + 8)],
+                  fill=_rgba(th["accent2"], a(120 * dens)))
+        d.rectangle([0, 846, W, 852], fill=_rgba(accent, a(140 * dens)))
+        if det.get("sticker"):
+            for (cx, cy, r) in ((96, 196, 34), (W - 96, 196, 22)):
+                d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_rgba(accent, a(190 * dens)),
+                          width=8)
+    elif kind == "minimal":
+        # 极简：只有一条 2px 横线（其余全是留白，这就是它的"装饰语言"）
+        d.rectangle([W // 2 - 600, 700, W // 2 + 600, 702], fill=_rgba(rule, a(200 * dens)))
+        d.rectangle([W // 2 - 120, 742, W // 2 + 120, 743], fill=_rgba(rule, a(90 * dens)))
+    elif kind == "letterbox":
+        # 电影：上下遮幅（画幅外一律黑），内缘一条 1px 亮线
+        top = int(det.get("top") or 40)
+        bot = int(det.get("bottom") or 44)
+        d.rectangle([0, 0, W, top], fill=(0, 0, 0, 255))
+        d.rectangle([0, H - bot, W, H], fill=(0, 0, 0, 255))
+        d.rectangle([0, top, W, top + 1], fill=_rgba(rule, a(40 * dens)))
+        d.rectangle([0, H - bot - 1, W, H - bot], fill=_rgba(rule, a(40 * dens)))
+        if det.get("flares"):
+            img = Image.fromarray(np.zeros((2, 2, 4), dtype=np.uint8), "RGBA")
+    elif kind == "signal":
+        # lo-fi：底部 12 格信号条 + 时间戳位
+        bars = int(det.get("bars") or 12)
+        bw, gap = 10, 6
+        total = bars * bw + (bars - 1) * gap
+        x0 = W - 64 - total
+        y0 = 806
+        for i in range(bars):
+            on = i < bars - 2
+            d.rectangle([x0 + i * (bw + gap), y0, x0 + i * (bw + gap) + bw, y0 + 14],
+                        fill=_rgba(accent if on else rule, a((170 if on else 40) * dens)))
+    elif kind == "rays":
+        # 史诗：上下双装饰线 + 18 条放射线 + 内细框
+        d.rectangle([0, 104, W, 106], fill=_rgba(accent, a(150 * dens)))
+        d.rectangle([0, 110, W, 111], fill=_rgba(accent, a(60 * dens)))
+        d.rectangle([0, H - 112, W, H - 110], fill=_rgba(accent, a(150 * dens)))
+        d.rectangle([0, H - 106, W, H - 105], fill=_rgba(accent, a(60 * dens)))
+        cx, cy = W * 0.5, 470.0
+        for i in range(int(det.get("rays") or 18)):
+            ang = (i / 18.0) * 2.0 * math.pi
+            r0, r1 = 250.0, 430.0 + 40.0 * K.hash2(i, 3)
+            d.line([(cx + math.cos(ang) * r0, cy + math.sin(ang) * r0 * 0.62),
+                    (cx + math.cos(ang) * r1, cy + math.sin(ang) * r1 * 0.62)],
+                   fill=_rgba(accent, a(26 * dens)), width=1)
+        if det.get("frame"):
+            d.rectangle([52, 96, W - 52, 1016], outline=_rgba(accent, a(50 * dens)), width=1)
+    _CACHE[key] = lay
+    return lay
+
+
+_PLATE_ORDER = []
+
+
+def _plate(th, lang, scene, s_bg):
+    """背景板 + 装饰母题合成后的整帧底版（v0.9.1）。
+
+    这是单帧预算里最大的一处优化：装饰是静态的，逐帧单独 paste 一张全屏 RGBA 要 5.6ms，
+    合成进底版后逐帧只剩 copy（1.3ms）或 EXTENT 缩放（1.7–2.0ms）。
+    顺带一个好处：镜头缓推现在会把装饰一起推——装饰本来就该跟着镜头走，
+    以前"背景推、装饰不动"在强 push 的风格（cinema 0.12 / epic 0.14）里其实是穿帮。
+
+    缓存：一个片子只用一套主题 + 一套母题，密度档最多 3 档 -> 最多 3 张底版（约 18MB）。
+    用 LRU 限 4 张，防多片/多主题同进程时无限增长。
+    """
+    base = _bg(th)
+    if _decor_scale(scene, lang) <= 0.02:
+        if s_bg <= 1.0008:
+            return base.copy()
+        return _bg_plate(th, s_bg)
+    key = _hashable(("plate", _motif_key(th, lang),
+                     int(max(0, min(2, int(scene.get("scene_decor") or 0))))))
+    got = _CACHE.get(key)
+    if got is None:
+        lay = _motif_layer(th, lang)
+        got = base.copy()
+        got.paste(lay, (0, 0), lay)
+        _CACHE[key] = got
+        _PLATE_ORDER.append(key)
+        while len(_PLATE_ORDER) > 4:            # LRU：只留最近 4 张
+            old = _PLATE_ORDER.pop(0)
+            if old != key:
+                _CACHE.pop(old, None)
+    if s_bg <= 1.0008:
+        return got.copy()
+    bw, bh = W / s_bg, H / s_bg
+    x0 = (W - bw) * 0.5
+    y0 = (H - bh) * 0.5
+    return got.transform((W, H), Image.EXTENT, (x0, y0, x0 + bw, y0 + bh), Image.NEAREST)
+
+
+def _apply_motif(img, th, lang, scene):
+    """逐帧贴装饰层（0.3ms）。密度为 0 时直接跳过。"""
+    if _decor_scale(scene, lang) <= 0.02:
+        return img
+    lay = _motif_layer(th, lang)
+    img.paste(lay, (0, 0), lay)
     return img
 
 
-def _draw_hook(scene, t, dur, tg, script, frame, plan, th):
+# ---------------- 段界转场（veil：只在段首 ≤0.45s 内生效） ----------------
+
+def _apply_veil(img, th, lang, scene, t_local, s_bg):
+    """段首从背景"长出来"的过场。不做跨场景 cross-dissolve（draw_frame 拿不到上一段帧），
+    只做"从本段背景板渐显 / 擦入"，观感是 dip 而不是 dissolve。
+
+    为什么必须做：v0.9 起相邻两段可能是完全不同的构图（数字卡 → 左右对比），
+    整屏瞬切会精确触发 qa_frames 的单帧闪烁门禁（8x8 分块灰度差 ≥6.0），
+    观众看着也像"换了一部片"。
+    """
+    tr = lang.get("transition") or _DEFAULT_LANG["transition"]
+    kind = str(tr.get("kind") or "cut")
+    dur = float(tr.get("dur") or 0.0)
+    if kind == "cut" or dur <= 0.01 or t_local >= dur:
+        return img
+    p = clamp(t_local / dur)
+    base = _plate(th, lang, scene, s_bg)
+    if kind in ("dip", "wash"):
+        # dip/wash 的差别是"淡向哪一层"：wash 淡向主题底色（浅色主题不出现黑场），
+        # dip 也淡向 bg2 —— 刻意不淡向纯黑，否则暗色主题会撞黑帧门禁（平均亮度 <0.045）。
+        return Image.blend(base, img, float(p))
+    # 擦入类：用背景板盖住"还没露出来"的部分（paste 比 mask 便宜）
+    if kind == "wipe":                       # 自左向右
+        cut = int(round(W * float(p)))
+        if cut < W:
+            img.paste(base.crop((cut, 0, W, H)), (cut, 0))
+        return img
+    if kind == "paper":                      # 自右向左（纸卷）
+        cut = int(round(W * (1.0 - float(p))))
+        if cut > 0:
+            img.paste(base.crop((0, 0, cut, H)), (0, 0))
+        return img
+    if kind == "iris":                       # 中心向两侧展开
+        half = int(round(W * 0.5 * float(p)))
+        if half < W // 2:
+            img.paste(base.crop((0, 0, W // 2 - half, H)), (0, 0))
+            img.paste(base.crop((W // 2 + half, 0, W, H)), (W // 2 + half, 0))
+        return img
+    return img
+
+
+# ---------------- 通用：数字（等宽）+ 编号写法 ----------------
+
+_NUM_WEIGHT = "mono"
+
+
+def _draw_num(img, th, v, text, x, y, size, color, align="center", alpha=1.0):
+    """数字用等宽字体：滚动/跳变时字宽不抖（consola 只有 ASCII，中文标签另用 reg）。"""
+    _draw_text(img, th, v, text, x, y, size, _NUM_WEIGHT, color, align, alpha)
+
+
+def _chapter_index(chapter):
+    """从 "03 · 画质关键" 里取 3；取不到返回 None（章节卡要用巨型编号）。"""
+    s = str(chapter or "")
+    for i in range(len(s) - 1):
+        if s[i].isdigit() and s[i + 1].isdigit():
+            return int(s[i:i + 2])
+    for ch in s:
+        if ch.isdigit():
+            return int(ch)
+    return None
+
+
+_CN_NUM = "零一二三四五六七八九十"
+
+
+def _number_text(style, n, fallback=""):
+    """按视觉语言的编号写法生成编号文本（dim/serif/cn/block/roman/timecode/dot/gilt）。"""
+    if n is None:
+        return fallback
+    if style in ("dim", "serif", "gilt"):
+        return "%02d" % n
+    if style == "cn":
+        return _CN_NUM[n] + "、" if 0 < n < 11 else "%02d" % n
+    if style == "block":
+        return "%02d" % n
+    if style == "roman":
+        rom = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X")
+        return rom[n - 1] if 0 < n <= 10 else "%02d" % n
+    if style == "timecode":
+        return "00:%02d" % (n * 4 % 60)
+    if style == "dot":
+        return "· %02d" % n
+    return "%02d" % n
+
+
+# ---------------- 1) hero 封面 ----------------
+
+def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
     s_bg = _push_scale(th, t, dur)
     v = _view(th, s_bg)
-    img = _bg_plate(th, s_bg)
-    lay = ST.LAYOUTS[th["layout"]]
-    ax, align = _title_anchor(lay)
-    if lay.get("center"):
-        cx, cy, strength = W * 0.5, 430.0, 0.55
-    elif align == "right":
-        cx, cy, strength = 620.0, 470.0, 1.0
-    else:
-        cx, cy, strength = 1300.0, 470.0, 1.0
-    img = _deco_rings(img, th, v, t, cx, cy, strength)
+    img = _plate(th, lang, scene, s_bg)
+    lay = _scene_layout(scene, th)
+    var = _variant(scene)
+    ease = _ease((lang.get("motion") or {}).get("ease") or th.get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
 
-    ease = _ease(th.get("ease") or "out3")
-    tracking = float(th.get("tracking") or 0.0)
-    big = scene.get("big") or script.get("title") or ""
+    # 重心：variant 决定标题落在左/中/右 —— 这是"换版式"最便宜也最明显的一种；
+    # 再叠上该风格的 bias（比如 paper 整体压左下、lo-fi 整体偏右上）。
+    bdx, bdy, bins = _bias(lang)
+    if lay.get("center") or var == 2:
+        ax, align = W * 0.5 + bdx, "center"
+    elif var == 1:
+        ax, align = float(W - 150) + bdx, "right"
+    else:
+        ax, align = 150.0 + bdx + bins, "left"
+
+
+    # 持续动态：背景里缓慢扩散的同心弧（每套风格都在动，但颜色/透明度随主题）
+    p_ring = smooth(rng(t, 0.15, 2.4))
+    d = ImageDraw.Draw(img, "RGBA")
+    cx, cy = (ax, 470.0) if align != "center" else (W * 0.5, 430.0)
+    for i in range(3):
+        rr = (120.0 + 260.0 * i) * (0.4 + 0.6 * p_ring)
+        d.arc([v.x(cx - rr), v.y(cy - rr * 0.62), v.x(cx + rr), v.y(cy + rr * 0.62)],
+              start=int(200 + i * 40), end=int(340 + i * 40),
+              fill=_rgba(th["accent"], int(46 * p_ring)), width=2)
+
     size = int(th["scale"]["display"][0])
-    # 封面标题用整行宽度：版式里的 title_w 是正文栏宽（820），给 96px 大字会把标题折出孤字。
+    big = scene.get("big") or script.get("title") or ""
     max_w = min(1560.0, float(W - 300))
     lines = _wrap(big, size, max_w, "bold", th)
     while len(lines) > 3 and size > 42:
         size = int(size * 0.88)
         lines = _wrap(big, size, max_w, "bold", th)
-    lh = int(size * float(th.get("line_gap") or 1.3))
+    lh = int(size * gap)
     ksize = int(th["scale"]["kicker"][0])
     kicker = scene.get("kicker") or "00 · 开场"
 
     p0 = ease(rng(t, 0.05, 0.85))
     _draw_text(img, th, v, kicker, ax + _entrance_x(th, p0, align),
-               lay["kicker_y"] + _entrance_y(th, p0), ksize, "bold",
-               th["accent"], align, p0, tracking * 0.5)
+               float(lay["kicker_y"]) + _entrance_y(th, p0), ksize, "bold",
+               th["accent"], align, p0, trk * 0.5)
 
-    y = float(lay["title_y"])
+    y = float(lay["title_y"]) + bdy
     for i, ln in enumerate(lines):
         p = ease(rng(t, 0.12 + 0.13 * i, 0.88 + 0.13 * i))
         _draw_text(img, th, v, ln, ax + _entrance_x(th, p, align),
                    y + i * lh + _entrance_y(th, p), size, "bold",
-                   th["ink"], align, p, tracking)
+                   th["ink"], align, p, trk)
 
     sub = scene.get("lead") or scene.get("sub") or ""
+    # 副标题与大字重复时不要画第二遍：模板片里 big 与 sub 都是"零素材，全代码生成"，
+    # 照抄会让画面出现两行一样的字（v0.9 实测第一版就是这样）。
+    if sub and (str(sub).strip() == str(big).strip()
+                or (len(str(sub)) >= 6 and str(sub).strip() in str(big).strip())):
+        sub = ""
     sub_bottom = y + len(lines) * lh
     if sub:
         ssize = int(th["scale"]["sub"][0])
@@ -824,13 +1220,13 @@ def _draw_hook(scene, t, dur, tg, script, frame, plan, th):
         p2 = ease(rng(t, 0.30, 1.40))
         for j, ln in enumerate(_wrap(sub, ssize, float(lay["sub_w"]), "light", th)[:3]):
             _draw_text(img, th, v, ln, ax + _entrance_x(th, p2, align),
-                       sy + j * int(ssize * float(th.get("line_gap") or 1.3)),
-                       ssize, "light", th["muted"], align, p2)
-        sub_bottom = sy + int(ssize * float(th.get("line_gap") or 1.3))
+                       sy + j * int(ssize * gap), ssize, "light", th["muted"], align, p2)
+        sub_bottom = sy + int(ssize * gap)
 
-    # 持续动态元素：标题下一条缓慢呼吸的强调线（让画面永不静止）
-    amp = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(0.85 * t + 0.5))
-    line_w = int(min(lay["title_w"], 760) * 0.55 * amp)
+    # 持续动态：标题下呼吸强调线（相位随段偏移，避免每段同频"复印"）
+    hz = float((lang.get("motion") or {}).get("breathe_hz") or 0.85)
+    amp = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(hz * t + ph))
+    line_w = int(min(float(lay["title_w"]), 760) * 0.55 * amp)
     line_y = sub_bottom + int(size * 0.42)
     if line_y < 856:
         lx = ax if align == "left" else (ax - line_w if align == "right" else ax - line_w // 2)
@@ -838,163 +1234,707 @@ def _draw_hook(scene, t, dur, tg, script, frame, plan, th):
             [v.x(lx), v.y(line_y), v.x(lx + line_w), v.y(line_y)],
             fill=_rgba(th["accent"], 190), width=3)
 
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "01 · 开场", _progress(tg, script),
                 script.get("title", ""))
 
 
-def _draw_items(img, th, v, boxes, items, t, stagger):
-    ease = _ease(th.get("ease") or "out3")
-    card = th["card"]
-    rule = th["rule"]
-    ink = th["ink"]
-    body = max(20, int(th["scale"]["body"][0]) - 1)
-    brand = int(th["scale"]["brand"][0])
-    pad = max(12, int(card["pad"] * 0.7))
-    for i, it in enumerate(items):
-        if i >= len(boxes):
-            break
-        x, y, w, h = boxes[i]
-        p = ease(rng(t, 0.48 + stagger * i, 1.18 + stagger * i))
-        if p <= 0.0:
-            continue
-        a = clamp(p)
-        dy = _entrance_y(th, p)
-        alpha = a
-        d = ImageDraw.Draw(img, "RGBA")
-        if card["fill_a"] > 0 or card["outline_a"] > 0:
-            x0, y0 = v.x(x), v.y(y + dy)
-            x1, y1 = v.x(x + w), v.y(y + dy + h)
-            radius = int(max(0, card["radius"]) * v.s)
-            d.rounded_rectangle([x0, y0, x1, y1], radius=radius,
-                                fill=_rgba(rule, card["fill_a"] * alpha),
-                                outline=_rgba(rule, card["outline_a"] * alpha))
-        if isinstance(it, dict):
-            txt = str(it.get("text") or "")
-            ok = bool(it.get("ok", True))
-        else:
-            txt = str(it)
-            ok = True
-        col = th["good"] if ok else th["bad"]
-        dot_x = v.x(x + pad + 16)
-        dot_y = v.y(y + dy + h * 0.5)
-        dot_r = 9.0 + 1.6 * math.sin(t * 2.1 + i * 0.8)
-        img = _soft_dot(img, dot_x, dot_y, dot_r * v.s, col, 0.95 * alpha)
-        d = ImageDraw.Draw(img, "RGBA")
-        tx = x + pad + 16 + 18 + 10
-        max_w = (x + w - pad) - tx - 46
-        tsize = _fit_size(txt, max_w, body, "reg", th, 16)
-        d.text((v.x(tx), v.y(y + dy + (h - tsize * 1.2) * 0.5)), txt,
-               font=_font(th, tsize, "reg"), fill=_rgba(ink, 236 * alpha))
-        if w >= 420:
-            d.text((v.x(x + w - pad), v.y(y + dy + (h - brand * 1.25) * 0.5)),
-                   "%02d" % (i + 1), font=_font(th, brand, "reg"),
-                   fill=_rgba(th["dim"], 120 * alpha), anchor="ra")
-    return img
+# ---------------- 2) statement 金句（居中大字，无卡片） ----------------
 
-
-def _draw_body(scene, t, dur, tg, script, frame, plan, th):
+def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
     s_bg = _push_scale(th, t, dur)
     v = _view(th, s_bg)
-    img = _bg_plate(th, s_bg)
-    lay = ST.LAYOUTS[th["layout"]]
-    ax, align = _title_anchor(lay)
-    ease = _ease(th.get("ease") or "out3")
-    tracking = float(th.get("tracking") or 0.0)
-    gap_ratio = float(th.get("line_gap") or 1.3)
+    img = _plate(th, lang, scene, s_bg)
+    var = _variant(scene)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
 
-    kicker = scene.get("kicker") or ""
-    ksize = int(th["scale"]["kicker"][0])
-    p0 = ease(rng(t, 0.0, 0.75))
-    if kicker:
-        _draw_text(img, th, v, kicker, ax + _entrance_x(th, p0, align),
-                   lay["kicker_y"] + _entrance_y(th, p0), ksize, "bold",
-                   th["accent"], align, p0, tracking * 0.5)
+    big = str(scene.get("big") or scene.get("text") or "")[:24]
+    size = int(th["scale"]["display"][0] * 1.10)
+    max_w = 1400.0 if var != 1 else 1180.0
+    lines = _wrap(big, size, max_w, "bold", th)
+    while len(lines) > 2 and size > 52:
+        size = int(size * 0.90)
+        lines = _wrap(big, size, max_w, "bold", th)
+    lh = int(size * gap)
+    top = 470.0 - (len(lines) - 1) * lh * 0.5
+    if var == 1:                                  # variant 1：整体上移，留出落款区
+        top -= 40.0
 
-    big = scene.get("big") or (scene.get("text") or "")[:18]
-    bsize = int(th["scale"]["heading"][0])
-    max_w = float(lay["title_w"])
-    lines = _wrap(big, bsize, max_w, "bold", th)
-    while len(lines) > 3 and bsize > 40:
-        bsize = int(bsize * 0.9)
-        lines = _wrap(big, bsize, max_w, "bold", th)
-    lh = int(bsize * gap_ratio)
-    p1 = ease(rng(t, 0.06, 0.80))
-    y0 = float(lay["title_y"]) + _entrance_y(th, p1)
+    # 逐字显现：4 字一组（单字一次 text 太贵；整行一次又没"写出来"的感觉）
+    reveal = clamp(t / max(0.35, min(1.6, dur * 0.45)))
+    total_chars = sum(len(x) for x in lines)
+    shown = int(total_chars * ease(reveal))
+    walked = 0
     for i, ln in enumerate(lines):
-        _draw_text(img, th, v, ln, ax + _entrance_x(th, p1, align),
-                   y0 + i * lh, bsize, "bold", th["ink"], align, p1, tracking)
+        if walked >= shown:
+            break
+        take = max(0, min(len(ln), shown - walked))
+        walked += len(ln)
+        seg = ln[:take]
+        if not seg:
+            continue
+        w = _text_w(seg, size, "bold", th)
+        x0 = (W - w) * 0.5
+        _draw_text(img, th, v, seg, x0, top + i * lh, size, "bold", th["ink"],
+                   "left", 1.0, trk)
 
-    sub_bottom = y0 + len(lines) * lh
+    # 持续动态：字距呼吸 + 下划线从左生长（保证"3–6 秒内有可见变化"）
+    hz = float((lang.get("motion") or {}).get("breathe_hz") or 0.85)
+    bre = 0.5 + 0.5 * math.sin(hz * 0.9 * t + ph)
+    ul_w = int(280 * (0.7 + 0.3 * bre))
+    ul_y = top + len(lines) * lh + int(size * 0.22)
+    if ul_y < 856:
+        d = ImageDraw.Draw(img, "RGBA")
+        x0 = W * 0.5 - ul_w * 0.5
+        d.line([v.x(x0), v.y(ul_y), v.x(x0 + ul_w), v.y(ul_y)],
+               fill=_rgba(th["accent"], 170), width=3)
+
     sub = scene.get("sub") or ""
-    if sub:
-        ssize = int(th["scale"]["body"][0])
-        sy = max(float(lay["sub_y"]) if not lay.get("center") else sub_bottom + int(bsize * 0.30),
-                 sub_bottom + int(bsize * 0.30))
-        p2 = ease(rng(t, 0.20, 0.95))
-        for j, ln in enumerate(_wrap(sub, ssize, float(lay["sub_w"]), "reg", th)[:2]):
-            _draw_text(img, th, v, ln, ax + _entrance_x(th, p2, align),
-                       sy + j * int(ssize * gap_ratio), ssize, "reg",
-                       th["muted"], align, p2)
-        sub_bottom = sy + int(ssize * gap_ratio)
+    if sub and (str(sub).strip() == str(big).strip()
+                or (len(str(sub)) >= 6 and str(sub).strip() in str(big).strip())):
+        sub = ""                       # 与大字重复的落款不画（理由同 hero）
+    if sub and var != 2:
+        ssize = int(th["scale"]["sub"][0])
+        p2 = ease(rng(t, 0.55, 1.55))
+        for j, ln in enumerate(_wrap(sub, ssize, 1100, "light", th)[:2]):
+            _draw_text(img, th, v, ln, W * 0.5,
+                       top + len(lines) * lh + int(size * 0.55) + j * int(ssize * gap),
+                       ssize, "light", th["muted"], "center", p2)
 
-    # 持续动态 1：标题旁的强调线随呼吸伸缩（0.85 rad/s，永不静止）
-    meter_w = int(min(max_w, 780) * 0.46 * (0.55 + 0.45 * (0.5 + 0.5 * math.sin(0.85 * t + 0.6))))
-    meter_y = sub_bottom + int(bsize * 0.22)
-    if meter_y < 850:
-        mx = ax if align == "left" else (ax - meter_w if align == "right" else ax - meter_w // 2)
-        ImageDraw.Draw(img, "RGBA").line(
-            [v.x(mx), v.y(meter_y), v.x(mx + meter_w), v.y(meter_y)],
-            fill=_rgba(th["accent"], 170), width=3)
-
-    items = list(scene.get("items") or [])
-    if items:
-        stagger = float((plan.get("pacing") or {}).get("item_stagger") or 0.32)
-        # 居中版式里标题/副标题横跨整幅，面板顶必须让开真实底边；
-        # 左右版式的卡片在另一列，从 layout 的 panel_y 起步即可，不必被标题高度牵着走。
-        if lay.get("center"):
-            panel_top = sub_bottom + int(bsize * 0.55)
-        else:
-            panel_top = float(lay["panel_y"])
-        boxes = _panel_boxes(lay, th, len(items), panel_top, v)
-        # 持续动态 2：卡片区里一条缓慢上下扫的高光（sin 振荡，不做取模跳变）
-        if boxes:
-            px0 = min(b[0] for b in boxes)
-            px1 = max(b[0] + b[2] for b in boxes)
-            py0 = min(b[1] for b in boxes)
-            py1 = max(b[1] + b[3] for b in boxes)
-            k = 0.5 + 0.5 * math.sin(t * 0.55)
-            sy = py0 + (py1 - py0) * k
-            ImageDraw.Draw(img, "RGBA").line(
-                [v.x(px0), v.y(sy), v.x(px1), v.y(sy)],
-                fill=_rgba(th["accent"], 26), width=2)
-        img = _draw_items(img, th, v, boxes, items, t, stagger)
-
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
                 script.get("title", ""))
 
 
-def _deco_orbit(img, th, v, t, cx, cy, p):
-    """收尾旋转光点环（旋转速度恒定 -> 永远有运动）。"""
-    for i in range(26):
-        a = (i / 26.0) * 2.0 * math.pi + t * 0.15
-        rr = 460.0 * (1.0 - p) + 60.0 + 16.0 * K.hash2(i, 4)
-        img = _soft_dot(img, v.x(cx + math.cos(a) * rr),
-                        v.y(cy + math.sin(a) * rr * 0.5), 3.0,
-                        th["accent2"], 0.5 * (1.0 - p * 0.7))
-    return img
+# ---------------- 3) list 要点（左标题 + 右条目 / 全宽序号列） ----------------
 
-
-def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
+def _draw_list(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
     s_bg = _push_scale(th, t, dur)
     v = _view(th, s_bg)
-    img = _bg_plate(th, s_bg)
-    lay = ST.LAYOUTS[th["layout"]]
-    ease = _ease(th.get("ease") or "out3")
-    tracking = float(th.get("tracking") or 0.0)
-    gap_ratio = float(th.get("line_gap") or 1.3)
+    img = _plate(th, lang, scene, s_bg)
+    lay = _scene_layout(scene, th)
+    var = _variant(scene)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
 
+    items = list(scene.get("items") or [])
+    stagger = float((plan.get("pacing") or {}).get("item_stagger") or 0.32)
+    nstyle = str(_typo(lang).get("number") or "dim")
+
+    # variant 0/2：左标题 + 右条目列；variant 1：全宽（标题在上，序号列在左）
+    full = (var == 1) or lay.get("center")
+    bdx, bdy, bins = _bias(lang)
+    if full:
+        ax, align = 150.0 + bdx + bins, "left"
+        title_w = 1620.0
+        panel_x, panel_w = 150.0 + bdx + bins, 1620.0
+        panel_y = 400.0 + bdy
+    else:
+        ax, align = _title_anchor(lay)
+        ax += bdx + (bins if align == "left" else 0.0)
+        title_w = float(lay["title_w"])
+        panel_x, panel_w = _panel_x(lay) + bdx, float(lay["panel_w"])
+        panel_y = max(float(lay["panel_y"]) + bdy, 210.0)
+
+    kicker = scene.get("kicker") or ""
+    p0 = ease(rng(t, 0.0, 0.75))
+    if kicker:
+        _draw_text(img, th, v, kicker, ax + _entrance_x(th, p0, align),
+                   float(lay["kicker_y"]) + _entrance_y(th, p0),
+                   int(th["scale"]["kicker"][0]), "bold", th["accent"], align, p0, trk * 0.5)
+
+    big = scene.get("big") or (scene.get("text") or "")[:18]
+    bsize = int(th["scale"]["heading"][0])
+    lines = _wrap(big, bsize, title_w, "bold", th)
+    while len(lines) > 3 and bsize > 40:
+        bsize = int(bsize * 0.9)
+        lines = _wrap(big, bsize, title_w, "bold", th)
+    lh = int(bsize * gap)
+    p1 = ease(rng(t, 0.06, 0.80))
+    y0 = float(lay["title_y"]) + bdy + _entrance_y(th, p1)
+    for i, ln in enumerate(lines):
+        _draw_text(img, th, v, ln, ax + _entrance_x(th, p1, align),
+                   y0 + i * lh, bsize, "bold", th["ink"], align, p1, trk)
+    sub_bottom = y0 + len(lines) * lh
+
+    sub = scene.get("sub") or ""
+    if sub:
+        ssize = int(th["scale"]["body"][0])
+        sy = max(sub_bottom + int(bsize * 0.30),
+                 float(lay["sub_y"]) if not lay.get("center") else 0.0)
+        p2 = ease(rng(t, 0.20, 0.95))
+        for j, ln in enumerate(_wrap(sub, ssize, title_w, "reg", th)[:2]):
+            _draw_text(img, th, v, ln, ax + _entrance_x(th, p2, align),
+                       sy + j * int(ssize * gap), ssize, "reg", th["muted"], align, p2)
+        sub_bottom = sy + int(ssize * gap)
+
+    if not items:
+        img = _apply_veil(img, th, lang, scene, t, s_bg)
+        return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                    script.get("title", ""))
+
+    # 条目几何：全宽模式一行一条；双栏模式按行距排
+    top = max(panel_y, sub_bottom + int(bsize * 0.45)) if full else panel_y
+    top = max(top, 200.0)
+    body = max(22, int(th["scale"]["body"][0]) - 1)
+    # 行高：优先"每条 96–118px"，条目多时往下压，硬下限 56px（再低中文就糊成一片）。
+    # 为什么不是固定行高：模板片 5 条要点在 9.3s 的段里，固定 118px 会溢出 856 硬边界，
+    # 于是第 5 条被静默截断（v0.9 第一版实测），观众看到"五步"只列出四步。
+    avail = 856.0 - top
+    row_h = avail / max(1, len(items)) if items else 118.0
+    row_h = min(118.0, max(56.0, row_h - 6.0))
+    shown = int(avail // row_h)
+    if shown < len(items):
+        _warn_once(("list", scene.get("id"), len(items)),
+                   "本段 %d 个条目在版式里只放得下 %d 个（其余已省略）；请拆段或减条目"
+                   % (len(items), max(0, shown)))
+    for i, it in enumerate(items[:max(0, shown)]):
+        p = ease(rng(t, 0.42 + stagger * i, 1.12 + stagger * i))
+        if p <= 0.0:
+            continue
+        txt = str(it.get("text") if isinstance(it, dict) else it)
+        ok = bool(it.get("ok", True)) if isinstance(it, dict) else True
+        yy = top + i * row_h
+        alpha = clamp(p)
+        # 焦点行：每 2.2s 换一条高亮（左侧竖条 + 行底微亮），保证画面不静止
+        focus = int((t / 2.2) + ph) % max(1, min(len(items), 6))
+        is_focus = (i == focus)
+        d = ImageDraw.Draw(img, "RGBA")
+        if is_focus:
+            d.rectangle([v.x(panel_x - 26), v.y(yy + 8), v.x(panel_x - 20), v.y(yy + row_h - 18)],
+                        fill=_rgba(th["accent"], int(190 * alpha)))
+            d.rectangle([v.x(panel_x - 14), v.y(yy + row_h - 14), v.x(panel_x + panel_w),
+                         v.y(yy + row_h - 12)],
+                        fill=_rgba(th["rule"], int(26 * alpha)))
+        col = th["good"] if ok else th["bad"]
+        img = _soft_dot(img, v.x(panel_x + 12), v.y(yy + row_h * 0.5),
+                        7.0 + 1.4 * math.sin(2.0 * t + i + ph), col, 0.95 * alpha)
+        d = ImageDraw.Draw(img, "RGBA")
+        num = _number_text(nstyle, i + 1)
+        nsize = int(body * 0.78)
+        nx = panel_x + 34
+        # 编号字体：纯数字/符号走等宽（滚动不抖），带中文的写法（一、二、三）退回 reg
+        # —— consola 没有中文字形，用 mono 画"一、"会得到两个方框。
+        nweight = "reg" if any("\u4e00" <= ch <= "\u9fff" for ch in num) else _NUM_WEIGHT
+        _draw_text(img, th, v, num, nx, yy + (row_h - nsize * 1.25) * 0.5,
+                   nsize, nweight, th["dim"], "left", alpha * 0.9)
+        tx = nx + max(70.0, _text_w(num, nsize, nweight, th) + 26.0)
+        max_w = panel_x + panel_w - tx
+        tsize = _fit_size(txt, max_w, body, "reg", th, 18)
+        _draw_text(img, th, v, txt, tx, yy + (row_h - tsize * 1.2) * 0.5,
+                   tsize, "reg", th["ink"], "left", alpha)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 4) stat 数字卡（巨数字 count-up） ----------------
+
+def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    var = _variant(scene)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    stats = scene.get("_stats")
+    if not stats:
+        try:
+            import grammar as _G
+        except Exception:                                # noqa: BLE001
+            _G = None
+        stats = (_G.derive_stats(scene) if _G is not None else []) or []
+    if not stats:
+        return _draw_statement(scene, t, dur, tg, script, frame, plan, th)
+
+    main = stats[0]
+    raw = str(main.get("value") if main.get("value") is not None else "")
+    unit = str(main.get("unit") or "")
+    label = str(main.get("label") or "")
+    notes = [s for s in stats[1:3] if str(s.get("label") or "")]
+
+    # count-up：0 -> target（整数位，小数位保留原样）；跳变 ≤2 位/帧，避免闪烁门禁
+    target = None
+    try:
+        target = float(raw)
+    except (TypeError, ValueError):
+        target = None
+    p = ease(clamp(t / max(0.5, min(1.2, dur * 0.42))))
+    if target is None:
+        shown_txt = raw
+    elif "." in raw:
+        dec = len(raw.split(".")[1])
+        shown_txt = ("%." + str(dec) + "f") % (target * p)
+    else:
+        shown_txt = "%d" % int(round(target * p))
+
+    size = int(240 * (1.0 if var != 1 else 0.86))
+    max_w = 1500.0
+    while size > 90 and _text_w(shown_txt + unit, size, _NUM_WEIGHT, th) > max_w:
+        size = int(size * 0.9)
+    cx = W * 0.5 if var != 1 else W * 0.5 - 160.0
+    cy = 400.0
+    total_w = _text_w(shown_txt, size, _NUM_WEIGHT, th) + _text_w(unit, int(size * 0.42), "reg", th)
+    x0 = cx - total_w * 0.5
+    _draw_num(img, th, v, shown_txt, x0, cy - size * 0.62, size, th["accent"], "left",
+              0.25 + 0.75 * p)
+    if unit:
+        pu = ease(rng(t, 0.35, 0.95))
+        _draw_text(img, th, v, unit, x0 + _text_w(shown_txt, size, _NUM_WEIGHT, th) + 10,
+                   cy + size * 0.22, int(size * 0.42), "reg", th["muted"], "left", pu)
+
+    if label:
+        pl = ease(rng(t, 0.45, 1.10))
+        for j, ln in enumerate(_wrap(label, int(th["scale"]["sub"][0]), 1200, "light", th)[:2]):
+            _draw_text(img, th, v, ln, W * 0.5,
+                       660.0 + j * int(th["scale"]["sub"][0] * 1.3),
+                       int(th["scale"]["sub"][0]), "light", th["ink"], "center", pl)
+
+    # 持续动态：底部 12 格刻度逐格点亮（0.55s/格，循环）
+    bars = 12
+    bw, gapb = 46, 14
+    tot = bars * bw + (bars - 1) * gapb
+    bx = W * 0.5 - tot * 0.5
+    lit = int((t / 0.55 + ph) % bars)
+    d = ImageDraw.Draw(img, "RGBA")
+    for i in range(bars):
+        on = i <= lit
+        d.rectangle([v.x(bx + i * (bw + gapb)), v.y(760), v.x(bx + i * (bw + gapb) + bw),
+                     v.y(768)], fill=_rgba(th["accent"] if on else th["rule"],
+                                           int((150 if on else 34))))
+    for j, s in enumerate(notes):
+        pn = ease(rng(t, 0.6 + 0.15 * j, 1.3 + 0.15 * j))
+        txt = str(s.get("label") or "")
+        _draw_text(img, th, v, txt, W * 0.5, 800.0 + j * 30, int(th["scale"]["body"][0] - 6),
+                   "reg", th["muted"], "center", pn)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 5) compare 左右对比（中缝 + 双栏） ----------------
+
+def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
+
+    sides = scene.get("_sides")
+    if not sides:
+        try:
+            import grammar as _G
+        except Exception:                                # noqa: BLE001
+            _G = None
+        sides = (_G.derive_sides(scene) if _G is not None else None)
+    if not sides:
+        return _draw_statement(scene, t, dur, tg, script, frame, plan, th)
+
+    big = str(scene.get("big") or "")
+    if big:
+        pb = ease(rng(t, 0.0, 0.7))
+        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
+            _draw_text(img, th, v, ln, W * 0.5, 150.0 + _entrance_y(th, pb),
+                       int(th["scale"]["heading"][0] - 6), "bold", th["ink"], "center", pb, trk)
+
+    # 中缝：从中心向上下生长（0.35s），是"对比"这件事最直接的视觉符号
+    pg = ease(rng(t, 0.05, 0.40))
+    mid_x = W * 0.5
+    y_top, y_bot = 240.0, 820.0
+    cy = (y_top + y_bot) * 0.5
+    half = (y_bot - y_top) * 0.5 * pg
+    d = ImageDraw.Draw(img, "RGBA")
+    d.line([v.x(mid_x), v.y(cy - half), v.x(mid_x), v.y(cy + half)],
+           fill=_rgba(th["rule"], 90), width=2)
+    # 持续动态：中缝上缓慢下扫的高光
+    scan = cy - half + 2.0 * half * (0.5 + 0.5 * math.sin(0.6 * t + ph))
+    if abs(scan - cy) <= half:
+        d.line([v.x(mid_x - 90), v.y(scan), v.x(mid_x + 90), v.y(scan)],
+               fill=_rgba(th["accent"], 40), width=2)
+
+    # 两栏内容垂直居中（上界 360，下界 800）：只有一两条时不会全挤在顶部留一大片空白。
+    # 栏头：优先 sides 里作者写的 head；没有就**不要**写"左/右"这种零信息标签
+    # （v0.9 第一版实测：观众看到"左 / 右"会以为画面坏了），改画一个 VS 徽标在中缝上方。
+    cols = [("left", 150.0, 700.0, -1), ("right", W - 850.0, 700.0, 1)]
+    max_rows = max(len((sides.get("left") or {}).get("items") or []),
+                   len((sides.get("right") or {}).get("items") or []), 1)
+    rows_h = min(3, max_rows) * 130
+    y_start = max(380.0, 620.0 - rows_h * 0.5)
+    heads = [str((sides.get(s) or {}).get("head") or "") for s, _, _, _ in cols]
+    has_head = any(heads)
+    for side, x0, ww, sgn in cols:
+        blk = sides.get(side) or {}
+        head = str(blk.get("head") or "")
+        its = [str(x) for x in (blk.get("items") or [])]
+        ph2 = ease(rng(t, 0.10, 0.70))
+        if head:
+            hx = x0 + 40 * (1 - ph2) * sgn
+            _draw_text(img, th, v, head, hx, y_start - 92.0, int(th["scale"]["body"][0]),
+                       "bold", th["accent"], "left", ph2)
+            ImageDraw.Draw(img, "RGBA").line(
+                [v.x(x0), v.y(y_start - 48.0), v.x(x0 + ww * ph2), v.y(y_start - 48.0)],
+                fill=_rgba(th["accent"], 130), width=2)
+        for i, txt in enumerate(its[:3]):
+            pi = ease(rng(t, 0.42 + 0.22 * i, 1.05 + 0.22 * i))
+            if pi <= 0:
+                continue
+            yy = y_start + i * 130
+            # 反相高亮：左右两栏轮流亮（周期 3.2s），让"对照"这件事一直在动
+            hi = ((math.sin(2 * math.pi * t / 3.2 + ph + (0 if side == "left" else math.pi)) + 1) / 2)
+            alpha = 0.55 + 0.45 * hi
+            tsize = _fit_size(txt, ww - 40, int(th["scale"]["body"][0] - 2), "reg", th, 18)
+            _draw_text(img, th, v, txt, x0 + 40 * (1 - pi) * sgn, yy, tsize, "reg",
+                       th["ink"], "left", pi * alpha)
+            img = _soft_dot(img, v.x(x0 - 8), v.y(yy + tsize * 0.6), 6.0,
+                            th["accent"], 0.7 * pi)
+
+    if not has_head:
+        # 中缝 VS 徽标：对比这件事的"视觉锚点"，也让画面重心落在中轴上
+        pv = ease(rng(t, 0.2, 0.8))
+        vs_size = int(th["scale"]["body"][0] - 6)
+        vw = _text_w("VS", vs_size, "bold", th)
+        cyv = 250.0
+        ImageDraw.Draw(img, "RGBA").rectangle(
+            [v.x(mid_x - vw * 0.5 - 22), v.y(cyv - 8), v.x(mid_x + vw * 0.5 + 22), v.y(cyv + 44)],
+            fill=_rgba(th["surface"], int(220 * pv)), outline=_rgba(th["accent"], int(180 * pv)))
+        _draw_text(img, th, v, "VS", mid_x - vw * 0.5, cyv, vs_size, "bold",
+                   th["accent"], "left", pv)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 6) process 流程轴 ----------------
+
+def _draw_process(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    steps = scene.get("_steps")
+    if not steps:
+        try:
+            import grammar as _G
+        except Exception:                                # noqa: BLE001
+            _G = None
+        steps = (_G.derive_steps(scene) if _G is not None else []) or []
+    if len(steps) < 2:
+        return _draw_list(scene, t, dur, tg, script, frame, plan, th)
+
+    big = str(scene.get("big") or "")
+    pb = ease(rng(t, 0.0, 0.7))
+    if big:
+        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
+            _draw_text(img, th, v, ln, 150.0, 210.0 + _entrance_y(th, pb),
+                       int(th["scale"]["heading"][0] - 6), "bold", th["ink"], "left", pb, trk)
+
+    n = min(5, len(steps))
+    x0, x1, ay = 240.0, float(W - 240), 560.0
+    gapx = (x1 - x0) / max(1, n - 1)
+    pg = ease(rng(t, 0.10, 0.90))
+    d = ImageDraw.Draw(img, "RGBA")
+    d.line([v.x(x0), v.y(ay), v.x(x0 + (x1 - x0) * pg), v.y(ay)],
+           fill=_rgba(th["rule"], 70), width=2)
+    for i in range(n):
+        st = steps[i]
+        pn = ease(rng(t, 0.35 + 0.18 * i, 1.05 + 0.18 * i))
+        if pn <= 0:
+            continue
+        cx = x0 + gapx * i
+        r = 14.0 * pn
+        d.ellipse([v.x(cx - r), v.y(ay - r), v.x(cx + r), v.y(ay + r)],
+                  outline=_rgba(th["accent"], int(230 * pn)), width=3)
+        d.ellipse([v.x(cx - 4), v.y(ay - 4), v.x(cx + 4), v.y(ay + 4)],
+                  fill=_rgba(th["accent"], int(200 * pn)))
+        lbl = str(st.get("label") or "")
+        lsize = int(th["scale"]["body"][0] - 4)
+        lw = _text_w(lbl, lsize, "bold", th)
+        _draw_text(img, th, v, lbl, cx - lw * 0.5, 470.0, lsize, "bold",
+                   th["ink"], "left", pn)
+        note = str(st.get("note") or "")
+        if note:
+            for j, ln in enumerate(_wrap(note, int(lsize * 0.82), 300, "reg", th)[:2]):
+                nw = _text_w(ln, int(lsize * 0.82), "reg", th)
+                _draw_text(img, th, v, ln, cx - nw * 0.5, 610.0 + j * int(lsize * 1.05),
+                           int(lsize * 0.82), "reg", th["muted"], "left", pn * 0.95)
+        num = _number_text(str(_typo(lang).get("number") or "dim"), i + 1)
+        nw = "reg" if any("\u4e00" <= ch <= "\u9fff" for ch in num) else _NUM_WEIGHT
+        _draw_text(img, th, v, num, cx - 26, ay - 66, int(lsize * 0.8), nw,
+                   th["dim"], "left", pn * 0.9)
+
+    # 持续动态：进度光点沿轴匀速（周期 = 段长），永远有运动
+    if dur > 0.1:
+        u = clamp((t / dur))
+        px = x0 + (x1 - x0) * u
+        img = _soft_dot(img, v.x(px), v.y(ay), 9.0, th["accent2"], 0.85)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 7) quote 引语 ----------------
+
+def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
+
+    try:
+        import grammar as _G
+    except Exception:                                    # noqa: BLE001
+        _G = None
+    q, by = (scene.get("quote"), scene.get("by"))
+    if not q and _G is not None:
+        q, by = _G.derive_quote(scene)
+    q = str(q or scene.get("text") or "")
+    by = str(by or "")
+
+    # 巨型引号：**用字形**，不用矢量线。
+    # v0.9 第一版画的是两条短线拼成的「《」，实测看起来像播放器的"快退"图标，
+    # 观众会以为点错了什么。雅黑粗体的 U+201C 是有字形的（preflight 查过不缺口），
+    # 直接放大 150px 就是最标准的引语符号。
+    pq = ease(rng(t, 0.0, 0.45))
+    qx, qy = 150.0, 150.0
+    _draw_text(img, th, v, "\u201c", qx, qy, 150, "bold", th["accent"], "left", 0.55 * pq)
+
+    qsize = 46
+    max_w = 1240.0
+    lines = _wrap(q, qsize, max_w, "light", th)
+    while len(lines) > 4 and qsize > 30:
+        qsize -= 2
+        lines = _wrap(q, qsize, max_w, "light", th)
+    lh = int(qsize * float(gap) * 1.16)
+    top = 300.0
+    reveal = clamp(t / max(0.4, min(2.2, dur * 0.55)))
+    total = sum(len(x) for x in lines)
+    shown = int(total * ease(reveal))
+    walked = 0
+    for i, ln in enumerate(lines):
+        if walked >= shown:
+            break
+        take = max(0, min(len(ln), shown - walked))
+        walked += len(ln)
+        seg = ln[:take]
+        if seg:
+            _draw_text(img, th, v, seg, 340.0, top + i * lh, qsize, "light",
+                       th["ink"], "left", 1.0, trk * 0.4)
+
+    if by:
+        pb = ease(rng(t, 0.9, 1.9))
+        bw = _text_w("—— " + by, int(th["scale"]["body"][0]), "reg", th)
+        _draw_text(img, th, v, "—— " + by, W - 300 - bw, top + len(lines) * lh + 46,
+                   int(th["scale"]["body"][0]), "reg", th["muted"], "left", pb)
+
+    # 持续动态：引号随呼吸缓慢上浮 6px（正弦，不做方波跳变）+ 末行光标块
+    bre = 0.5 + 0.5 * math.sin(0.5 * t + ph)
+    _draw_text(img, th, v, "\u201c", qx, qy - 6.0 * bre, 150, "bold",
+               th["accent"], "left", 0.55 * (0.55 + 0.45 * bre))
+    if int(t * 1.1) % 2 == 0:
+        ly = top + len(lines) * lh - qsize
+        lw = _text_w(lines[-1] if lines else "", qsize, "light", th)
+        ImageDraw.Draw(img, "RGBA").rectangle(
+            [v.x(340 + lw + 6), v.y(ly), v.x(340 + lw + 14), v.y(ly + qsize)],
+            fill=_rgba(th["accent"], 150))
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 8) chapter 章节卡 ----------------
+
+def _draw_chapter(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    chapter = str(scene.get("chapter") or "")
+    n = _chapter_index(chapter)
+    nstyle = str(_typo(lang).get("number") or "dim")
+    num = _number_text(nstyle, n, fallback=chapter[:2])
+
+    # 巨型编号：用矩形"裁剪揭示"（先画字，再用两块背景板盖住未揭示部分），比 mask 便宜
+    nsize = 240
+    nx, ny = 96.0, 130.0
+    _draw_num(img, th, v, num, nx, ny, nsize, th["accent"], "left", 0.30)
+    p = ease(clamp(t / 0.7))
+    cut = int(nx + _text_w(num, nsize, _NUM_WEIGHT, th) * p)
+    if cut < nx + _text_w(num, nsize, _NUM_WEIGHT, th):
+        base = _plate(th, lang, scene, s_bg)
+        img.paste(base.crop((int(cut), int(ny - 10), W, int(ny + nsize * 1.3))),
+                  (int(cut), int(ny - 10)))
+
+    name = str(scene.get("big") or "").strip() or chapter
+    pn = ease(rng(t, 0.25, 1.0))
+    for j, ln in enumerate(_wrap(name, 68, 1300, "bold", th)[:2]):
+        _draw_text(img, th, v, ln, 150.0, 470.0 + j * 86 + _entrance_y(th, pn),
+                   68, "bold", th["ink"], "left", pn, trk)
+
+    kicker = str(scene.get("kicker") or "")
+    if kicker:
+        pk = ease(rng(t, 0.15, 0.8))
+        _draw_text(img, th, v, kicker, 150.0, 410.0, int(th["scale"]["kicker"][0]),
+                   "bold", th["accent"], "left", pk, trk * 0.5)
+
+    # 横线由中点向两侧生长 + 持续动态（端点微呼吸）
+    pl = ease(rng(t, 0.35, 1.1))
+    bre = 0.9 + 0.1 * math.sin(1.0 * t + ph)
+    half = 800.0 * pl * bre
+    d = ImageDraw.Draw(img, "RGBA")
+    d.line([v.x(W * 0.5 - half), v.y(700), v.x(W * 0.5 + half), v.y(700)],
+           fill=_rgba(th["rule"], 120), width=2)
+
+    # 持续动态：编号上方一条细光带横向扫（2.8s 周期）。
+    # 为什么不做"整条竖光带"：竖着扫过编号会盖住笔画，看起来像渲染错误（实测第一版就是这样），
+    # 而且一根 640px 高的半透明条会把剪影里的前景占比拉高，让章节卡和别的类型混淆。
+    # 细光带只在编号上缘 6px 高，既有运动又不动主体。
+    sx = 96.0 + (W - 400.0) * ((t / 2.8 + ph / 6.28) % 1.0)
+    ImageDraw.Draw(img, "RGBA").rectangle(
+        [v.x(sx), v.y(118), v.x(sx + 180), v.y(124)], fill=_rgba(th["accent"], 60))
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, chapter or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 9) chart 数据条 ----------------
+
+def _draw_chart(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    series = scene.get("_series")
+    if not series:
+        try:
+            import grammar as _G
+        except Exception:                                # noqa: BLE001
+            _G = None
+        series = (_G.derive_series(scene) if _G is not None else []) or []
+    if len(series) < 2:
+        return _draw_stat(scene, t, dur, tg, script, frame, plan, th)
+
+    big = str(scene.get("big") or "")
+    if big:
+        pb = ease(rng(t, 0.0, 0.7))
+        _draw_text(img, th, v, big, 150.0, 170.0 + _entrance_y(th, pb),
+                   int(th["scale"]["heading"][0] - 20), "bold", th["ink"], "left", pb, trk)
+
+    vals = []
+    for s in series[:6]:
+        try:
+            vals.append(float(s.get("value")))
+        except (TypeError, ValueError):
+            vals.append(0.0)
+    vmax = max(vals) if vals else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+    n = len(vals)
+    bar_x0, bar_x1 = 640.0, 1600.0
+    pitch = min(96.0, (760.0 - 250.0) / max(1, n))
+    top = 260.0
+    # 网格（一次画完，1px 低 alpha）
+    d = ImageDraw.Draw(img, "RGBA")
+    pg = ease(rng(t, 0.0, 0.35))
+    for k in range(5):
+        gx = bar_x0 + (bar_x1 - bar_x0) * k / 4.0
+        d.line([v.x(gx), v.y(240), v.x(gx), v.y(240 + pitch * n * pg)],
+               fill=_rgba(th["rule"], 22), width=1)
+
+    for i, s in enumerate(series[:n]):
+        p = ease(rng(t, 0.20 + 0.15 * i, 0.95 + 0.15 * i))
+        if p <= 0:
+            continue
+        yy = top + i * pitch
+        frac = vals[i] / vmax
+        wpx = (bar_x1 - bar_x0) * frac * p
+        d = ImageDraw.Draw(img, "RGBA")
+        d.rectangle([v.x(bar_x0), v.y(yy), v.x(bar_x0 + wpx), v.y(yy + 42)],
+                    fill=_rgba(th["accent"] if i == 0 else th["accent2"], 190))
+        lbl = str(s.get("label") or "")
+        lsize = int(th["scale"]["body"][0] - 6)
+        lw = _text_w(lbl, lsize, "reg", th)
+        _draw_text(img, th, v, lbl, bar_x0 - 24 - lw, yy + 6, lsize, "reg",
+                   th["ink"], "left", p)
+        num = ("%g" % vals[i]) + str(s.get("unit") or "")
+        _draw_num(img, th, v, num, bar_x0 + wpx + 16, yy + 4, int(lsize * 1.05),
+                  th["ink"], "left", p)
+
+    # 持续动态：最大条端点呼吸 + 一条网格高亮扫描
+    if vals:
+        i0 = vals.index(max(vals))
+        yy = top + i0 * pitch
+        r = 4.0 + 3.0 * (0.5 + 0.5 * math.sin(1.8 * t + ph))
+        img = _soft_dot(img, v.x(bar_x1), v.y(yy + 21), r, th["accent"], 0.8)
+    scan_y = 240.0 + (pitch * n) * ((t / 2.6 + ph / 6.28) % 1.0)
+    ImageDraw.Draw(img, "RGBA").line(
+        [v.x(bar_x0), v.y(scan_y), v.x(bar_x1), v.y(scan_y)],
+        fill=_rgba(th["accent"], 26), width=2)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""))
+
+
+# ---------------- 10) outro 收尾 ----------------
+
+def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    lay = _scene_layout(scene, th)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
+
+    # 光点环：数量随视觉语言母题走（epic 18 / cinema 12 / mono 0），且比 v0.5 更少
+    mf = str((lang.get("motif") or {}).get("kind") or "minimal")
+    ring_n = {"rays": 18, "letterbox": 12, "brackets": 10, "signal": 8,
+              "handdrawn": 6, "slabs": 12, "hairlines": 6, "minimal": 0}.get(mf, 8)
     p = ease(rng(t, 0.0, 1.0))
-    img = _deco_orbit(img, th, v, t, W * 0.5, 520.0, p)
+    for i in range(ring_n):
+        a = (i / float(max(1, ring_n))) * 2.0 * math.pi + 0.15 * t + ph
+        rr = 460.0 * (1.0 - p) + 70.0 + 16.0 * K.hash2(i, 4)
+        img = _soft_dot(img, v.x(W * 0.5 + math.cos(a) * rr),
+                        v.y(520.0 + math.sin(a) * rr * 0.5), 3.0,
+                        th["accent2"], 0.5 * (1.0 - p * 0.7))
 
     big = scene.get("big") or script.get("end_text") or "完"
     size = int(th["scale"]["display"][0])
@@ -1002,41 +1942,57 @@ def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
     while len(lines) > 3 and size > 42:
         size = int(size * 0.88)
         lines = _wrap(big, size, min(float(lay["title_w"]), 1520.0), "bold", th)
-    lh = int(size * gap_ratio)
+    lh = int(size * gap)
     pa = ease(rng(t, 0.30, 1.30))
-    alpha = 0.02 + 0.98 * pa
-    dy = _entrance_y(th, pa)
     top = 380.0 - (len(lines) - 1) * lh * 0.5
     for i, ln in enumerate(lines):
-        _draw_text(img, th, v, ln, W * 0.5, top + i * lh + dy,
-                   size, "bold", th["ink"], "center", alpha, tracking)
-    bottom = top + len(lines) * lh + dy
+        _draw_text(img, th, v, ln, W * 0.5, top + i * lh + _entrance_y(th, pa),
+                   size, "bold", th["ink"], "center", 0.02 + 0.98 * pa, trk)
+    bottom = top + len(lines) * lh + _entrance_y(th, pa)
 
     sub = scene.get("sub") or ""
+    # 与大字重复的副标题不画（同 hero：模板片 sub 与 big 是同一句）
+    if sub and (str(sub).strip() == str(big).strip()
+                or (len(str(sub)) >= 6 and str(sub).strip() in str(big).strip())):
+        sub = ""
     if sub:
         ssize = int(th["scale"]["sub"][0])
         p2 = ease(rng(t, 0.55, 1.55))
         for j, ln in enumerate(_wrap(sub, ssize, 1400, "light", th)[:2]):
             _draw_text(img, th, v, ln, W * 0.5,
-                       bottom + int(size * 0.22) + j * int(ssize * gap_ratio),
+                       bottom + int(size * 0.22) + j * int(ssize * gap),
                        ssize, "light", th["muted"], "center", p2)
-        bottom = bottom + int(size * 0.22) + int(ssize * gap_ratio)
+        bottom = bottom + int(size * 0.22) + int(ssize * gap)
 
-    # 持续动态：标题下缓慢生长的强调线 + 两端呼吸
     grow = ease(rng(t, 0.45, 1.45))
-    line_w = int(340 * grow * (0.82 + 0.18 * math.sin(0.9 * t)))
+    bre = 0.82 + 0.18 * math.sin(0.9 * t + ph)
+    line_w = int(340 * grow * bre)
     ly = min(bottom + int(size * 0.30), 840)
     ImageDraw.Draw(img, "RGBA").line(
         [v.x(W * 0.5 - line_w * 0.5), v.y(ly), v.x(W * 0.5 + line_w * 0.5), v.y(ly)],
         fill=_rgba(th["accent"], 200), width=3)
 
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "99 · 收尾", 1.0, script.get("title", ""))
 
 
 _DRAWERS = {
-    "hook": _draw_hook,
-    "body": _draw_body,
+    "hero": _draw_hero,
+    "statement": _draw_statement,
+    "list": _draw_list,
+    "stat": _draw_stat,
+    "compare": _draw_compare,
+    "process": _draw_process,
+    "quote": _draw_quote,
+    "chapter": _draw_chapter,
+    "chart": _draw_chart,
     "outro": _draw_outro,
+}
+
+# 老 kind -> 场景类型（没有 scene_type 的旧 timeline / 手工构造的 scene 走这里）
+_KIND_TO_TYPE = {
+    "hook": "hero", "body": "list", "quote": "quote", "outro": "outro",
+    "emphasis": "statement", "calm": "statement",
 }
 
 
@@ -1045,14 +2001,30 @@ _DRAWERS = {
 # ============================================================================
 
 def draw_frame(scene, t_local, dur, t_global, script, frame):
-    """按帧画一张 1920x1080 RGB 图。legacy 走 v0.4 原函数（逐字节基线）。"""
+    """按帧画一张 1920x1080 RGB 图。
+
+    派发顺序（v0.9）：
+      1. legacy（film.json 没有 style 字段）-> v0.4 三个老绘制器，逐字节不变；
+      2. 非 legacy -> 按 scene_type（grammar.py 选好、render.py 写进 timeline）派发到
+         10 类构图之一；没有 scene_type 的旧 timeline 按 kind 映射到兼容类型。
+    未命中的类型回落到 list（"有条目就画条目"是最不会丢信息的兜底），
+    并 warn 一次——静默画错构图比报错更糟。
+    """
     plan = _plan(script)
     kind = scene.get("kind") or "body"
     if plan.get("legacy"):
         fn = _LEGACY_DRAWERS.get(kind) or _legacy_scene_body
         return fn(scene, t_local, dur, t_global, script, frame)
     th = _scene_theme(plan, scene)
-    fn = _DRAWERS.get(kind) or _draw_body
+    stype = str(scene.get("scene_type") or "").strip()
+    if not stype:
+        stype = _KIND_TO_TYPE.get(kind, "list")
+    fn = _DRAWERS.get(stype)
+    if fn is None:
+        _warn_once(("scene_type", stype),
+                   "场景 %r 的 scene_type=%r 不认识，已回落到 list 构图（可用：%s）"
+                   % (scene.get("id"), stype, " / ".join(_DRAWERS.keys())))
+        fn = _draw_list
     return fn(scene, t_local, dur, t_global, script, frame, plan, th)
 
 
