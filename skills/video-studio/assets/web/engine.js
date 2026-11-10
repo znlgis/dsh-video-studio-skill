@@ -24,7 +24,12 @@
   var ST_THEME = (ST && ST.theme && typeof ST.theme === 'object') ? ST.theme : null;
   var ST_CANVAS = (ST && ST.canvas && typeof ST.canvas === 'object') ? ST.canvas : null;
 
-  var W = 1920, H = 1080, FPS = 30, BG = '#0b0e14';
+  /* 页面在 engine.js 之前自己声明过的帧率（模板不声明 → null）。页面契约说
+   * "window.FPS = 页面时间轴帧率，渲染器据此算 -r / -g"，所以声明过就不能被默认 30 顶掉
+   * —— 否则 webengine 的"页面 FPS 与注入 fps 不一致就报错"永远看不到真实页面帧率。 */
+  var DECLARED_FPS = _num(global.FPS, null);
+  var W = 1920, H = 1080, BG = '#0b0e14';
+  var FPS = (DECLARED_FPS != null && DECLARED_FPS > 0) ? Math.round(DECLARED_FPS) : 30;
   var DEFAULT_DURATION = 12.0;   // 页面没给时长时的兜底；film.js 用它区分"显式时长"与"兜底值"
   var FAMILY = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
   var TAU = Math.PI * 2;
@@ -56,9 +61,20 @@
       }
     }
     /* 帧率：只有调用方显式给了 fps 才改。帧率是 timeline 契约，不是画风 ——
-     * 不能因为注入了 style 就悄悄把页面帧率换掉（那样分块帧号会整体错位）。 */
+     * 不能因为注入了 style 就悄悄把页面帧率换掉（那样分块帧号会整体错位）。
+     * 页面自己声明过 window.FPS 且与注入值不一致时**不覆盖**：保留页面值，让
+     * webengine.open_page 的契约检查报出"页面 window.FPS=X 与注入的 fps=Y 不一致"。
+     * 以前这里无条件覆盖 → 页面 window.FPS 被改成注入值，那条检查永远相等，
+     * 文档承诺的"fps 不一致就报错"对 engine.js 页面从未真正触发过。 */
     var _fps = _num(ST_CANVAS.fps, null);
-    if (_fps != null && _fps > 0) FPS = Math.round(_fps);
+    var _declared = (DECLARED_FPS != null && DECLARED_FPS > 0) ? Math.round(DECLARED_FPS) : null;
+    if (_fps != null && _fps > 0) {
+      if (_declared != null && _declared !== Math.round(_fps)) {
+        // 保留页面声明的帧率（FPS 已在上面按 DECLARED_FPS 初始化），交给 webengine 报错
+      } else {
+        FPS = Math.round(_fps);
+      }
+    }
   }
 
   if (ST_THEME) BG = _txt(ST_THEME.bg, BG);

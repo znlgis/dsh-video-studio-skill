@@ -185,6 +185,11 @@ def build_timeline(K, script):
 
     与 render.st_layout 的差别只在 dur 的来源：这里每句固定 FAKE_VOICE_DUR 秒，
     其余（lead/tail/min_dur/hold/bar）照常走 filmkit.build_timeline，结果可复现。
+
+    但 **fps 必须跟 render.py 一样取自 filmkit.video_plan**（v0.8 起 fps 可配置）：
+    build_timeline 的默认 fps=30 会让 24/25/50/60 fps 的片子按 30 fps 编号，
+    于是基线里的 frame 号既不是成片的真实帧号，t=frame/fps 也不是真实时刻——
+    那份基线守的是"另一部片子"的画面，回放/比对都错位（且不会报错）。
     """
     lines = []
     for i, ln in enumerate(script.get("lines") or []):
@@ -205,6 +210,7 @@ def build_timeline(K, script):
         lead_map=script.get("lead_map"),
         hold=float(script.get("hold", 0.0)),
         max_dur=script.get("max_dur"),
+        fps=K.video_plan(script)["fps"],
     )
     tl["title"] = script.get("title", "")
     return tl
@@ -256,15 +262,36 @@ def env_fingerprint():
 
     只把会参与绘制计算的版本算进指纹；平台信息单独记录，仅作诊断（Win10/Win11 同一套
     Pillow + 同字体通常逐像素一致，不必因操作系统不同而 skipped）。
+
+    口径细节：**Python 只按 major.minor 参与指纹**，补丁号只记录不参与比较。
+    理由是真正决定抗锯齿像素的是 Pillow（FreeType）与 numpy，不是 CPython 的补丁版本；
+    而按补丁号比较会让"作者机器 3.12.16 / 用户机器 3.12.14"这种正常差异一律 skipped——
+    实测踩过：selfcheck 第 51 条因此显示"0 帧像素一致"却记 PASS，等于这条门禁从没真的比过。
+    真要跨 Pillow/numpy 版本比，仍然会 skipped，那才是像素不可比的情形。
     """
     import numpy
     from PIL import __version__ as pillow_ver
-    py = "%d.%d.%d" % sys.version_info[:3]
+    py_full = "%d.%d.%d" % sys.version_info[:3]
     osname = platform.system()
-    payload = "python=%s;pillow=%s;numpy=%s;os=%s" % (py, pillow_ver, numpy.__version__, osname)
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest(), dict(
-        python=py, pillow=pillow_ver, numpy=numpy.__version__, os=osname,
-        platform="%s %s" % (osname, platform.release()))
+    env = dict(python=py_full, pillow=pillow_ver, numpy=numpy.__version__, os=osname,
+               platform="%s %s" % (osname, platform.release()))
+    return _env_fp_from(env), env
+
+
+def _env_fp_from(env):
+    """按"参与比较的口径"给 env 字典算指纹（Python 只取 major.minor）。
+
+    单独抽出来是为了**兼容老基线**：v0.8.0 的 golden_frames.json 里记的是完整补丁号
+    （如 3.12.16），如果直接拿新口径算出的指纹去比，老基线会永远 skipped——那等于把
+    "补丁号差异"永久固化成"这条门禁不用跑"。这里对**存的 env** 和**当前 env** 走同一个
+    归一化函数，所以 3.12.14 与 3.12.16 视为同一环境，而 Pillow/numpy 的差异照旧拦住。
+    """
+    env = dict(env or {})
+    py = str(env.get("python") or "")
+    py_mm = ".".join(py.split(".")[:2]) if py else ""
+    payload = "python=%s;pillow=%s;numpy=%s;os=%s" % (
+        py_mm, env.get("pillow") or "", env.get("numpy") or "", env.get("os") or "")
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------- 渲染
@@ -367,7 +394,8 @@ def _golden_payload(script_path, scenes_path, K, plan, tl, rendered):
                    "换机/字体/Pillow 版本不同判 skipped（不误报），同环境像素变了才是 fail。"
                    "改动模板（film.json / scenes.py / stylekit 主题）后请 --write 重录并提交本文件。",
         "canvas": [int(K.W), int(K.H)],
-        "fps": int(K.FPS),
+        # 记时间轴自己的 fps（不是写死的 K.FPS）：v0.8 起 film.json 可以设 24/25/50/60
+        "fps": int(tl["fps"]),
         "script": _rel(script_path),
         "scenes": _rel(scenes_path),
         "font_fp": font_fp,
@@ -482,7 +510,10 @@ def check_golden(script_path, scenes_path, golden_path):
                 reason="skipped: font differs（字体指纹 %s）——换机/字体版本不同，"
                        "像素比对不成立；确认画面后在当前机器 --write 重录"
                        % _fmt_fp_pair(font_fp, golden.get("font_fp")))
-        if str(golden.get("env_fp") or "") != env_fp:
+        # 比指纹时对**存的 env** 走同一个归一化（见 _env_fp_from）：这样 v0.8.0 那些
+        # 记着完整补丁号的老基线不会因为 3.12.14 vs 3.12.16 永久 skipped。
+        golden_env_fp = _env_fp_from(golden.get("env") or {})
+        if golden_env_fp != env_fp:
             return dict(
                 status="skipped", frames=[], font_fp=font_fp,
                 font_fp_expect=golden.get("font_fp"),

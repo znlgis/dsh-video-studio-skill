@@ -65,6 +65,14 @@ MUX_PER_SEC = 0.045                 # 每片长秒（两遍 loudnorm 解码音�
 QA_BASE_SEC = (1.0, 3.0)            # 固定开销：联系表 + 参考帧重渲染
 QA_SEC_PER_SEC = (0.12, 0.25)       # 随片长：帧级深检流式解码 + 响度曲线
 UNMEASURED_BAND = 0.30              # 没有实测的阶段（layout/cues/sfx/audio）给 ±30% 的区间，别假装精确
+# v0.8 G11（全片 VMAF/SSIM）：参考帧由场景函数**重渲一遍**再喂 libvmaf，成本跟帧数走、
+# 与 frames 阶段同量级。实测口径差异极大：qavmaf 作者 29 s 片 12.0 s（≈0.40× 片长）；
+# SKILL.md §12 同一部模板片 14.2 s；同机另一轮负载下 28.8 s。这里取 0.40–1.00× 片长
+# （下限=干净机、上限=争 CPU 的长片外推），固定开销单独列 1–2 s。
+# 注：v0.7.2 那套 1.0–1.6× 的系数没有 v0.8 实测支撑，把 29 s 片算成 31–50 s（实际 12–29 s），
+# 预演总量因此系统性偏大近 2 倍——这类"拍脑袋的悲观系数"比低估更糟：排期会按假的数字走。
+VMAF_BASE_SEC = (1.0, 2.0)          # 起渲染进程 + 参考帧管线搭建
+VMAF_SEC_PER_SEC = (0.40, 1.00)     # 每片长秒（参考帧重渲 + libvmaf 逐帧比）
 
 # 校准出处：换成你自己的机器前，请按 SKILL.md §12 重测并回填——这些数字决定预演准不准。
 CALIBRATION = dict(
@@ -213,6 +221,31 @@ def _fmt_span(lo, hi):
     return "%.1f–%.1f s" % (float(lo), float(hi))
 
 
+def _qavmaf_sample_step(vcfg=None):
+    """qavmaf 的抽样步长（sample 模式每 N 帧取 1 帧）。
+
+    优先级与 render.py 的 _qa_vmaf_gate 一致：先读 film.json 的 qa.vmaf.sample_step，
+    没写才用 qavmaf.SAMPLE_STEP。预演不另抄一份常量，否则改一处漏一处；而"用户显式
+    写了 sample_step=20 却按默认 5 预演"会把这道门禁的成本高估 4 倍。
+    读不到 qavmaf 时按 1（=full）保守估——那种环境下 render.py 的 G11 本来也会记
+    skipped（没有模块），多估不会误导排期，少估才会。
+    """
+    try:
+        if isinstance(vcfg, dict) and vcfg.get("sample_step") is not None:
+            return max(1, int(vcfg["sample_step"]))
+    except (TypeError, ValueError):
+        pass
+    try:
+        scripts = str(Path(__file__).resolve().parent.parent /
+                      "skills" / "video-studio" / "scripts")
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        import qavmaf
+        return max(1, int(qavmaf.SAMPLE_STEP))
+    except Exception:                                       # noqa: BLE001
+        return 1
+
+
 # ============================================================================
 # 估算核心
 # ============================================================================
@@ -309,18 +342,6 @@ def mux_seconds_pair(frames, jobs, total, script):
     return base * 0.75, base * 1.35
 
 
-def mux_seconds(frames, jobs, total, reencode=False):
-    """mux 阶段墙钟。
-
-    默认 `-c:v copy` + 两遍 loudnorm：视频流不解码不重编码，成本 ≈ 起 ffmpeg + 按片长
-    解码音频跑两遍。实测 29 s 片 1.7–1.9 s。
-    reencode_video=true 时才要重编视频，那时才用 x264 速率并按有效加速比摊。
-    """
-    if reencode:
-        return frames / X264_FPS / _speedup(jobs)
-    return MUX_BASE_SEC + MUX_PER_SEC * max(0.0, float(total))
-
-
 def chunk_plan(frames, fps, jobs, explicit):
     """逐字复刻 render.py 的分块规则（改了那边记得同步这里）。
 
@@ -347,7 +368,6 @@ def disk_estimate(frames, total, n_lines, n_cues, crf, music_on):
     factor = 2.0 ** ((17.0 - crf) / 6.0)          # crf 每降 6 体积约翻倍（x264 经验值）
     vlo = max(0.3, VIDEO_MBPS[0] * factor)
     vhi = max(0.3, VIDEO_MBPS[1] * factor)
-    vid_lo = total * vlo * 1e6 / 8.0
     vid_hi = total * vhi * 1e6 / 8.0
     out_lo = total * (vlo + AUDIO_MBPS) * 1e6 / 8.0
     out_hi = total * (vhi + AUDIO_MBPS) * 1e6 / 8.0
@@ -408,7 +428,16 @@ def build_report(script_path, script, args):
                                "skills" / "video-studio" / "scripts"))
         import filmkit as _FK
         _vp = _FK.video_plan(script)
-    except Exception:                                       # noqa: BLE001
+    except ImportError as e:
+        # 只把"缺 filmkit"当降级：那是能用模板常量继续估的环境问题。
+        _warn("装载不了 filmkit（%s），画幅/帧率按 %dx%d@%d 估" % (e, W, H, FPS))
+        _vp = dict(fps=FPS, w=W, h=H, out_w=W, out_h=H,
+                   label="%dx%d" % (W, H))
+    except Exception as e:                                  # noqa: BLE001
+        # video 块写错（非 16:9 / 非法 fps / 上采样）时 render.py 会在 st_layout 直接报错，
+        # 预演却静默按默认值算并打印 ok:true——那等于告诉用户"能渲"，必须显式说清楚。
+        _warn("film.json 的 video 块不合法（%s: %s）：render.py 会拒绝这部片子，"
+              "下面的画幅/帧率只是占位估算" % (type(e).__name__, e))
         _vp = dict(fps=FPS, w=W, h=H, out_w=W, out_h=H,
                    label="%dx%d" % (W, H))
     tl, tl_path = read_timeline(args.work)
@@ -420,7 +449,10 @@ def build_report(script_path, script, args):
         source_note = "真实帧数：%s" % tl_path
     else:
         total, _scenes = estimate_timeline(script)
-        fps = FPS
+        # v0.8：没有 timeline.json 时也必须用 film.json 的 video.fps —— 定死 30 会让
+        # 24/25/50/60 fps 的片子帧数、磁盘、分块全部按 30 fps 算（24 fps 高估 25%，
+        # 60 fps 低估一半），而 render.py 的 build_timeline(fps=vp["fps"]) 用的是真实值。
+        fps = int(_vp["fps"])
         frames = int(round(total * fps))
         source = "script_estimate"
         source_note = ("粗估（等效字数 ÷ %.1f 字/秒 + lead/tail + hold；没有 %s）"
@@ -479,22 +511,50 @@ def build_report(script_path, script, args):
     qa_lo = max(0.5, QA_BASE_SEC[0] + total * QA_SEC_PER_SEC[0])
     qa_hi = max(qa_lo, QA_BASE_SEC[1] + total * QA_SEC_PER_SEC[1])
     # v0.8 的三个新门禁：预检（固定小开销）、全片 VMAF/SSIM、ASR 回读。
-    # 实测口径（29.0 s 模板片）：preflight 0.4 s；VMAF full 27–47 s（1.0–1.6× 片长，
-    # 参考帧重渲染与 libvmaf 都在里面）；ASR small ≈ 6–10 s。这三项全在**交付前**跑，
-    # 不写进预演就等于"预演说 40 s、实际 90 s"——所以单独列 stage，不并进 qa。
+    # 实测口径（29.0 s 模板片）：preflight 0.4 s；VMAF full 12–29 s（0.40–1.00× 片长，
+    # 参考帧重渲与 libvmaf 都在里面，见 VMAF_* 常量注释）；ASR small ≈ 6–10 s。
+    # 这三项全在**交付前**跑，不写进预演就等于"预演说 40 s、实际 90 s"——所以单独列 stage。
     qcfg = script.get("qa") or {}
     if not isinstance(qcfg, dict):
         qcfg = {}
-    vcfg = qcfg.get("vmaf") or {}
+    # render.py 的 _qa_vmaf_gate / _qa_asr_gate 都用 isinstance 兜住了非 dict 的配置块；
+    # 预演以前直接 .get()，于是 "qa": {"vmaf": "off"} 这种（用户以为写了个开关）
+    # 会在 --json 下甩 AttributeError traceback、退出码 1——比 render 还不宽容。
+    vcfg = qcfg.get("vmaf")
+    if not isinstance(vcfg, dict):
+        if vcfg is not None:
+            _warn("qa.vmaf 不是对象（收到 %r）：按默认 full 预演（render.py 会忽略这个值）"
+                  % (vcfg,))
+        vcfg = {}
     vmaf_mode = str(vcfg.get("mode") or "full").lower()
     vmaf_on = vmaf_mode != "off" and engine == "pil"      # web 路线没有可重渲参考帧
-    vmaf_lo = total * 1.0 + 2.0 if vmaf_on else 0.0
-    vmaf_hi = total * 1.6 + 4.0 if vmaf_on else 0.0
-    acfg = qcfg.get("asr") or {}
+    # sample 模式（qavmaf 每 SAMPLE_STEP 帧取 1 帧）只渲/比 1/step 的帧，固定开销不变。
+    # 预演以前不看 mode，于是 --vmaf sample 的真实成本被按全片算：29 s 片实测 sample
+    # 2.95 s vs full 12.0 s，而预演两边都给同一个数（片长越长错得越多）。
+    vmaf_step = 1
+    if vmaf_mode == "sample":
+        vmaf_step = _qavmaf_sample_step(vcfg)
+    # sample 只压缩"逐帧"那一半，固定开销照付。
+    vmaf_lo = (VMAF_BASE_SEC[0] + total * VMAF_SEC_PER_SEC[0] / vmaf_step) if vmaf_on else 0.0
+    vmaf_hi = (VMAF_BASE_SEC[1] + total * VMAF_SEC_PER_SEC[1] / vmaf_step) if vmaf_on else 0.0
+    acfg = qcfg.get("asr")
+    if not isinstance(acfg, dict):
+        if acfg is not None:
+            _warn("qa.asr 不是对象（收到 %r）：按默认（开）预演" % (acfg,))
+        acfg = {}
     asr_on = bool(acfg.get("enabled", True)) != False    # noqa: E712  默认开
     asr_lo = (total * 0.18 + 3.5) if asr_on else 0.0
     asr_hi = (total * 0.35 + 6.5) if asr_on else 0.0
     pre_lo, pre_hi = (0.3, 0.8)
+    if not vmaf_on:
+        vmaf_note = "本次不跑（--vmaf off 或 engine=web）"
+    elif vmaf_mode == "sample":
+        vmaf_note = ("sample 模式每 %d 帧取 1 帧：逐帧成本只算 1/%d，参考帧管线固定开销照付。"
+                     "同机负载不同实测能差近 2×（SKILL.md §12：14.2 s / 另一轮 28.8 s）"
+                     % (vmaf_step, vmaf_step))
+    else:
+        vmaf_note = ("全片逐帧比较（参考帧=场景函数重渲染，不是成片抽帧）。同机负载不同"
+                     "实测能差近 2×（SKILL.md §12：14.2 s / 另一轮 28.8 s）")
 
     stages = [
         dict(stage="tts", lo=tts_lo, hi=tts_hi, measured=True,
@@ -532,10 +592,7 @@ def build_report(script_path, script, args):
              note="渲染前资源预检（缺字形/坏音频/缺字体；实测 0.4 s，渲一帧之前就失败）"),
         dict(stage="qa", lo=qa_lo, hi=qa_hi, measured=True,
              note=("联系表 + 锐度参考帧重渲染 + 帧级深检（实测 29 s 片 6.2–6.8 s，不是 1 s）")),
-        dict(stage="vmaf", lo=vmaf_lo, hi=vmaf_hi, measured=False,
-             note=("全片 VMAF/SSIM（参考帧=场景函数重渲染，约 1.0–1.6× 片长；"
-                   "实测 29 s 片 27–47 s）。web 引擎没有参考帧 -> 跳过"
-                   if vmaf_on else "本次不跑（--vmaf off 或 engine=web）")),
+        dict(stage="vmaf", lo=vmaf_lo, hi=vmaf_hi, measured=False, note=vmaf_note),
         dict(stage="asr", lo=asr_lo, hi=asr_hi, measured=False,
              note=("ASR 回读（faster-whisper small / CPU int8，RTF≈0.17 + 加载 2–3 s；"
                    "实测 29 s 片 6–10 s）"
@@ -550,9 +607,13 @@ def build_report(script_path, script, args):
     disk = disk_estimate(frames, total, n, n_cues, crf, music_on)
 
     # ---- 分块（render.py 规则）----
+    # 这里必须传**用户请求的 jobs**，不能传 jobs_eff：render.py 的 chunk_frames 公式用的是
+    # --jobs 原值（它不按核数封顶），而 jobs_eff 是给"加速比模型"封顶到 CORES 的。
+    # 传错的话 --jobs 16（24 线程机器上合法）会算出 chunk=120/8 段，render 实际是
+    # chunk=60/15 段——预演与实现"逐字一致"的承诺当场失效。
     explicit = int(_num(script.get("chunk_frames"), 0))
-    chunk, nseg = chunk_plan(frames, fps, jobs_eff, explicit)
-    chunk = dict(jobs=jobs_eff, jobs_requested=jobs_req, chunk_frames=chunk,
+    chunk, nseg = chunk_plan(frames, fps, jobs_req, explicit)
+    chunk = dict(jobs=jobs_req, jobs_requested=jobs_req, chunk_frames=chunk,
                  segments=nseg, explicit=bool(explicit),
                  rule="chunk = chunk_frames 或 round(frames/jobs/fps/4)*4*fps，"
                       "再按 fps 取整、最小 2×fps")
@@ -592,8 +653,8 @@ def build_report(script_path, script, args):
                        "share": round(share, 3),
                        "advice": bottleneck_advice(worst["stage"], engine, jobs_eff)},
         "assumptions": [
-            "内部构图恒为 1920x1080@%d；交付尺寸/帧率可写 film.json 的 video 块"
-            "（v0.8，只允许 16:9 横屏且只能下采样）" % FPS,
+            "内部构图恒为 1920x1080；交付尺寸/帧率可写 film.json 的 video 块"
+            "（v0.8，只允许 16:9 横屏且只能下采样；本次按 %d fps 估）" % fps,
             "lead=%.2f / tail=%.2f / min_dur=%.1f（v0.5 body 基准；剧本写了就以剧本为准）"
             % (DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR),
             "tts 耗时按 %d 句 ÷ workers × %.1f–%.1f s（每句每 worker）；实际受网络波动影响"
@@ -602,8 +663,10 @@ def build_report(script_path, script, args):
             % (PARALLEL_EFF, CORES),
             "mux 默认 -c:v copy，只跟片长有关；reencode_video=true 才按帧数重编",
             "layout/cues/audio/sfx 给 ±%d%% 经验区间（无单阶段实测）" % int(UNMEASURED_BAND * 100),
-            "v0.8 新增门禁口径：preflight 0.4 s 固定；vmaf ≈ 1.0–1.6× 片长（参考帧重渲染 + "
-            "libvmaf 全片逐帧）；asr ≈ 0.18–0.35× 片长 + 3.5–6.5 s（faster-whisper small / CPU int8）",
+            "v0.8 新增门禁口径：preflight 0.4 s 固定；vmaf ≈ %.2f–%.2f× 片长 + %.1f–%.1f s"
+            "（参考帧重渲染 + libvmaf；同机负载不同实测差近 2×）；asr ≈ 0.18–0.35× 片长 + "
+            "3.5–6.5 s（faster-whisper small / CPU int8）"
+            % (VMAF_SEC_PER_SEC[0], VMAF_SEC_PER_SEC[1], VMAF_BASE_SEC[0], VMAF_BASE_SEC[1]),
             "基准来源见 calibration 字段（机型/日期/样本）；换机请重测后回填顶部常量",
         ],
         "baseline": BASELINE_NOTE,

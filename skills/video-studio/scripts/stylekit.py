@@ -334,7 +334,7 @@ THEMES["lo-fi"] = _theme(
     ("深夜", "学习", "效率", "专注", "写作", "整理", "笔记", "书", "日常", "房间"),
     # 冷调灰绿：和 paper（暖牛皮纸）在色相上分开，不靠"亮度差不多"硬撑
     dict(bg=(232, 238, 236), bg2=(210, 220, 216), surface=(244, 248, 246),
-         ink=(44, 52, 50), muted=(86, 100, 96), dim=(112, 126, 122),
+         ink=(44, 52, 50), muted=(84, 98, 94), dim=(112, 126, 122),
          accent=(20, 86, 84), accent2=(104, 72, 96),
          good=(40, 100, 72), bad=(146, 52, 50), rule=(44, 52, 50)),
     dict(vignette=0.12, vignette_tint=(206, 200, 190), grain=7.0, grain_freq=0.24,
@@ -633,7 +633,11 @@ def score_styles(script):
             score += 1.0 if sid in ("cinema", "paper", "mono") else 0.0
         if prof["hook"] > 0 and prof["outro"] > 0:
             score += 0.5 if sid in ("tech-deep", "vivid", "epic") else 0.0
-        score += (int(fp["style"][:4], 16) % 7) * 0.0001      # 指纹破平
+        # 指纹破平：必须把**风格 id** 混进哈希，否则这一项对所有行是同一个常数，
+        # 等于没破平（v0.8 深审实测：旧写法在"AI 报告"上 tech-deep / magazine 同分 12.0，
+        # 永远按 STYLE_IDS 顺序选 tech-deep）。幅度上限 0.0006 << 最小真实分差 0.5，
+        # 只在精确同分时起作用，且不改变"改错别字不换风格"（指纹只吃标题）。
+        score += (_digest("tiebreak", fp["style"], sid) % 7) * 0.0001
         rows.append((sid, round(score, 4), hits))
     rows.sort(key=lambda r: (-r[1], STYLE_IDS.index(r[0])))
     return rows
@@ -645,7 +649,12 @@ def pick_style(script):
     best_id, best_score, best_hits = rows[0]
     fp = fingerprint(script)
     if best_score >= 1.0:
-        reason = ["关键词命中：%s" % "、".join(dict.fromkeys(best_hits))[:80]]
+        if best_hits:
+            reason = ["关键词命中：%s" % "、".join(dict.fromkeys(best_hits))[:80]]
+        else:
+            # 分数可以只由结构加分（items / 长句 / hook+outro）凑到 1.0 以上，
+            # 这时旧文案会写"关键词命中："后面空一截 —— 等于向用户报告没发生的事。
+            reason = ["无关键词命中，按题材结构加分选中（items / 长句 / hook+outro）"]
     else:
         pool = list(STYLE_IDS)
         best_id = pool[int(fp["tempo"], 16) % len(pool)]
@@ -816,6 +825,15 @@ def resolve_script_style(script):
     # theme_overrides 走带校验的合并（颜色支持 "#rrggbb"，非法值在这里就报错，
     # 不要等到 scenes.py 渲到第 300 帧才 int("#") 崩——见 apply_theme_overrides）
     theme = apply_theme_overrides(THEMES[pack["theme"]], vis.get("theme_overrides"))
+    # visual.layout 是"显式换整片版式"：旧的实现只把它写进 chapter_layout，而
+    # PIL 路线渲染读的是 theme["layout"]、web 路线读 layout_default —— 两条路线都不看
+    # chapter_layout，于是这条文档化的覆盖等于没写（v0.8 深审实测：visual.layout=
+    # split-right 的帧与默认帧 sha256 完全相同）。这里补写 theme["layout"] 与 layout_default，
+    # 让两条路线都跟着走；theme_overrides 更具体，它显式写了 layout 时以它为准。
+    if explicit_layout and "layout" not in (vis.get("theme_overrides") or {}):
+        theme["layout"] = explicit_layout
+    if explicit_layout:
+        chap_layout = {ch: str(theme["layout"]) for ch in chapters}
 
     return {
         "version": 1,
@@ -831,7 +849,7 @@ def resolve_script_style(script):
         # 主题字典随计划一起返回：scenes.py 的 _scene_theme 优先用它（含 theme_overrides），
         # 也方便 render.py 直接传给 draw_subtitle/write_ass，不必再按 id 查一次。
         "theme": theme,
-        "layout_default": layouts[0],
+        "layout_default": str(theme["layout"]) if explicit_layout else layouts[0],
         "chapter_layout": chap_layout,
         "music": {
             "style": music_style,
@@ -854,7 +872,8 @@ def resolve_script_style(script):
 # 七、门禁：主题体检（对比度 / 明暗 / 结构）
 # ============================================================================
 #
-# 阈值不是拍脑袋：以 v0.4 现行主题实测值当基线（ink 16.3 / muted 7.8 / accent 7.0）。
+# 阈值不是拍脑袋：以 v0.4 现行主题实测值当基线（tech-deep：ink 16.3 / muted 7.8 / accent 7.0，
+# 那是旧版按 bg/bg2 中点量的；v0.8 改成按两端最差值量后同一主题是 14.8 / 7.1 / 6.3，仍远高于线）。
 
 LINT_LIMITS = {
     "ink": 7.0,          # 正文级（WCAG AAA 正文线）
@@ -868,18 +887,30 @@ LINT_LIMITS = {
 }
 
 
+def bg_contrast(th, role):
+    """文字色对背景的**最差**对比度：bg/bg2 是上下两端的主渐变（scenes._bg 按行插值），
+    任何一行文字都可能落在两端附近，所以取二者较小值，而不是看中点。
+
+    为什么不能只看中点：lo-fi 的 muted(86,100,96) 对 bg 5.28、对 bg2 只有 4.42，
+    中点平均 4.84 把 AA 4.5 的门槛"平均"过去了 —— 实测过（v0.8 深审），
+    这一版把门槛改成端点最差值，并同时下调 lo-fi 的 muted 到 (84,98,94)
+    （bg 5.44 / bg2 4.56，两端都过）。
+    """
+    return min(contrast(th[role], th["bg"]), contrast(th[role], th["bg2"]))
+
+
 def theme_lint(th):
     """主题体检，返回问题列表（空 = 过）。坏主题在 load 阶段就拦，别等渲完 300 帧。"""
     if not isinstance(th, dict):
         return ["主题不是 dict：%r" % (th,)]
     bad = []
-    bgs = midpoint(th["bg"], th["bg2"])
     for role, need in (("ink", LINT_LIMITS["ink"]), ("muted", LINT_LIMITS["muted"]),
                        ("dim", LINT_LIMITS["dim"]), ("accent", LINT_LIMITS["accent"]),
                        ("accent2", LINT_LIMITS["accent2"])):
-        got = contrast(th[role], bgs)
+        got = bg_contrast(th, role)
         if got < need:
-            bad.append("%s 对背景对比度 %.2f < %.1f" % (role, got, need))
+            bad.append("%s 对背景对比度 %.2f < %.1f（bg/bg2 两端取最差）"
+                       % (role, got, need))
     for role in ("good", "bad"):
         got = contrast(th[role], th["surface"])
         if got < LINT_LIMITS[role]:
@@ -947,7 +978,6 @@ def blend_theme(a, b, p):
 def _describe(sid):
     pack = STYLES[sid]
     th = THEMES[pack["theme"]]
-    bgs = midpoint(th["bg"], th["bg2"])
     lines = [
         "[%s] %s  （theme=%s / layouts=%s）" % (sid, pack["name"], pack["theme"],
                                                 ",".join(pack["layouts"])),
@@ -961,9 +991,10 @@ def _describe(sid):
         % (pack["pacing"]["lead"], pack["pacing"]["tail"], pack["pacing"]["min_dur"]),
         "  palette   : bg=%s bg2=%s ink=%s accent=%s"
         % (th["bg"], th["bg2"], th["ink"], th["accent"]),
-        "  contrast  : ink %.2f / muted %.2f / dim %.2f / accent %.2f"
-        % (contrast(th["ink"], bgs), contrast(th["muted"], bgs),
-           contrast(th["dim"], bgs), contrast(th["accent"], bgs)),
+        # 与 theme_lint 同口径：bg/bg2 两端取最差（旧版打中点值，会掩盖端点不达标）
+        "  contrast  : ink %.2f / muted %.2f / dim %.2f / accent %.2f（bg/bg2 最差端）"
+        % (bg_contrast(th, "ink"), bg_contrast(th, "muted"),
+           bg_contrast(th, "dim"), bg_contrast(th, "accent")),
         "  font      : family=%s display=%spx hud=%s"
         % (th["family"], th["scale"]["display"][0], th["hud"]),
     ]

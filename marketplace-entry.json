@@ -26,8 +26,8 @@
     "配乐风格"
   ],
   "description": {
-    "en": "Code-generated Chinese video skill plugin: script, measured TTS timeline, cue-driven programmatic SFX and score, deterministic PIL/browser frame rendering, ffmpeg encoding, sample-level mixing, and four-layer QA gates (container / signal / temporal / page). v0.5 style packs make each film look and sound different; v0.7 content fingerprints vary harmony/motif/drums and SFX seeds per film; v0.7.1 voice-first mixing guarantees narration clarity (12 dB SNR guard).",
-    "zh": "中文视频生成技能插件：写剧本 → 实测时长排轴 → 提示点驱动配乐与音效 → PIL 或浏览器逐帧渲染 → ffmpeg 编码 → 采样级混音 → 四层质检（容器 / 信号 / 时间 / 页面）。可做宣传片、报告转视频、配音配字幕。 v0.5 风格包让每部片的画风、配乐、旁白随内容变化；v0.7 内容指纹参与配乐结构与音效种子，跨片不再雷同；v0.7.1 旁白优先混音（12 dB SNR 兜底）保证台词清晰。"
+    "en": "Code-generated Chinese video skill plugin: script, measured TTS timeline, cue-driven programmatic SFX and score, deterministic PIL/browser frame rendering, ffmpeg encoding, sample-level mixing, and four-layer QA gates (container / signal / temporal / page). v0.5 style packs make each film look and sound different; v0.7 content fingerprints vary harmony/motif/drums and SFX seeds per film; v0.7.1 voice-first mixing guarantees narration clarity (12 dB SNR guard). v0.8 word-level TTS timestamps, configurable frame size/fps, batch production, and three new blocking gates (render-time resource preflight, full-film VMAF, ASR read-back). v0.8.1 is a full-project audit: 60+ fixes to gates that printed [FAIL] but exited 0, gates that computed with the wrong subtitle line-breaking, and config keys nobody read.",
+    "zh": "中文视频生成技能插件：写剧本 → 实测时长排轴 → 提示点驱动配乐与音效 → PIL 或浏览器逐帧渲染 → ffmpeg 编码 → 采样级混音 → 四层质检（容器 / 信号 / 时间 / 页面）。可做宣传片、报告转视频、配音配字幕。 v0.5 风格包让每部片的画风、配乐、旁白随内容变化；v0.7 内容指纹参与配乐结构与音效种子，跨片不再雷同；v0.7.1 旁白优先混音（12 dB SNR 兜底）保证台词清晰。v0.8 词级时间戳、画幅/帧率参数化、批量生产，以及三道新阻断门禁（渲前资源预检 / 全片 VMAF / ASR 回读）。v0.8.1 是全项目深审：修掉 60+ 处「stdout 打了 [FAIL] 却 exit 0」「门禁自己按错误口径算」「配置写了没人读」这类看着没问题、其实没在查的缺陷。"
   },
   "install": "dsh plugin --profile desktop add @dsh-gis/dsh-video-studio-skill",
   "added": "2026-11-06"

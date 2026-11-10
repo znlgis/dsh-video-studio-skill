@@ -207,8 +207,12 @@ except Exception:                        # noqa: BLE001 — stylekit 缺失时�
 # ============================================================================
 # 三、小工具：参数解析/格式化、汉字计数、抖动
 # ============================================================================
-_PCT_RE = re.compile(r"^\s*([+-]?)(\d+)\s*%\s*$")
-_HZ_RE = re.compile(r"^\s*([+-]?)(\d+)\s*Hz\s*$")
+# 允许小数（"+4.5%"）：edge-tts 只收整数百分比，所以解析后按 _round_half_away 取整。
+# 以前正则只认整数，"+4.5%" 解析失败 → 静默回落 0 —— 而 0 与 "+0%" 在 spec_key 里
+# 是**同一个 TTS 缓存键**，于是"把语速从 0 调到 4.5%"完全没生效，还复用了旧音频。
+# 这是配置写对了却不生效里最难查的一类：没有报错、没有日志、听起来就是"没反应"。
+_PCT_RE = re.compile(r"^\s*([+-]?)(\d+(?:\.\d+)?)\s*%\s*$")
+_HZ_RE = re.compile(r"^\s*([+-]?)(\d+(?:\.\d+)?)\s*Hz\s*$")
 
 
 def _round_half_away(v):
@@ -218,24 +222,24 @@ def _round_half_away(v):
 
 
 def parse_pct(v, default=0):
-    """'+4%' -> 4；'-3%' -> -3；数字原样取整；解析失败回落 default。"""
+    """'+4%' -> 4；'-3%' -> -3；'+4.5%' -> 5（取整）；数字原样取整；解析失败回落 default。"""
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return int(_round_half_away(v))
     m = _PCT_RE.match(str(v if v is not None else ""))
     if not m:
         return int(default)
-    n = int(m.group(2))
+    n = int(_round_half_away(float(m.group(2))))
     return -n if m.group(1) == "-" else n
 
 
 def parse_hz(v, default=0):
-    """'+2Hz' -> 2；解析失败回落 default。"""
+    """'+2Hz' -> 2；'+2.5Hz' -> 3（取整）；解析失败回落 default。"""
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return int(_round_half_away(v))
     m = _HZ_RE.match(str(v if v is not None else ""))
     if not m:
         return int(default)
-    n = int(m.group(2))
+    n = int(_round_half_away(float(m.group(2))))
     return -n if m.group(1) == "-" else n
 
 
@@ -306,7 +310,11 @@ def _quantize(v, u):
 # ============================================================================
 # 四、文本规则（说什么）：全部确定性，命中即返回理由
 # ============================================================================
-_QUOTE_OPEN = ('"', "\u201c", "\u300c", "\u300e", "\u300a")
+# 引语起始符。**不含书名号 《（《）**：正文里出现"《设计模式》"是书名，不是引用某人在说话。
+# 实测踩过：把 《 算进引语后，"今天我们聊《设计模式》"这句的 tone 被判成 quote，
+# 进而触发 rule:quote:persona，把 persona 从 narrator_male 换成 narrator_female ——
+# 旁白中途换人，听感像换了主播（而这句根本没有人引语）。
+_QUOTE_OPEN = ('"', "\u201c", "\u300c", "\u300e")
 _QUOTE_WORDS = ("他说", "她说", "有人问", "所谓", "据称")
 _NUM_UNITS = ("%", "万", "亿", "年", "倍")
 _TURN_WORDS = ("但是", "然而", "不过", "其实", "问题是")

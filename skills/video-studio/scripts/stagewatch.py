@@ -143,7 +143,7 @@ def _producer_of(art):
 
 # 硬类型：这些永远参与 --strict-stale 判定（产物丢了 / 源头改了 / 上游自己就过时）
 HARD_KINDS = ("source-changed", "output-missing", "no-manifest", "input-stale")
-SOFT_KINDS = ("input-pending",)
+SOFT_KINDS = ("input-pending", "source-pending")
 
 
 def _src_fp(kind, sources):
@@ -234,14 +234,27 @@ def check(work, stage, sources=None, self_built=False, pending=(), _seen=None):
     for kind in (io.get("sources") or []):
         now = _src_fp(kind, sources)
         was = old_src.get(kind, "missing")
-        if now != was:
-            fname = {"script": "剧本 film.json", "scenes": "画面代码 scenes.py"}.get(kind, kind)
+        if now == was:
+            continue
+        fname = {"script": "剧本 film.json", "scenes": "画面代码 scenes.py"}.get(kind, kind)
+        if str(stage) in planned:
+            # 源头变了 + 本轮马上就要重跑本阶段 = 正常待办，不是过时。
+            # 不软化的话，「改一句台词 -> --stage all --strict-stale」会在第一个 stage
+            # 直接失败（"没重跑却装了旧内容"——其实马上就要重跑），把主工作流堵死；
+            # 与 inputs 的 input-pending 是同一套语义，只是源头走的是另一个循环。
             issues.append(dict(
-                stage=str(stage), kind="source-changed", file=kind,
-                reason="%s 在本阶段上次跑完之后改过（%s -> %s），但本阶段没有重跑；"
-                       "它现在装的还是旧内容" % (fname, was, now),
+                stage=str(stage), kind="source-pending", file=kind, soft=True,
+                reason="%s 在上次跑本阶段之后变了（%s -> %s）；本阶段本轮会重跑，"
+                       "按新内容重算" % (fname, was, now),
                 rerun=RERUN_HINT.get(str(stage), ""),
             ))
+            continue
+        issues.append(dict(
+            stage=str(stage), kind="source-changed", file=kind,
+            reason="%s 在本阶段上次跑完之后改过（%s -> %s），但本阶段没有重跑；"
+                   "它现在装的还是旧内容" % (fname, was, now),
+            rerun=RERUN_HINT.get(str(stage), ""),
+        ))
     old_inputs = rec.get("inputs") or {}
     for name in io["inputs"]:
         now = _fp(name, work)

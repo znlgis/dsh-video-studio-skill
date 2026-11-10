@@ -72,8 +72,12 @@ python render.py --script film.json --scenes scenes.py --work work --stage still
 #      quickstart 拷出来的 myfilm/ 也不会有它；想用就按包根路径调用，或从包/仓库里复制过来。
 python <REPO>/tools/estimate.py --script film.json --jobs 4
 #    【v0.8 必看】estimate 已经算进新增的三道门禁，预演时间不再只是渲染时间：
-#    29 s 模板片从 v0.7 的 total 28.4 s 变成 58.8–108.2 s（vmaf 单阶段 31–50 s 是瓶颈）。
-#    要压回原来的量级就 --vmaf off（或 --vmaf sample），并接受 G11 记 skipped。
+#    29 s 模板片从 v0.7 的 total 28.4 s 变成 37.5–83.0 s（vmaf 单阶段 12.6 s 起）。
+#    预演给的是**区间上界**（悲观侧），实测全链约 47.3 s —— 别把区间上界当承诺。
+#    要压回原来的量级：在 film.json 写 "qa": {"vmaf": {"mode": "off"}}——estimate 与
+#    render.py 都读这个字段，G11 记 skipped。注意 estimate **没有** --vmaf 参数：
+#    --vmaf off|sample 是 render.py 的命令行开关，加在 estimate 上会直接报错；
+#    而 --vmaf sample 只是每 5 帧取 1（仍然跑 VMAF，pass/fail 照判），只有 off 才 skipped。
 
 # 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
@@ -577,7 +581,7 @@ VMAF 是唯一覆盖整条时间轴的客观感知指标。代价是**每片多�
 **为什么 G12 值得跑**：容器/响度/帧级质检全都默认"音轨里念的就是剧本那几句"——缓存串了、漏句、被压没了，
 从波形和容器上都看不出来。代价约 6 s/片（small 模型，CPU）。
 
-三个门禁的实测数据、阈值来源与关闭方式见 [references/v08-quality.md](references/v08-quality.md)。
+G0 / G11 / G12 三个新模块（外加 `G10` 词级）的实测数据、阈值来源与关闭方式见 [references/v08-quality.md](references/v08-quality.md)。
 
 **质检分三层**，一层比一层更接近"观众真的看到了什么"：
 
@@ -818,9 +822,9 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 - `references/sfx-design.md` — **（v0.3）音效设计**：物理拆解流程、配方表、听感诊断表、QC 规则
 - `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
 - `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
-- `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单（文内另有「两套编号别混用」的映射说明）
+- `references/quality-gates.md` — 方法论 G0–G8 全部门禁、可复制代码、验收清单（文内另有「两套编号别混用」的映射说明：账本是 `G0`/`G4–G12`）
 - `references/word-timeline.md` — **（v0.8）词级时间轴**：词级契约、句时长为何仍是权威、词锚点写法与退化路径、四个真实坑
-- `references/v08-quality.md` — **（v0.8）三道新门禁**：VMAF/SSIM、ASR 回读、渲前预检的判据、阈值来源、实测数据与关闭方式
+- `references/v08-quality.md` — **（v0.8）三道新门禁**：VMAF/SSIM、ASR 回读、渲前预检的判据、阈值来源、实测数据与关闭方式（词级 G10 见 `word-timeline.md`）
 - `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/style/scenes.py 各要重跑什么
 - `references/style-packs.md` — **（v0.5）风格包**：主题/配乐/声线字段、三级指纹规则、加第 9 套风格的步骤
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
@@ -875,7 +879,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 6. `python selfcheck.py` 的 PASS 计数
 7. **（v0.3）帧级深检的三个数**：单帧闪烁 N 条 / 画面空窗 N 段 / 音画同步超差 N 条
    （有 web 引擎时再加页面层的 文字重叠 / 出画 / 一闪而过 / 从没露面 四项）
-8. **（v0.8）三道新门禁的数**：G10 词级（N 句 / M 词、末词偏差）、G11 的 **VMAF 与 SSIM**（外加用了多少帧）、
+8. **（v0.8）新门禁的数**：G10 词级（N 句 / M 词、末词偏差）、G11 的 **VMAF 与 SSIM**（外加用了多少帧）、
    G12 的**字符召回**。这三项若在报告里是 `skipped`，要说明为什么没跑（没拷模块 / web 引擎 / 显式关闭），
    **不能只字不提**。
 
@@ -953,7 +957,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ## 13. 升级须知（从旧版迁移要动的地方）
 
-### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 / v0.8.0 要做什么）
+### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 / v0.8.0 / v0.8.1 要做什么）
 
 **一句话**：v0.4 的老项目**不写新字段就能继续跑**（不写 `style` = legacy 行为，配乐逐样本不变），
 但**工作目录要多拷文件**，且有两处默认值变了要重新听。按版本逐条过：
@@ -966,6 +970,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 | v0.7 → **v0.7.1** | 配乐基线默认值从 `music.gain_db=-1.5` 变成 **-12**（模板也已改），有人声处再压配乐 6 dB / 音效 3 dB；**之前手调过 `gain_db`/`duck_db` 的片子要重新听一遍**（现在背景整体更低）。显式写 0 可关掉对应侧链 | CHANGELOG 0.7.1「修了什么」+ `assets/film.json` 的 `music` 默认值 |
 | v0.7.1 → **v0.7.2** | `QC-REPORT.md` 现在**只落在 `--out` 的目录**（以前 `accept` 分支按 `work` 的兄弟目录算，`--out deliver/film.mp4` 时签核会更新到另一份没人交付的文件）。如果你用 `--out` 指到了非 `out/` 的目录，交付时请看新位置；旧的 `out/QC-REPORT.md` 不会被再写 | `render._report_path()` 的 docstring + `selfcheck` 第 40 条（本轮新增） |
 | v0.7.2 → **v0.8.0** | ① 新工作目录**多拷三个文件**：`scripts/preflight.py`、`scripts/qavmaf.py`、`scripts/qaasr.py`（都是**可选**：不拷对应门禁记 `skipped` 并写明原因，不会让渲染失败——但 `skipped != 通过`）。② **默认行为变了**：`film.json` 的 `words` 默认 **true**，老项目第一次跑 `--stage tts` 会**把每句重新联网合成一次**（老缓存没有词级记录）；不想付这次网络成本就写 `"words": false`。③ **qa 变慢**：全片 VMAF 每片多渲一遍参考帧（29 s 片实测 14.2 s），ASR 8.7 s——全链从约 28 s 涨到 **47.3 s**，qa（23.9 s）已超过渲染本身（12.5 s）。④ **输出仍默认 1080p@30**：不写 `video` 块行为与 v0.7 完全一致。⑤ 自检 43 → **51** 条，三档门禁多了 `G0/G10/G11/G12` 四行 | CHANGELOG 0.8.0「升级须知（v0.7.2 -> v0.8.0）」+ 本节下方逐条说明 |
+| v0.8.0 → **v0.8.1** | ① **删一次 `work/segments`**：`--resume` 的分块指纹新增 timeline 内容，旧计划会判"已变化"。② **退出码变严**：`--stage style/stills/frames/mux` 的门禁 fail（或 `--strict-gates` 下有 skipped）现在真的返回 1——靠退出码判定的交付脚本会开始"失败"。③ **`ci_check` 汇总变三档**：`PASS n / FAIL n / SKIP n`，用 `grep 'PASS 12'` 的脚本要改；要"没执行也算失败"加 `--strict`。④ **`filmcheck` 变严**：`video` 块走 `filmkit.video_plan`（1600x900 之类报 error），`qa.vmaf.enabled`/`qa.require_vmaf`/`qa.ssim.enabled` 三个惰性键报 WARN。⑤ **`webengine` 两处改成 fail-closed**：`style=None` + 720p 不再静默裁切、页面 FPS 与注入值不一致会报错。⑥ 金帧基线**不用重录**（像素逐位一致）。 | CHANGELOG 0.8.1「升级须知（v0.8.0 → v0.8.1）」+「行为变化」表 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
 > 升级后建议按 §14 重跑一次自检（51 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
@@ -978,7 +983,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 >    29 s 片全链 47.3 s，**qa 比渲染还贵**。
 >    着急出片用 `--vmaf off`，但请把 `skipped` 项在报告里说明白。
 > 4. 想要别的画幅/帧率才写 `video` 块；**默认输出仍是 1920x1080@30**，老项目不写就完全不变。
-> 5. 有历史交付脚本在 grep 输出的话：`PASS 43` → `PASS 51`，`webengine --selftest 24 项` → `31 项`。
+> 5. 有历史交付脚本在 grep 输出的话：`PASS 43` → `PASS 51`，`webengine --selftest 24 项` → `35 项`。
 
 ### 13.1 v0.3.0 → v0.4.0
 
@@ -1032,7 +1037,7 @@ cd <SKILL_DIR>/scripts
 python selfcheck.py                  # 51 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
-python webengine.py --selftest       # 浏览器引擎（31 项，会真起无头浏览器，约 60 秒）
+python webengine.py --selftest       # 浏览器引擎（35 项，会真起无头浏览器，约 60 秒）
 python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
 ```
 

@@ -577,6 +577,24 @@ def _prepare_script(script, tl):
     return sc, theme
 
 
+def _draw_subtitle_like_render(frame, text, theme, words):
+    """烧字幕，与 render.py 同口径（v0.8 起带 words 词边界折行）。
+
+    ⚠ 参考帧为什么不传 words 是个**会误杀好片**的缺陷（实测）：
+    render.py 的 frames / stills 阶段调 draw_subtitle 时总会传 words，
+    字幕会按词边界折行（"…整整 / 一句旁白"）；参考帧不传就退回字符折行
+    （"…整整一 / 句旁白"）。38 字字幕只差一个断点、约 2% 像素不同，
+    但近静态画面的 VMAF 从 99.95 掉到 8.55 —— 门禁会把同源的好片判 fail。
+    老版 filmkit 的 draw_subtitle 没有 words 形参，TypeError 时退回旧调用。
+    """
+    if not words:
+        return _K.draw_subtitle(frame, text, theme=theme)
+    try:
+        return _K.draw_subtitle(frame, text, theme=theme, words=words)
+    except TypeError:                   # 老 filmkit：没有 words 形参（保持旧行为）
+        return _K.draw_subtitle(frame, text, theme=theme)
+
+
 def _draw_ref_frame(scenes, scenes_mod, script, theme, fi, fps, total):
     """渲染第 fi 帧参考图（RGB）。逐行复刻 render.py:_render_range 的 859–885 行。
 
@@ -598,9 +616,16 @@ def _draw_ref_frame(scenes, scenes_mod, script, theme, fi, fps, total):
                            % (s.get("id"), type(frame).__name__))
     if frame.mode != "RGB":
         frame = frame.convert("RGB")
-    text = _K.sub_at(scenes, t, script.get("sub_max_hold"))
+    hold = script.get("sub_max_hold")
+    text = _K.sub_at(scenes, t, hold)
     if text:
-        frame = _K.draw_subtitle(frame, text, theme=theme)
+        # 词表取法与 render.py 一致（老 filmkit 没有 sub_words_at 时返回 None）
+        fn = getattr(_K, "sub_words_at", None)
+        try:
+            words = fn(scenes, t, hold) if fn is not None else None
+        except Exception:               # noqa: BLE001 —— 词表异常不该让参考帧渲不出来
+            words = None
+        frame = _draw_subtitle_like_render(frame, text, theme, words)
     fade = 1.0
     if t < 0.5:
         fade *= _K.ease_out(t / 0.5)

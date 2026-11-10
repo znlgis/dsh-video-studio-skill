@@ -47,6 +47,17 @@
   41  （v0.7.2）空门禁账本不许写成"通过"（没记录 != 通过）
   42  （v0.7.2）单阶段产物归属：不许把别的 stage 写的文件算成自己的（假 stale）
   43  （v0.7.2）theme_overrides 必须参与主题体检（否则能造出"看不清"的成片）
+  44  （v0.8.0）词级时间戳：规整（单调/裁剪/偏移）与 cue 词锚点解析
+  45  （v0.8.0）画幅规划：只允许 16:9 横屏下采样，竖屏/上采样/非法 fps 必须拒绝
+  46  （v0.8.0）金帧确定性：同一帧号两次渲染必须逐像素一致
+  47  （v0.8.0）依赖漂移体检：numpy/Pillow 主版本 + edge-tts 仍暴露 boundary 参数
+  48  （v0.8.0）批量清单解析：两种写法都认、上限卡死、坏条目在开跑前报错
+  49  （v0.8.0）TTS 后端可替换：注册/注销/未知后端的接口契约
+  50  （v0.8.0）web 风格载荷：style=None 时不得注入 __STYLE__（legacy 必须回落）
+  51  （v0.8.0）金帧回归：与 assets/golden_frames.json 的像素基线比对
+
+说明：本文件里 CASES 的**实际条数**是唯一真理，上面的编号表要与它同步。
+v0.8.0 之前这张表停在 43 条而 CASES 已经有 51 条，属于"自检清单自己没被自检"。
 """
 import argparse
 import io
@@ -1373,7 +1384,6 @@ def t_golden_frames():
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        cwd=root)
     out = (p.stdout or "").strip()
-    # 工具会在 JSON 前打印几行人读输出；从第一个 '{' 起解析
     i = out.find("{")
     if i < 0:
         return "skip（golden_frames 没输出 JSON：%s）" % (p.stderr or out)[:120]
@@ -1382,14 +1392,19 @@ def t_golden_frames():
     except json.JSONDecodeError as e:
         return "skip（golden_frames JSON 解析失败：%s）" % e
     changed = d.get("changed") or []
-    if p.returncode == 0 and not changed:
-        frames = d.get("frames") or []
-        return "%d 帧像素一致（font_fp %s）" % (len(frames),
-                                               str(d.get("font_fp") or "")[:8])
+    status = str(d.get("status") or "")
+    # 三档必须分开判：工具在"基线缺失 / 字体或环境指纹不同"时返回 exit 0 + status=skipped，
+    # 只认 returncode 会把"这次根本没比"记成 PASS。实测踩过：本机 Python 3.12.14、基线记的是
+    # 3.12.16，于是第 51 条显示"0 帧像素一致"进了 PASS 列——而它一帧都没比。
     if changed:
         raise AssertionError("金帧变了（画面回归）：changed=%r；若是有意改画风，"
                              "确认后用 python tools/golden_frames.py --write 重录基线" % (changed,))
-    return "skip（golden_frames exit=%s：%s）" % (p.returncode, (d.get("reason") or "")[:120])
+    if status == "pass" and p.returncode == 0:
+        frames = d.get("frames") or []
+        return "%d 帧像素一致（font_fp %s）" % (len(frames),
+                                               str(d.get("font_fp") or "")[:8])
+    return "skip（golden_frames status=%s exit=%s：%s）" % (
+        status or "-", p.returncode, (d.get("reason") or "")[:120])
 
 
 CASES = [

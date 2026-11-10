@@ -68,7 +68,10 @@ export async function apply(ctx) {
   // 这里必须兜住：插件行的加载失败会让整行从 profile 里消失，而"挂不上技能"本来只是个降级。
   // （v0.7.1 之前没兜：provider 一抛错 apply 就 reject，而且一行日志都没有——stub 实测复现过。）
   try {
-    applyFilesystemProvider(ctx, {
+    // 必须 await：provider 的 apply 是 Cordis 插件函数，允许返回 Promise。
+    // 不 await 时这里的 try/catch 只能拦住同步 throw，异步 reject 会变成
+    // unhandledRejection（Node >=15 默认让进程退出），"挂不上技能只是降级"就变成崩进程。
+    await applyFilesystemProvider(ctx, {
       providerName: "video-studio",
       includeDefaultRoots: false,
       bundledSkillDir,

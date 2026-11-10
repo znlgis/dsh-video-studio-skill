@@ -1,5 +1,8 @@
 # v0.8 三道新门禁：渲前预检 / 全片 VMAF / ASR 回读
 
+> 本页只讲这三个**模块**（`G0` / `G11` / `G12`）。账本里 v0.8 还有第四行 `G10` 词级时间戳，
+> 它的判据与关闭方式在 [word-timeline.md](word-timeline.md)。
+
 > 三个模块、三道账本门禁，都是**可选**的（不拷对应 .py 就记 `skipped` 并写明原因，不会让渲染失败）。
 > 三档语义沿用 v0.6：`pass` = 这次真的查了且通过；`fail` = 查了没过；
 > `skipped` = **这次没执行**——它**不等于通过**，交付时要逐项说明为什么没跑。
@@ -226,8 +229,12 @@ v0.7 及以前的质检只看"容器 / 响度 / 帧 / 音画同步"，都建立�
 
 ```bash
 python qaasr.py out/film.mp4 --timeline work/timeline.json --script film.json \
-    --model small --lang zh --out work/qa/asr.json --json
+    --model small --lang zh --out work/qa/asr.json
 # 退出码：0=pass；1=fail；2=skipped
+# 阈值只有一份权威：qaasr.py 的 QA_RECALL_PASS=0.85 / QA_RECALL_WARN=0.72，
+# render.py 的 G12 直接引用同一组常量（CLI 默认值与 --recall-pass/--recall-warn 同源）。
+# v0.8.0 之前 CLI 默认是 0.95/0.90，于是同一部片 render 判 pass、单独跑 CLI 判 fail——
+# 两套权威已合并，别再按旧口径传 0.95。
 python qaasr.py --selftest                    # 不联网自检
 # 离线回放（CI 用，不加载模型）：
 python qaasr.py film.mp4 --timeline ... --asr-json <已有 ASR 结果.json>

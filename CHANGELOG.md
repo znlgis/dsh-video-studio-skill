@@ -6,6 +6,165 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 0.8.1 — 全项目深审：修掉 60+ 处「看着没问题、其实没在查」（2026-11-10）
+
+> 本轮没有新功能。起因是一次**全量复核**：把 14 个 Python 模块（约 3.4 万行）、5 个前端文件、
+> 12 篇 references、仓库工具链与插件入口全部过一遍，每条结论都要求「改前能复现失败、改后能证明通过」。
+> 分八个方向并行做，最后统一回归。结论是 v0.8.0 的能力基本可信（selfcheck 51/51、ci_check 12/12、
+> 模板片全链 pass 11 / fail 0 / skipped 1），但仍有几类缺陷被系统性低估：
+>
+> 1. **门禁判了却没落到退出码**——stdout 打 [FAIL]、账本记 fail，进程仍 exit 0；
+> 2. **门禁自己算错**——VMAF 参考帧与成片字幕折行口径不一致，同源好片被判 8.55 分 fail；
+> 3. **配置写了却没人读**——`qa.vmaf.sample_step`、`visual.layout` 全链断裂；
+> 4. **静默产出错片**——web 引擎 720p 输出的是 1080p 原画的左上角裁切，逐像素相同却不报错。
+>
+> 版本号走 patch（0.8.0 → 0.8.1）：对外接口与默认出片规格没变，但**若干行为变严格了**，
+> 升级前请读下面的「行为变化」表。
+
+### 一、门禁与结论可信度（P0/P1）
+
+| # | 模块 | 问题 | 后果 | 修法 |
+|---|---|---|---|---|
+| 1 | `qavmaf` | 参考帧渲染不传 `words`，而 `render` 的 frames/stills **总传** → 字幕按词折行 vs 字符折行 | 38 字字幕断点差一个字（2% 像素），近静态画面 **VMAF 99.95 → 8.55**，同源好片被判 **fail** | 新增 `_draw_subtitle_like_render()`，与渲染侧同口径取 `sub_words_at`；实测 46/48 帧有差异 → 0/48 |
+| 2 | `render` | `--stage style/stills/frames/mux` 的早退分支丢掉 `_finish_gates()` 返回码 | 门禁 fail、stdout 打 `[FAIL]`，**退出码仍是 0**；CI 把失败当成功 | `rc = _finish_gates(a); return 1 if (rc or _LEDGER.fails()) else 0` |
+| 3 | `stagewatch` | `--strict-stale` 的 `source-changed` 不看"本 stage 本轮就要重跑" | 改一句台词后 `--stage style --strict-stale` / `--stage all --strict-stale` **在第一个 stage 直接失败** | 新增 `source-pending`（soft）：planned stage 只报 `[待重算]`，不参与 strict |
+| 4 | `render` | 自动补跑的 stage 不在 pending 里 | `--stage tts` 顺带排轴时，刚写出的 tts.json 被判成"输入变了还用旧产物" | `_stage_begin` 把正在跑的 stage 并入 pending |
+| 5 | `render` | `visual.theme_overrides` 只作用于 scenes 背景，**不作用于字幕** | overrides 把 ink/bg 调成低对比时，体检报通过、字幕压在同色背景上 | `_theme_for()` 优先返回 `plan["theme"]`（合并后的最终主题） |
+| 6 | `qa_frames` | `sync_info.judged` 只数"存在同名 kind 的 cue"，不看事件是否真在 2s 配对窗内 | `judged=1`、`sync=[]`、`errors=[]`，`require_sync=True` 也拦不住（**门禁看着查了 1 条，其实 0 条**） | 用与 `sync_check` 同一个 `_match_cue` 判；judged 只算真的配上 |
+| 7 | `webengine` | `textqa` 空扫描（`--from 2 --to 1`）、`--step 0`、`--step ≥0.6` 全部打印"重叠 0…"并 **exit 0** | 门禁是绿的，实际一行没查；`step≥0.6` 时"一闪而过"判据**数学上不可能触发** | 新增 `QA_BRIEF_S=0.6` + `_check_qa_window()`，非法窗口一律 ValueError（CLI exit 2） |
+| 8 | `webengine` | 页面 `qaText` 返回 `{}` 或 frames=0 时只判了 `isinstance(dict)` | 四类缺陷全 0 的**假 PASS** | `_check_qa_result()`：四个数组字段齐全、frames>0 才放行 |
+| 9 | `webengine` | 页面缺 `getCues/getEvents` 时静默返回空数组 | cues.json 0 条，配乐/音效照跑，**整片悄悄变哑** | 调 `_page_contract` 检查，缺失即 RuntimeError |
+| 10 | `webengine` | `style=None` + `--width 1280` 时页面画布仍是 1920x1080，截图=视口 | 输出的是**原画左上角裁切**（与裁切实测逐像素相同，diff_px=0），标题/HUD 全丢，exit 0 | `open_page` 读 canvas `getBoundingClientRect`，可视区未铺满视口即报错 |
+| 11 | `webengine` | `engine.js` 无条件把 `window.FPS` 覆盖成注入值 | 文档承诺的"fps 不一致就报错"**从未触发过**（页面声明 60、timeline 30 时静默改 30） | engine.js 先读页面声明值；不一致时不覆盖，交给 `open_page` 报错 |
+| 12 | `qaasr` | 抽轨失败直接抛异常 | 破坏 `report()` "总是返回 dict" 契约，render 的 catch-all 记 **G12 fail「门禁自身失败」**，把环境问题说成片子问题 | 抽轨/后备引擎套 try，按三档记 skipped + 原因 |
+| 13 | `stylekit` | 对比度门禁只拿 bg/bg2 的**中点**当背景（背景是整屏渐变） | lo-fi 的 muted 对 bg2 只有 **4.42**（AA 要 4.5），中点 4.84 把门槛"平均"过去——门禁 PASS、成片下半屏副标不达标 | 新增 `bg_contrast()` 取两端最差；lo-fi muted 调为 (84,98,94)（5.44/4.56） |
+| 14 | `gates` | 账本里 status 不是 pass/fail/skipped 时只加了个没人看的键 | 报告结论写"**通过**：所有门禁本次都执行且通过"；非 dict 条目直接 AttributeError | 未知状态按 fail 计并单列"账本损坏条目" |
+| 15 | `filmkit` | `detect_black` / `detect_silence` 在 ffmpeg 失败时返回 0 | qa_report 无告警，G8「首尾之外无长黑帧」直接 **pass**（把"没查"当"通过"） | 失败返回 None，qa_report 转 `[WARN] 本项不能当作通过` |
+| 16 | `filmkit` | 降级拼接给无音轨段补静音取 `max(段长, 参照段长)` | 3s 有声 + 1s 无声 → 输出 6.000s（音频比视频长 2s，ffmpeg rc=0 不报错） | 改取该段自身时长 |
+| 17 | `filmkit` | 拼接前只比有无音轨，不比采样率/声道 | 48k + 44.1k 段 `-c copy` 放行，按参照段解释 → **整段变调**（440Hz → 478.6Hz） | `_probe_concat_part` 增探 `sample_rate`/`channels`，不一致即重编码 |
+| 18 | `filmkit` | `max_dur` 把段时长压到 `lead+语音` 以下 | 场景变短但旁白仍播完整句 → **下一句语音压在本句上**（两条人声重叠） | 硬下限取 `max(min_dur, lead+voice)`，截不到目标时 WARN |
+| 19 | `stylekit` | `visual.layout`（文档 + schema 都有）**两条渲染路径都不生效** | 三档版式渲同一帧 sha256 完全相同 | 显式 layout 时补写 `theme["layout"]` 与 `layout_default` |
+| 20 | `selfcheck` | 第 51 条把 `golden_frames` 的 **skipped 当 PASS** | 本机 Python 3.12.14 / 基线 3.12.16 → 工具判 skipped，selfcheck 却报"0 帧像素一致"计 PASS：**这条门禁从没真的比过一帧** | 按 `status` 三档判；`golden_frames` 的 env 指纹改成 Python 只比 major.minor（补丁号不影响抗锯齿），实测三帧像素逐位相同 |
+
+### 二、静默产出错片 / 静默失效（P1/P2）
+
+| # | 模块 | 问题 | 修法 |
+|---|---|---|---|
+| 21 | `filmkit` | `lead<0.12` 时 `write_srt`/`write_ass` 写出 `-1:59:59,880` 非法时间码（播放器整条丢弃） | 落盘前钳 `t0>=0`、`t1>=t0` |
+| 22 | `filmkit` | 词边界折行对"单个比 max_w 还宽"的 token 不断开（实测 1761px > 1560），而 `qa_text_safe` 用字符折行量宽度看不见 | 词边界折行结果超宽时回退字符折行 |
+| 23 | `filmkit` | `tts` 的 v1 老缓存分支没校验 trim：`trim_silence=false` 仍命中裁剪版音频 | 条件补 `bool(m["trimmed"]) == bool(trim)` |
+| 24 | `filmkit` | `FrameSink.close` 先 `wait()` 后读 stderr，编码错误刷满 64KB 管道即死锁；BrokenPipe 会顶掉真实错误 | 先排空 stderr 再 wait；报错带 exitcode |
+| 25 | `filmkit` | `CueBus.resolved` 文档写"丢弃并告警"，实际静默 continue | 丢弃时打汇总 WARN（分"超片长/负时刻"计数，实例级去重） |
+| 26 | `render` | `--resume` 的分块指纹只覆盖 total/frames/fps/chunk + scenes + script，**不含 timeline 内容** | 指纹加 `timeline` sha1；字幕窗口/词级断点变化不再静默复用旧分块 |
+| 27 | `render` | `run_batch` 预检失败分支写台账前没建父目录 | 补 `os.makedirs`；"一条都没跑"的说明与台账不再丢失 |
+| 28 | `render` | `qa.vmaf.sample_step` 全链断裂（filmcheck 只认零消费者的 `sample_s`，render 从没透传） | 键名对齐 schema + qavmaf；render 透传 `sample_step` |
+| 29 | `scorekit` | 承诺的"指纹破平"是**恒等项**（每行同一常数），同分永远按 STYLE_IDS 顺序 | 把 style id 混进哈希；4 个同分标题从"全落 tech-deep"变成各半 |
+| 30 | `scorekit` | 积分响度**多减一次 -0.691**，报告值恒定偏低 0.69 dB | 去掉多余常数（块响度定义里那个保留）；12 s 片 -15.65 → -14.96，与 BS.1770 差 1.19 → 0.49 dB |
+| 31 | `scorekit` | 铺底包络释音是覆盖式：bpm>≈223 时包络在 pad_dur 处从爬坡值跳到 1.0（一声"噗"） | 释音改乘法；bpm≤200 全部组合与旧公式逐位一致 |
+| 32 | `webengine` | CLI 五个子命令的 `--deterministic` 用 store_true，未传时 False 把 `WEBENGINE_DETERMINISTIC=1` 当"明确关掉" | 改三态（`store_const` + `default=None`） |
+| 33 | `webengine` | `new_page`/`new_cdp_session` 失败或 worker 被 cancel 时不关浏览器 | 加 `BaseException` 清理（`CancelledError` 不继承 Exception） |
+| 34 | `webengine` | `chunk_s<=0` 被静默夹成"1 帧/块"（360 帧拆 360 块）；duration/from/to 为 NaN 时炸成不可读 TypeError | 开浏览器前校验正数/有限数 |
+| 35 | `webengine` | 页面 cue/event 时间为 NaN/Infinity 时写进 cues.json（非法 JSON 字面量） | `_finite_t()` 非有限即报错并点名 |
+| 36 | `preflight` | TTS 只比 mp3 **个数**：`l09.mp3` 顶替 `l04`（数量相同）→ pass；0.05s 音频配 8 字台词也 pass | 加"文件名↔行 id 对账"与"时长<0.06s/字"两条 warning |
+| 37 | `estimate` | 没有 timeline.json 时帧率**写死 30**（`video.fps` 读了不用） | 24fps 片 484 → 387 帧；60fps 不再低估一半 |
+| 38 | `estimate` | `qa.vmaf`/`qa.asr` 不是对象时 `.get()` 直接 AttributeError traceback | isinstance 归一化 + 一行 WARN |
+| 39 | `estimate` | 非法 `video` 块被 `except Exception` 静默吞掉，仍打印 `ok:true` | 拆 ImportError / Exception，后者明说 render 会拒片 |
+| 40 | `estimate` | VMAF 成本模型是 v0.7.2 拍的 1.0–1.6×，无 v0.8 实测支撑；`mode=sample` 完全不分档 | 改 `0.40–1.00×` + sample 按 step 折算；29 s 片 total 58.8–108.2 → **37.5–83.0 s**（实测 47.3 s） |
+| 41 | `estimate` | 分块建议传给 `chunk_plan` 的是封顶 12 的 jobs_eff，而 render 用 `--jobs` 原值 | `--jobs 16` 时预演 120/8 段 vs 实际 60/15 段 → 传 jobs_req |
+| 42 | `golden_frames` | `build_timeline` 没传 fps（默认 30），24/25/50/60 fps 片的基线帧号不是真实帧号 | 走 `video_plan`；模板片基线无需重录 |
+| 43 | `index.js` | `applyFilesystemProvider(...)` **没 await**：异步 reject 逃出 try/catch → unhandledRejection（Node ≥15 默认杀进程） | 加 `await`；stub 复现改前捕获到 rejection、改后 null |
+| 44 | `filmcheck` | 与 `filmkit.video_plan` 是**两套分辨率真理**：`1600x900` filmcheck 放行（0 error 0 warning）而 render 拒片 | video 块改为直接调 `filmkit.video_plan`，只做错误翻译 |
+| 45 | `filmcheck` | `qa.vmaf.enabled` / `qa.require_vmaf` / `qa.ssim.enabled` 全仓无消费者却合法通过 | 标 `inert` 并 WARN（"写它不生效，真正生效的是 mode=off"） |
+| 46 | `filmkit` | `fit_sub_lines` 定义了两次（旧版是死代码，两版签名不同） | 删旧版；`grep` 确认仅剩一个定义 |
+| 47 | `sfxkit` | 无 scipy 时谐振器 IR 被 `cap=20000` 截断：长尾（t60 5–7 s）在 -25 dB 处跳变，听感"咔"一声 | 二阶系统 IR 有闭式解，改向量化解析计算（截断精确、快两三个数量级） |
+| 48 | `sfxkit` | `Body.render` 无 scipy 时每个模态一次 FFT（N 模态 N 次卷积） | 合并加权模态 IR 再卷积一次（数学等价；有 scipy 路径逐样本不变） |
+| 49 | `sfxkit` | `data_chirp(rate=0)` 抛 ZeroDivisionError；`rate<0` 静默丢脉冲只剩哑音 | 入口校验正数 |
+| 50 | `stylekit` | `pick_style` 结构加分选中时文案写"关键词命中："后空一截（报告没发生的事） | 改报"无关键词命中，按题材结构加分选中（…）" |
+| 50b | `voicekit` | 书名号 `《` 被当成引语起始符：正文写"今天我们聊《设计模式》"会触发 quote 语气，并把 persona 从 narrator_male 换成 narrator_female | **旁白中途换人**（而这句根本没有人引语）。`_QUOTE_OPEN` 移除 `《` |
+| 50c | `voicekit` | `parse_pct("+4.5%")` 正则只认整数 → 静默回落 0 | 与 `"+0%"` **撞同一个 TTS 缓存键**："把语速从 0 调到 4.5%"完全没生效、还复用旧音频，且无任何报错。正则改为接受小数并按四舍五入取整（`parse_hz` 同理） |
+| 50d | `filmcheck` | `lines[].persona` 拼错时 voicekit **静默回落**到 kind 默认声线（reason 里有 `unknown_persona` 但不报错） | schema 只校验 `t=str`，拦不住；补上"枚举从 voicekit 单向读取"的 WARN + 拼写建议（tone 已有 enum ERROR，不重复报） |
+
+### 三、仓库门禁自身（`ci_check` / `selfcheck`）
+
+| # | 位置 | 问题 | 修法 |
+|---|---|---|---|
+| 51 | `ci_check` | 只有 PASS/FAIL 两态，"跳过（没装 node）"被记成 **PASS** | 三档 `PASS/FAIL/SKIP` + `--strict`（SKIP 也算失败）；汇总行与"跳过项"分列 |
+| 52 | `ci_check` | 打包卫生的 `must` 是**手写列表**，对新增文件天然免疫（gates/stagewatch/preflight/qavmaf/qaasr/golden_frames 全不在里面） | 改派生式：`skills/ schemas/ locale/ tools/ docs/` 下磁盘文件必须全部进包 |
+| 53 | `ci_check` | junk 后缀不含 `.bin`，且派生 must 与 `files` 排除规则互相打架 | junk 增 `.bin/.dll/.exe/.so/.dylib/.pyd/.db/.sqlite` 与"路径含未展开 `%`"；派生 must 跳过 junk |
+| 54 | `ci_check` | 第 8 项只查语法：`zip(strict=)` / `bit_count()` / `tomllib` / `match` / `except*` / `dataclass(slots=)` / `X|Y` 注解在 3.9 上都是运行期错误 | 加 AST 运行期 API 扫描（只查确定不兼容的几类，不按 `BinOp|BitOr` 一律报错） |
+| 55 | `ci_check` | 版本一致性只查 package.json ↔ README 徽章 | 加 CHANGELOG 顶部版本（"发了新版但 CHANGELOG 没动"历史真发生过） |
+| 56 | `selfcheck` | 顶部 docstring 只列到 43 条，CASES 实际 51 条 | 补齐 44–51 并注明"CASES 是唯一真理" |
+| 57 | `schemas` | `qa.vmaf.pass/warn` 描述写"默认 88/94"，权威值是 **92/96**，还引用了不存在的 `render.QA_VMAF_PASS` | 改 92/96 + 指向 `qavmaf.py`；惰性键补文档 |
+
+### 四、文档与代码不一致（`docs`）
+
+| # | 位置 | 问题 |
+|---|---|---|
+| 58 | `references/v08-quality.md` | 给出 `qaasr.py ... --json`，而 qaasr **没有** `--json`（照抄即 exit 2）；且没说 CLI 默认线与 G12 的关系（现已同源 0.85/0.72） |
+| 59 | `SKILL.md` §1 | 在 estimate 命令块里写 `--vmaf off|sample`——estimate **没有** `--vmaf`；且 `sample` 不会让 G11 记 skipped |
+| 60 | `references/audio.md`、`style-packs.md` | 宣称 `music.seed_from_content: false` 能关掉内容指纹的结构变奏——它只影响 seed 派生，结构变奏照旧 |
+| 61 | `references/change-impact.md` | 分块指纹路径写成 `work/_plan.json`（实际 `work/segments/_plan.json`） |
+| 62 | `references/audio-variation.md` | 把 scorekit legacy 断言错记成 `selfcheck.py` 第 20 条（那条是 sfxkit；scorekit 侧在 `scorekit.py --selftest`） |
+| 63 | `README`/`SKILL`/`v08-quality` | v0.8 门禁计数"三道/四项"三种口径打架（账本实际 G0/G10/G11/G12 四个） |
+| 64 | `references/quality-gates.md` | 标题写"G0–G6"而内容已含 G7/G8 与 G0–G12 映射 |
+| 65 | `SKILL`/`web-engine` | `webengine --selftest` 写 31 项（现 35 项） |
+| 66 | `style-packs.md` | 把 `lines[].rate/pitch/volume/tail` 说成"逐句覆盖（最高优先级）"——voicekit 只读 persona/voice/tone，filmcheck 还会报未知键 |
+
+### 行为变化（升级前先看这几条）
+
+| 变化 | v0.8.0 | v0.8.1 | 影响 |
+|---|---|---|---|
+| `--stage style/stills/frames/mux` 的退出码 | 恒 0 | 门禁 fail / `--strict-gates` 下有 skipped 时为 **1** | 交付脚本若靠退出码判定，现在会真的拿到失败 |
+| `--resume` 的分块计划指纹 | 只含时长/帧数/fps/scenes/script | **新增 timeline 内容** | 老项目的 `work/segments/_plan.json` 会判"计划已变化"，需删一次 `work/segments`（报错信息里已写 `rm -rf`） |
+| `qaasr` CLI 默认阈值 | 0.95 / 0.90（比 render 的 G12 严） | **0.85 / 0.72**（与 G12 同源） | 同一部片 render 判 pass、单独跑 CLI 判 fail 的矛盾消失 |
+| `qa.vmaf.sample_step` | 合法但**没人读**（永远按默认步长 5） | 真的生效 | 写了它的项目抽样密度会变 |
+| `qa.vmaf.enabled` / `qa.require_vmaf` / `qa.ssim.enabled` | 合法、静默无效 | filmcheck 报 **WARN**（惰性键） | `filmcheck --strict` 下会失败；要跳过 G11 请写 `mode=off` |
+| `estimate` 的 VMAF 成本模型 | 1.0–1.6× 片长（29 s 片报 31–50 s） | **0.40–1.00×**（12.6 s 起），sample 按 step 折算 | 预演 total 58.8–108.2 → **37.5–83.0 s** |
+| `webengine` + `--width/--height` + `style=None` | 静默输出原画左上角裁切 | **报错**（画布未铺满视口） | legacy 项目要 720p 请走 PIL 路线，或给页面加 `__STYLE__` 支持 |
+| `webengine` 页面 FPS 与注入值不一致 | 静默改成注入值 | **报错** | 页面声明 60 而 timeline 30 的项目会当场失败（这是承诺兑现） |
+| `ci_check` 汇总 | `PASS n / FAIL n` | `PASS n / FAIL n / SKIP n` + 跳过项单列 | 用 `grep 'PASS 12'` 的脚本要改；`--strict` 可让 SKIP 也失败 |
+| `selfcheck` 第 51 条 | 金帧 skipped 也记 PASS | 真比像素；skipped 记 SKIP | 本机现在是真比（3 帧像素逐位一致） |
+| `stylekit` lo-fi 主题的 muted | (86,100,96)（对 bg2 只有 4.42） | (84,98,94)（5.44/4.56） | 该主题的副标颜色略有变化 |
+| `voicekit` 的 `《` | 当引语 → 该句换 quote 声线 | **不再当引语**（书名号是书名） | 写过"《书名》"的片子，那几句会回到正文声线（这才是对的） |
+| `voicekit` 的 `parse_pct` | `"+4.5%"` 静默变 0（与 `"+0%"` 同缓存键） | 真的按 4.5% → 取整 5 | 写过小数的项目会重新合成那几句（缓存键变了，这是期望行为） |
+
+### 升级须知（v0.8.0 → v0.8.1）
+
+1. **删一次分块计划**：`rm -rf work/segments`（指纹新增 timeline，旧计划会判"已变化"）。
+2. **CI 里别再用 `grep 'PASS 12 / FAIL 0'`**：现在是三档汇总；要"没执行也算失败"就加 `--strict`。
+3. **web 引擎 720p 交付**：`style=None` + `--width 1280` 现在会报错（以前静默裁切）。改法二选一——
+   走 PIL 路线（`--engine pil` + `video.width/height`），或让页面读 `window.__STYLE__`。
+4. **`filmcheck` 变严**：`video` 块走 `filmkit.video_plan`（1600x900 之类会报 error）、
+   三个惰性 qa 键会报 WARN。跑一遍 `python scripts/filmcheck.py film.json` 就知道自己的剧本有没有踩。
+5. **不需要重录金帧基线**：`assets/golden_frames.json` 与当前渲染像素逐位一致（30 fps 模板片）。
+
+### 实测数据（本机 Windows 11 / Python 3.12.14 / ffmpeg 9.0.2；换机请重测）
+
+| 项 | 实测 |
+|---|---|
+| 全链 `--stage all --cost`（29.00 s / 870 帧，全新 work） | 总 **55.1 s**：tts 3.1 · score 5.0 · sfx 0.9 · audio 0.6 · frames 14.6 · mux 1.8 · **qa 29.0**（VMAF 14.1 + ASR 9.0） |
+| 门禁汇总（1080p 交付） | pass **11** / fail 0 / skipped 1（signoff）——G4 1920x1080@30 · G5 -16.5 LUFS/-1.4 dBTP · G6 锐度比 1.009 · G10 4 句 64 词 · G11 **VMAF 97.26 / SSIM 0.9928 / 870 帧 / 14.1 s** · G12 召回 **0.844** |
+| 自检 / 仓库体检 | `selfcheck` **PASS 51 / FAIL 0 / SKIP 0**；`ci_check` **PASS 12 / FAIL 0 / SKIP 0** |
+| 模块自检 | sfxkit **16/16** · scorekit **21/21**（36.5 s）· qa_frames **22/22**（5.7 s）· webengine **35/35**（22.4 s）· qavmaf **11/11** · qaasr **13/13**（2.2 s） |
+| 无 scipy 兜底 | `tools/selftest_noscipy.py sfxkit scorekit` 全 PASS；sfxkit 的兜底路径现在用**解析参照**验数值（以前只验"没崩"） |
+| 金帧 | 3 帧（36/270/369）像素逐位一致，`status=pass`（修复前因补丁号差异被判 skipped 却记 PASS） |
+
+### 已知限制（本版没做，写下来别装看不见）
+
+- **`music.style` 单独出现时并不"只换配乐"**：`resolve_script_style` 的 legacy 判定要求
+  `style / visual.theme / music.style` **全部**没写才走 legacy，所以只写 `music.style` 会走 auto，
+  画风/旁白/节奏一起换。要修得同时改 stylekit 与 `render.st_score`，本轮未做。
+- **`chapter_layout` 的"按章节轮换版式"仍未实现**：scenes.py 只读 `theme["layout"]`（全片一个），
+  web 只读 `layout.default`。本轮只让**显式** `visual.layout` 生效。
+- **`lines[].rate/pitch/volume/tail` 仍不生效**：voicekit 只读 persona/voice/tone（文档已改正，
+  filmcheck 会报未知键）。要逐句改语速/音高请换 persona 或 tone。
+- **G9 的"同步查了 0 条"**：PIL 路线需要 cue 带数值 `visual_at` 才会真的配对；`judged=0` 是
+  "没有可比对的证据"，不是"查过且通过"（报告里已如实写）。
+- **`preflight` 字形检测仍按 sans 族**：serif/kai/round 主题只发一条 `glyph_family_unchecked` warning。
+- **`theme_overrides` 的数值键仍接受 NaN/Inf**：未知 `family` 由 filmkit 静默回退 sans（刻意的"拼错不炸渲染"）。
+- **12 分钟片峰值内存约 1.25 GB**（scorekit 铺底缓存 × 多路 float64），8 GB 机器能跑但余量不大。
+- **`--batch` 是串行**，且不把 `--jobs/--resume/--preview` 传给子进程。
+
 ## 0.8.0 — 词级时间轴 / 画幅参数化 / 批量 / 三道新门禁（2026-11-10）
 
 > 本轮的主线是「把已经能看到、但抓不住的东西变成阻断性门禁」：词级时间戳（字幕断行的依据）、

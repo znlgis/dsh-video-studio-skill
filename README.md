@@ -1,11 +1,11 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.8.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.8.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
 写剧本 → edge-tts 旁白 → **实测时长**排时间轴 → **提示点**驱动配乐与音效 → PIL 或浏览器逐帧渲染 →
-ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）+ **v0.8 的三道新闸**
+ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）+ **v0.8 的四个新闸**
 （渲前资源预检 `G0` / 词级时间戳 `G10` / 全片 VMAF `G11` / ASR 回读 `G12`）。
 零素材、可复现、可断点续跑、可脚本化验收；装成插件后，整片生产流程随技能一起进入每个会话。
 
@@ -39,8 +39,8 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §5.6 / §5.7、references/audio-variation.md。
 > **v0.8.0（把"看得见"变成"抓得住"）**：四个方向——① **词级时间轴**：edge-tts 的 WordBoundary 事件落
 > `work/words.json`（4 句 / 64 词 / 末词偏差 0.09 s），字幕改按词折行，cue 可写词锚点 `"l03:w2+0.1"`；
-> ② **三道新门禁**：渲前资源预检 `G0`（缺字形/坏音频在渲第一帧前 fail，< 1 s）、全片 VMAF/SSIM `G11`
-> （参考帧由场景函数**实时重渲**，不是成片抽帧；29 s 片 VMAF 97.22 / 14.2 s）、ASR 回读 `G12`
+> ② **四道新门禁**：渲前资源预检 `G0`（缺字形/坏音频在渲第一帧前 fail，< 1 s）、词级时间戳 `G10`、
+> 全片 VMAF/SSIM `G11`（参考帧由场景函数**实时重渲**，不是成片抽帧；29 s 片 VMAF 97.22 / 14.2 s）、ASR 回读 `G12`
 > （成片音轨转文字对账，0.72 以下才 fail，8.7 s/片）；③ **画幅/帧率参数化**（只做 16:9 横屏，
 > 内部恒 1080p、编码时下采样，720p 已实测全门通过）、**批量** `--batch`（≤100 条、开跑前全量预检、
 > 单条失败不阻断）、**预览** `--preview N`（前 N 秒出 mp4+gif）、**运行版本化** `--run-id`（`work/runs/<runId>/`）；
@@ -49,6 +49,15 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 已经**超过渲染本身**（`frames` 12.5 s）；`estimate` 预演也从 28.4 s 变成 **58.8–108.2 s**（vmaf 31–50 s 是瓶颈）。
 > v0.8 之后"出片时间"不再只是渲染时间。selfcheck 43 → **51 条**。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §6.1 / §7.5、references/word-timeline.md、references/v08-quality.md。
+> **v0.8.1（全项目深审，无新功能）**：把 14 个模块 / 5 个前端文件 / 12 篇 references / 仓库工具链
+> 全部过一遍，修掉 **60+ 处**「看着没问题、其实没在查」。举几个真会伤到交付的：
+> ① **VMAF 参考帧与成片的字幕折行口径不一致**（渲染传 `words`、参考帧没传）——近静态画面
+> 从 **99.95 掉到 8.55**，同源好片被判 fail；② `--stage style/stills/frames/mux` 的门禁 fail
+> **没进退出码**（stdout 打 [FAIL]、进程仍 exit 0）；③ `webengine` 在 `style=None` + 720p 时
+> **静默输出 1080p 原画的左上角裁切**（逐像素相同、标题/HUD 全丢、exit 0）；
+> ④ `visual.layout` 与 `qa.vmaf.sample_step` 写了**完全没人读**；⑤ `selfcheck` 第 51 条把金帧
+> 的 skipped 当 PASS（**这条门禁从没真的比过一帧**）；⑥ `ci_check` 把"跳过（没装 node）"记成 PASS。
+> 详见 [CHANGELOG.md](CHANGELOG.md) 的 0.8.1 段（含行为变化表与升级须知）。
 
 ## 安装
 
@@ -132,7 +141,7 @@ python selfcheck.py                                     # 51 条环境/回归断
 python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块（仓库/包里的工具，
                                                          #     不在 skills/video-studio/ 内，quickstart 拷出来的目录没有它）
                                                          #     v0.8：已含 preflight/vmaf/asr 三段；29 s 模板片
-                                                         #     预演 total 28.4 s -> 58.8-108.2 s（vmaf 31-50 s 最贵）
+                                                         #     预演 total 28.4 s -> 37.5-83.0 s（区间上界，实测 47.3 s）
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 cat out/QC-REPORT.md                                    # v0.6：机器可读交付结论（pass/fail/skipped）

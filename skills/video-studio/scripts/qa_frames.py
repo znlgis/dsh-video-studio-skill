@@ -773,11 +773,19 @@ def _cue_anchor(cue) -> float | None:
     return None
 
 
-def _sync_coverage(cues, events) -> dict:
+def _sync_coverage(cues, events, tol=SYNC_TOL) -> dict:
     """统计"音画同步到底查了多少条"：返回 {"cues","anchors","same","judged","src_skipped"}。
 
-    judged = 能给出 dt 判定的 cue 数 = 自带锚点的 cue + 至少存在同名 kind 且**同源**事件的 cue。
-    这是防"静默全过"的量化指标：judged == 0 而 cues > 0 时，sync 为空没有意义。
+    judged = **按命名约定真的判过 dt** 的 cue 数 = 自带视觉锚点的 cue + 同 kind 且落在
+    SYNC_SAME_WIN 搜索窗内、src 同基准的 cue。这是防"静默全过"的量化指标：
+    judged == 0 而 cues > 0 时，sync 为空没有意义。
+    ⚠ 不能只数"存在同名 kind 的 cue"：同名事件若都离 cue 超过 SYNC_SAME_WIN 的搜索窗，
+    sync_check 一条也不会判，judged 却会记成"查过了"——require_sync 的"没查"守卫
+    就被这个虚高计数骗过去（实测 cues=[impact@0.5] / events=[impact@100]
+    -> judged=1、errors=[]，门禁根本没判）。所以这里用与 sync_check 同一个 _match_cue 判。
+    ⚠ 也**不**把"异 kind 就近确认"（mode="near"）算进 judged：它只在 |dt|<=tol 时认可，
+    是运气不是约定；把它算成"判过"会让命名约定失效的场景显示成"已判 1 条"。
+    另外记 judged_any（含异 kind 佐证）只作诊断，不进报告口径。
     src_skipped = 因为"cue 与事件时间基准不同"（src 不同）而无法参与对照的 cue 数：
     web 引擎三路合并（film.json/scenes.py 用 PIL 时间轴、页面事件用页面时间轴）时会有，
     这种情况不能算"同步失败"，但也不能静默跳过 —— 由 _load_cues 转成 warning 点名。
@@ -786,18 +794,29 @@ def _sync_coverage(cues, events) -> dict:
     events = [e for e in (events or []) if isinstance(e, dict)]
     anchors = sum(1 for c in cues if _cue_anchor(c) is not None)
     same = 0
+    judged = 0
+    judged_any = 0
     src_skipped = 0
     for c in cues:
         if _cue_anchor(c) is not None:
+            judged += 1
+            judged_any += 1
             continue
         compat = _compatible_events(c, events)
         if not compat and events:
             src_skipped += 1
             continue
-        if str(c.get("type") or "").strip().lower() in {_event_kind(e) for e in compat}:
+        typ = str(c.get("type") or "").strip().lower()
+        if typ in {_event_kind(e) for e in compat}:
             same += 1
+        matched = _match_cue(c, compat, tol)[1] is not None
+        if matched:
+            judged_any += 1
+        # 只有"同名 kind 配对成功"才算按约定判过（锚点上面已单独计入）
+        if matched and any(_event_kind(e) == typ for e in compat):
+            judged += 1
     return {"cues": len(cues), "anchors": anchors, "same": same,
-            "judged": anchors + same, "src_skipped": src_skipped}
+            "judged": judged, "judged_any": judged_any, "src_skipped": src_skipped}
 
 
 def _load_cues(cues_json):
@@ -892,18 +911,40 @@ def _load_cues(cues_json):
         warns.append(msg)
         info["blockers"].append(msg)
     elif cues and events:
-        # 门禁静默失效的最后一道保险：同 kind 配对要求 events.kind == cue.type，
-        # 且按来源（src）过滤后仍要有可配对项（见 _src_compatible）。
-        # 若一个都对不上，sync_check 会"零超差"通过——看起来干净，其实一条都没在查。
+        # 门禁静默失效的最后两道保险，分别覆盖两种"零超差但一条没查"：
+        #   ① 命名约定失效：cue.type 与任何事件的 kind 都不同名（cov["same"] == 0）；
+        #   ② 同名事件全落在 SYNC_SAME_WIN 搜索窗之外，一条 dt 都算不出来（cov["judged"] == 0）。
+        # 两者都会让 sync_check 返回空列表——看起来干净，其实一条都没在查。
+        # 判据用 cov["judged"]（按约定真的配对成功）而不是 cov["same"]（只是同名）。
         cue_types = {str(c.get("type") or "").strip().lower() for c in cues}
         ev_kinds = {_event_kind(e) for e in events}
         if cov["same"] == 0 and cov["anchors"] == 0:
+            # 命名约定失效：cue.type 与任何事件的 kind 都不同名。这时 sync_check 可能靠
+            # 异 kind 的"就近确认"蒙到几条（dt 恰好在容差内），但**没有任何一条是照约定
+            # 配出来的**——对齐了是巧合，错位了也不会报。所以这条与 judged 无关，永远报。
             msg = ("音画同步检查可能没生效：%d 个 cue 的 type 与 %d 个事件的 kind 没有任何可配对的同名项"
                    "（同 kind 配对要求 events.kind == cue 的配方名，且双方 src 需属同一时间基准）。"
                    "sync 为空不代表同步正确——请按 references/frame-qa.md §2.5 的命名约定登记事件，"
                    "或把某个 cue 故意改错 0.3 s 重跑做反证。" % (len(cue_types), len(ev_kinds)))
             warns.append(msg)
             info["blockers"].append(msg)
+        elif cov["judged"] == 0 and cov.get("judged_any", 0) == 0:
+            # 同名 kind 有，但一条 dt 都算不出来：事件全落在 SYNC_SAME_WIN 搜索窗之外，
+            # 或全被 src 过滤掉了。sync_check 同样"零超差"通过——必须让人看见。
+            msg = ("音画同步检查可能没生效：%d 条 cue 里没有一条能判定 dt"
+                   "（同名事件都不在 %.1f s 搜索窗内，或 src 时间基准不同）。"
+                   "sync 为空不代表同步正确——请核对 events 的时间基准与时刻，"
+                   "或给 cue 写数值 visual_at。" % (len(cues), SYNC_SAME_WIN))
+            warns.append(msg)
+            info["blockers"].append(msg)
+    else:
+        # 「有 cues.json 但里面既没有 cues 也没有 events」：文件解析成功、对照却无从做起。
+        # 不记 blocker 的话 require_sync 也拦不住：report() 里把"没查"升级成 error 的条件
+        # 要求 cues 非空，而这里 cues 为空 —— 于是空 cues.json 会静默通过整道同步门禁。
+        msg = ("cues.json 里既没有 cues 也没有 events：音画同步对照没有执行"
+               "（文件是空对象、只写了 version 字段？按 §4.2 补 cues / events）")
+        warns.append(msg)
+        info["blockers"].append(msg)
     return cues, events, warns, info
 
 

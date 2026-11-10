@@ -332,13 +332,21 @@ SCRIPT_SPEC = {
         # 质检门禁参数（全片 VMAF/SSIM 阻断 + ASR 回读）
         "qa": {"t": "dict", "props": {
             "vmaf": {"t": "dict", "props": {
-                "enabled": {"t": "bool"},
+                # enabled / require_vmaf 是 v0.8 起草时留下的**惰性键**：schema 与这里都认，
+                # 但 render.py / qavmaf.py 全仓没有读取点——写了它门禁照跑，用户以为自己关掉了。
+                # 真正生效的是 mode=off（或命令行 --vmaf off）。这里标 inert 让 filmcheck 报 WARN，
+                # 因为本项目的立场是"写对了却不生效"比"报未知键"更坏。
+                "enabled": {"t": "bool", "inert": "写它不生效；要跳过 G11 请写 qa.vmaf.mode=\"off\"（或 --vmaf off）"},
                 "mode": {"t": "str", "enum": ("full", "sample", "off")},
                 "pass": {"t": "num", "min": 0.0},
                 "warn": {"t": "num", "min": 0.0},
-                "sample_s": {"t": "num", "min": 0.1}}},
+                # v0.8.1：键名对齐 schemas/film.schema.json 与 qavmaf.report(sample_step=...)。
+                # 这里以前写的是 sample_s —— 全仓没有任何消费者（render 不读、qavmaf 只认
+                # sample_step），于是"写对了却完全没生效"，而 schema 里合法写完还会被本脚本
+                # 报成未知键。别再兼容 sample_s：它从来没生效过，留着只会让人以为能用。
+                "sample_step": {"t": "int", "min": 1}}},
             "ssim": {"t": "dict", "props": {
-                "enabled": {"t": "bool"},
+                "enabled": {"t": "bool", "inert": "写它不生效；SSIM 本来就只是诊断项（不单独阻断）"},
                 "pass": {"t": "num", "min": 0.0, "max": 1.0},
                 "warn": {"t": "num", "min": 0.0, "max": 1.0}}},
             "asr": {"t": "dict", "props": {
@@ -346,7 +354,7 @@ SCRIPT_SPEC = {
                 "model": {"t": "str"},
                 "recall_pass": {"t": "num", "min": 0.0, "max": 1.0},
                 "recall_warn": {"t": "num", "min": 0.0, "max": 1.0}}},
-            "require_vmaf": {"t": "bool"}}},
+            "require_vmaf": {"t": "bool", "inert": "写它不生效；要强制 G11 别记 skipped 请用 --strict-gates"}}},
     },
 }
 
@@ -382,6 +390,12 @@ def _check(val, rule, path, rep, ctx):
         return
 
     enum = rule.get("enum")
+    # 惰性键：schema 与 filmcheck 都认它，但代码里没有任何读取点。
+    # 报 WARN 而不是 ERROR —— 老剧本里写了它不该变成硬失败；但也绝不能静默通过，
+    # 否则"写对了却不生效"会一路带到交付（本项目历史上最贵的一类缺陷）。
+    if rule.get("inert"):
+        rep.warn(path, "这个键**当前不生效**：%s" % rule["inert"], "inert_key")
+
     if rule.get("enum_dynamic") == "style":
         styles = ctx.get("styles")
         if styles is None:
@@ -524,6 +538,27 @@ def check_cross(script, script_path, rep, ctx):
         ids.append(lid)
     idset = set(ids)
 
+    # ---- lines[].persona / lines[].tone 拼错会静默回落：枚举从 voicekit 单向读取 ----
+    personas, tones = _load_personas()
+    if personas:
+        for i, ln in enumerate(lines):
+            raw = ln.get("persona")
+            if raw in (None, ""):
+                continue
+            name = str(raw).strip()
+            # 原始 edge-tts voice id（zh-CN-YunxiNeural）也允许写在 persona 位
+            if name in personas or ("-" in name and name.endswith("Neural")):
+                continue
+            near = _suggest(name, personas)
+            rep.warn("lines[%d].persona" % i,
+                     "未知 persona %r —— voicekit 会**静默回落**到 kind 默认声线"
+                     "（成片换人，且不会有任何报错）%s。可用：%s"
+                     % (name, ("；是不是想写 %r？" % near) if near else "",
+                        " / ".join(personas[:9])), "unknown_persona")
+    # tone 不在这里查：LINE_SPEC 里已经有 enum（KINDS 与 voicekit.TONE_IDS 是同一组 6 个），
+    # 那是 ERROR 而不是 WARN。这里只补 persona —— 它没有静态枚举，拼错会静默换声线。
+    _ = tones
+
     # ---- lines[].tail 当前不生效（保留字段）：写了会静默无效，必须说出来 ----
     for i, ln in enumerate(lines):
         if _f(ln.get("tail", 0.0)) > 0:
@@ -537,29 +572,30 @@ def check_cross(script, script_path, rep, ctx):
                 "inert_line_tail")
 
     # ---- v0.8 video 块：只支持 16:9 横屏 + 下采样输出 ----
+    # **不要在这里重写一遍规则**：允许列表 / 宽高比 / 上采样拒绝的权威实现在
+    # filmkit.video_plan()。以前这里是第二套手写判据，于是"1600x900"能过 filmcheck
+    # （0 error 0 warning）却在 render 的 st_layout 被 video_plan 拒片——校验器放行、
+    # 渲染器拒收，用户只会觉得门禁在骗人。这里改成直接调用权威实现，只做错误翻译。
     vv = script.get("video") if isinstance(script.get("video"), dict) else None
     if vv:
         try:
-            ow = int(vv.get("width") or vv.get("out_width") or 1920)
-            oh = int(vv.get("height") or vv.get("out_height") or 1080)
-        except (TypeError, ValueError):
-            rep.err("video", "width/height 必须是整数", "bad_video")
-            ow = oh = 1920
-        if oh > ow:
-            rep.err("video", "是竖屏（%dx%d）：本项目只支持 16:9 横屏——安全区/版式/HUD 全部"
-                             "按横屏像素写死，竖屏是另一套版式（要竖屏请单独立项）" % (ow, oh),
-                    "video_portrait")
-        elif abs(ow / float(oh) - 16.0 / 9.0) > 0.01:
-            rep.err("video", "%dx%d 不是 16:9：换宽高比要重做版式几何与字幕安全区" % (ow, oh),
-                    "video_aspect")
-        elif ow > 1920 or oh > 1080:
-            rep.err("video", "输出 %dx%d 大于内部构图 1920x1080：那是上采样，只会把 1080p 的"
-                             "清晰度包装成更高分辨率（假高清）。要真高清得改内部构图分辨率"
-                             % (ow, oh), "video_upscale")
-        fs = vv.get("fps")
-        if fs is not None and (not isinstance(fs, int) or isinstance(fs, bool)
-                               or fs not in (24, 25, 30, 50, 60)):
-            rep.err("video.fps", "不支持 %r（可用 24/25/30/50/60）" % (fs,), "video_fps")
+            import filmkit as _K
+        except Exception:                                   # noqa: BLE001
+            _K = None
+        if _K is not None:
+            try:
+                _K.video_plan(script)
+            except ValueError as e:
+                rep.err("video", "%s（filmkit.video_plan 会在渲染时拒片，这里提前拦）" % e,
+                        "bad_video")
+            except Exception as e:                          # noqa: BLE001
+                rep.err("video", "画幅解析失败：%s" % e, "bad_video")
+        else:
+            # filmkit 不可用（拷出来只带了 filmcheck）时退回最小校验：只查 fps 枚举，
+            # 并明说"完整校验需要 filmkit.py"，避免让人以为已经全查过。
+            rep.warn("video", "找不到 filmkit.py：只做了 fps 枚举校验，"
+                              "画幅/上采样规则未校验（完整校验请把 filmkit.py 放在同目录）",
+                     "video_partial")
 
     # ---- sfx.cues[].at 引用的场景 id 必须在 lines 里 ----
     sfx = script.get("sfx") if isinstance(script.get("sfx"), dict) else {}
@@ -691,6 +727,27 @@ def _load_styles():
         return ids or None
     except Exception:                                    # noqa: BLE001
         return None
+
+
+def _load_personas():
+    """从 voicekit 单向读取 persona 名与 tone id；拿不到返回 (None, None) 降级成不查。
+
+    为什么要查：voicekit 对写错的 persona/tone 是**静默回落**（reason 里留
+    unknown_persona:xxx，但不报错、不告警），于是"拼错一个声线名"的后果是整片
+    静默换成 kind 默认声线——听感变了，却没有任何一处提示。schema 层只校验 t=str，
+    拦不住；这里补上（规则仍然只有一份：枚举从 voicekit 读，不复制）。
+    """
+    try:
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        import voicekit                                  # noqa: F401  （只读枚举，不复制）
+        personas = list(getattr(voicekit, "PERSONA_IDS", ()) or
+                        getattr(voicekit, "VOICE_PERSONAS", {}).keys())
+        tones = list(getattr(voicekit, "TONE_IDS", ()) or
+                     getattr(voicekit, "VOICE_TONES", {}).keys())
+        return (personas or None), (tones or None)
+    except Exception:                                    # noqa: BLE001
+        return None, None
 
 
 def _classify(data):

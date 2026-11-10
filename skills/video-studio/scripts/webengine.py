@@ -418,7 +418,13 @@ def _console_log(msg) -> None:
 
 
 def _use_deterministic(flag=None) -> bool:
-    """确定性开关：显式参数优先，其次环境变量 WEBENGINE_DETERMINISTIC（1/true/yes/on）。"""
+    """确定性开关：显式参数优先，其次环境变量 WEBENGINE_DETERMINISTIC（1/true/yes/on）。
+
+    注意 flag 的三态语义：None = 没表态（去读环境变量），True/False = 调用方明确要求。
+    CLI 的 --deterministic 必须用 default=None（store_const）而不是 store_true：后者在
+    "没传" 时给出 False，会把 WEBENGINE_DETERMINISTIC=1 当成"调用方明确要求关掉"，
+    环境变量整条失效（命令行实测过，库调用路径却生效——两条路径行为不一致）。
+    """
     if flag is not None:
         return bool(flag)
     return str(os.environ.get("WEBENGINE_DETERMINISTIC") or "").strip().lower() in (
@@ -519,7 +525,19 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
         _BROWSER_KIND = "chromium"
         if log:
             print("[浏览器] Playwright Chromium", flush=True)
-    page = await browser.new_page(viewport={"width": int(width), "height": int(height)}, device_scale_factor=1)
+    try:
+        page = await browser.new_page(viewport={"width": int(width), "height": int(height)},
+                                      device_scale_factor=1)
+    except BaseException:
+        # 浏览器已经启动成功、new_page 才失败（内存不足 / 浏览器刚崩 / 任务被取消）时，
+        # 不关就会留下一个没有页面、也没人引用的 chromium 进程。render_full 的单帧重试最多
+        # 5 次 × N 个 worker，密集失败时这些进程会一直堆着（任务管理器里一排 chromium），
+        # 所以这里和下面的 goto/等 ready 一样，失败路径统一关浏览器。
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        raise
     page_errors = []
 
     def _on_pageerror(exc):
@@ -598,13 +616,52 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
                         "页面 window.FPS=%s 与注入的 __STYLE__.canvas.fps=%s 不一致："
                         "帧率必须来自同一份 timeline，不能靠 style 猜。"
                         % (page_fps, payload["canvas"]["fps"]))
-    except Exception:
+        # 截图 = 视口（device_scale_factor=1），所以页面画布的可视区域必须正好铺满视口。
+        # 以前不查这一条，于是 style=None + --width 1280 --height 720 会"成功"输出 1280x720：
+        # 页面画布仍是 1920x1080（没有 __STYLE__ 就没人改它），截出来的是原画左上角一块
+        # ——实测与 1920 帧左上角的 1280x720 裁切逐像素完全相同（422 KB PNG，0 像素差异），
+        # 标题 / HUD / 时间码全被裁掉，而 CLI 照旧 exit 0。画布比视口小则是四边留黑边，
+        # 同样"出片成功但画面是错的"，一并拦。
+        box = await page.evaluate(
+            "() => { var cs = document.querySelectorAll('canvas');"
+            " if (!cs.length) return null;"
+            " var l = 1e9, t = 1e9, r = -1e9, b = -1e9;"
+            " for (var i = 0; i < cs.length; i++) {"
+            "  var q = cs[i].getBoundingClientRect();"
+            "  if (!(q.width > 0) || !(q.height > 0)) continue;"
+            "  l = Math.min(l, q.left); t = Math.min(t, q.top);"
+            "  r = Math.max(r, q.right); b = Math.max(b, q.bottom); }"
+            " return (r > l) ? [l, t, r - l, b - t] : null; }")
+        if box is None:
+            raise ValueError(
+                "页面 %s 里没有可截图的 <canvas>（页面契约要求 <canvas id='stage'>）。" % url)
+        left, top, cw, ch = (float(v) for v in box)
+        if (abs(left) > 1.5 or abs(top) > 1.5
+                or abs(cw - float(width)) > 1.5 or abs(ch - float(height)) > 1.5):
+            raise ValueError(
+                "页面画布的可视区域是 x=%g y=%g w=%g h=%g（CSS 像素），与截图视口 %dx%d 不一致。"
+                "截图尺寸就是视口（devicePixelRatio=1）：画布比视口大会被裁掉、比视口小会留黑边，"
+                "两种都是「出片成功但画面是错的」。模板页面不注入 style 时画布固定 1920x1080 —— "
+                "要换输出尺寸请用 --style 注入 __STYLE__.canvas（engine.js 会跟着改画布），"
+                "或把页面画布与 CSS 尺寸一起改成目标尺寸；legacy 项目（不注入 style）"
+                "请按 1920x1080 渲染，再由上游下采样到交付规格。"
+                % (left, top, cw, ch, int(width), int(height)))
+    except BaseException:
+        # 用 BaseException 而不是 Exception：worker 被取消（task.cancel）抛的是
+        # CancelledError，它不继承 Exception —— 以前这条路径会把刚启动的浏览器丢下不管。
         try:
             await browser.close()
         except Exception:
             pass
         raise
-    cdp = await page.context.new_cdp_session(page)
+    try:
+        cdp = await page.context.new_cdp_session(page)
+    except BaseException:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        raise
     return browser, page, cdp
 
 
@@ -688,6 +745,24 @@ async def _snap_async(html_path, times, out: Path, tag: str, deterministic=None,
 
 
 # ---------------------------------------------------------------- cues / events 导出
+def _finite_t(value, kind: str, label) -> float:
+    """cue / event 的时间必须是有限秒数，返回 round(x, 3)。
+
+    为什么单拎出来：NaN / Infinity 在 Python 的 json.dumps 里默认被写成字面量 NaN /
+    Infinity，那不是合法 JSON（RFC 8259），而 Python 侧 json.load 又会照单全收 —— 于是
+    坏时间一路流到配乐 / 音效 / 同步门禁，表现成"某条提示点没响""采样索引对不上"这种
+    和根因隔了三层的现象。导出时就报错，带上 kind / type 便于定位是哪条。
+    """
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s 的 t 不是数字：%r（%r）" % (kind, value, label))
+    if not math.isfinite(t):
+        raise ValueError("%s 的 t 不是有限秒数：%r（%r）—— NaN / Infinity 不是合法 JSON，"
+                         "写进 work/cues.json 后下游时间轴会静默错位" % (kind, value, label))
+    return round(t, 3)
+
+
 def _norm_cue_list(raw, src: str) -> list:
     out = []
     for item in raw or []:
@@ -698,7 +773,7 @@ def _norm_cue_list(raw, src: str) -> list:
             raise ValueError("cue 缺 t 字段: %r" % (item,))
         if not cue.get("type"):
             raise ValueError("cue 缺 type 字段: %r" % (item,))
-        cue["t"] = round(float(cue["t"]), 3)
+        cue["t"] = _finite_t(cue["t"], "cue", cue.get("type"))
         cue.setdefault("src", src)
         out.append(cue)
     out.sort(key=lambda c: c["t"])
@@ -720,7 +795,7 @@ def _norm_events(raw) -> list:
         ev = dict(item)
         if "t" not in ev:
             continue
-        ev["t"] = round(float(ev["t"]), 3)
+        ev["t"] = _finite_t(ev["t"], "event", ev.get("kind"))
         ev.setdefault("kind", "misc")
         ev.setdefault("src", "web")
         out.append(ev)
@@ -748,8 +823,30 @@ async def _export_cues_async(html_path, deterministic=None, *, style=None,
         try:
             duration = await page_number(page, "DURATION")
             fps = await page_number(page, "FPS", default=FPS)
-            cues = await page.evaluate("window.getCues ? window.getCues() : []")
-            events = await page.evaluate("window.getEvents ? window.getEvents() : []")
+            # 页面没导出 getCues/getEvents 时，以前 `? : []` 会静默返回空数组：cues.json 里
+            # 0 条提示点，配乐/音效阶段照样跑完，只是整片悄悄变哑、音画同步也没有可配的事件
+            # ——「静默丢一整个约定」比报错难查得多。engine.js 本身就导出这两个函数（没有提示
+            # 点时返回空数组也算导出），所以 fail-closed 不会误伤正常页面。
+            contract = await _page_contract(page)
+            missing = [k for k in ("getCues", "getEvents") if contract.get(k) != "function"]
+            if missing:
+                raise RuntimeError(
+                    "页面 %s 没有导出 window.%s（导出 cue / 视觉事件要求页面契约见 "
+                    "references/web-engine.md §3）。assets/web/engine.js 自带这两个函数；"
+                    "自定义页面请补上（本片确实没有提示点时也要显式导出空数组）："
+                    "window.getCues = function () { return []; }; "
+                    "window.getEvents = function () { return []; }; 契约快照：%s"
+                    % (url, " / ".join(missing), _format_contract(contract)))
+            cues = await page.evaluate("window.getCues()")
+            events = await page.evaluate("window.getEvents()")
+            # 返回的不是数组时 _norm_cue_list/_norm_events 会把它当"没有条目"逐项跳过 →
+            # 依旧是静默 0 条，所以数组类型也要在这里拦下。
+            for _name, _val in (("getCues", cues), ("getEvents", events)):
+                if not isinstance(_val, list):
+                    raise RuntimeError(
+                        "页面 window.%s() 返回的不是数组（收到 %s）：cue / 事件必须是数组，"
+                        "契约见 references/web-engine.md §3。"
+                        % (_name, type(_val).__name__))
         finally:
             try:
                 await browser.close()
@@ -1024,12 +1121,25 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
     width, height = _validate_canvas(width, height)
     payload = normalize_style(style, width=width, height=height, fps=fps) if style is not None else None
 
+    # chunk_s <= 0 以前会被后面的 max(1, ...) 静默夹成「1 帧/块」：360 帧的 12 s 片会拆出
+    # 360 个块，每块单独起一个 ffmpeg 进程再拼接，慢到没法用，而且日志里只看得出"块很多"，
+    # 看不出是自己传错了参数。放在开浏览器之前校验，参数错了不用白等一次页面加载。
+    chunk_s = float(chunk_s)
+    if not math.isfinite(chunk_s) or chunk_s <= 0:
+        raise ValueError("chunk_s 必须是正数秒（收到 %r）；以前 <=0 会被静默当成 1 帧/块"
+                         % (chunk_s,))
+
     # 先问页面要长度与帧率：这是块切分与成片校验的唯一真值来源
     page_dur, fps_page = await _page_meta_async(url, deterministic=deterministic,
                                                 style=style, width=width, height=height, fps=fps)
     if duration is None:
         duration = page_dur
     duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0:
+        # NaN 会穿过下面的 abs(diff) > 0.05（NaN 比较恒为 False），最后在 int(round(nan))
+        # 处炸成一句 "cannot convert float NaN to integer"，看不出是参数问题。
+        raise ValueError("duration 必须是正数秒（收到 %r）；传 None 表示读页面 window.DURATION"
+                         % (duration,))
     if abs(duration - page_dur) > 0.05:
         raise ValueError(
             "页面 window.DURATION=%.3f 与传入 duration=%.3f 不一致（先对齐剧本时长）"
@@ -1038,12 +1148,14 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
     fps = fps_page
     from_s = float(from_s)
     to_s = duration if to_s is None else float(to_s)
+    if not (math.isfinite(from_s) and math.isfinite(to_s)):
+        raise ValueError("渲染区间必须是有限秒数：from_s=%r to_s=%r" % (from_s, to_s))
     if from_s < 0 or to_s <= from_s or to_s > duration + 1e-6:
         raise ValueError("渲染区间非法：from_s=%.3f to_s=%.3f duration=%.3f" % (from_s, to_s, duration))
 
     f0 = int(round(from_s * fps))
     f1 = int(round(to_s * fps))
-    step = max(1, int(round(float(chunk_s) * fps)))
+    step = max(1, int(round(chunk_s * fps)))
     chunk_dir = _chunk_dir(out, from_s, to_s, _style_token(payload, width, height))
     chunk_dir.mkdir(parents=True, exist_ok=True)
     chunks = _plan_chunks(chunk_dir, f0, f1, step)
@@ -1103,14 +1215,86 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
 
 
 # ---------------------------------------------------------------- 浏览器端文字质检
+# 「一闪而过」的判据是可见时长 < 0.6 s（qa_text.js 与 references/web-engine.md §9 同口径）。
+# 采样步长必须小于它：步长 >= 0.6 s 时任何一段文字最多被采到 1 个点，寿命估计必然 >= 0.6 s，
+# 这条判据就**永远不可能触发**——门禁是绿的，其实没在查。所以这里把常量拿出来，参数校验时
+# 直接拒绝，而不是让一个"看起来跑过"的扫描去放行。
+QA_BRIEF_S = 0.6
+
+
+def _check_qa_window(t0, t1, step):
+    """文字质检扫描参数校验；非法 raise ValueError（以前非法参数会被静默吞成空结果 + exit 0）。
+
+    历史坑：qa_text.js 用 `if (end < start) return empty` 与 `dt = max(step, 1/fps)` 兜底，
+    于是 --from 2 --to 1 打印"重叠 0、出画 0…"并 exit 0；--step 1 因为采不到 0.5 s 的闪
+    字而永远报 brief=0。空扫描 / 扫不到的扫描都不能算"没有缺陷"。
+    """
+    try:
+        a = float(t0)
+        b = None if t1 is None else float(t1)
+        s = float(step)
+    except (TypeError, ValueError):
+        raise ValueError("文字质检参数必须是数字：t0=%r t1=%r step=%r" % (t0, t1, step))
+    if not math.isfinite(a) or (b is not None and not math.isfinite(b)):
+        raise ValueError("文字质检时间必须是有限秒数：t0=%r t1=%r" % (t0, t1))
+    if not math.isfinite(s) or s <= 0:
+        raise ValueError(
+            "文字质检 step 必须是正数秒（收到 %r）。以前 <=0 会被静默替换成默认 0.2，"
+            "扫描窗口和调用方以为的对不上。" % (step,))
+    if s >= QA_BRIEF_S:
+        raise ValueError(
+            "文字质检 step=%g s 必须小于 %g s：「一闪而过」判据是可见时长 < %g s，步长 >= %g s "
+            "时每段文字最多被采到 1 个点，该判据永远不可能触发（等于没检查）。"
+            "整片扫描请用 step<=0.5；长片可分段多次调用。"
+            % (s, QA_BRIEF_S, QA_BRIEF_S, QA_BRIEF_S))
+    if b is not None and b < a:
+        raise ValueError(
+            "文字质检区间非法：t1=%.3f < t0=%.3f。以前这种空扫描会返回全 0 并让 CLI exit 0，"
+            "看起来像「没有任何文字缺陷」。" % (b, a))
+    return a, b, s
+
+
+_QA_LIST_KEYS = ("overlaps", "offscreen", "brief", "never")
+
+
+def _check_qa_result(result):
+    """校验页面 qaText 的返回值形状；形状不对 raise RuntimeError（不能让缺字段=全 0=PASS）。
+
+    历史坑：以前只判 `isinstance(result, dict)`，页面 `qaText=()=>({})` 时 CLI 把四类缺陷
+    都打印成 0 并 exit 0——**假通过**。契约要求四个数组 + frames（实际采样点数），
+    这里连 frames<=0 也拦（扫描 0 帧等于没查）。
+    """
+    if not isinstance(result, dict):
+        raise RuntimeError("页面 qaText 返回值不是对象：%r" % (result,))
+    bad = [k for k in _QA_LIST_KEYS if not isinstance(result.get(k), list)]
+    if bad:
+        raise RuntimeError(
+            "页面 qaText 返回值缺字段 / 类型不对：%s 必须是数组（页面契约见 "
+            "references/web-engine.md §9；assets/web/qa_text.js 已按契约返回）。收到键：%s"
+            % ("、".join(bad), sorted(result)[:12]))
+    try:
+        frames = int(result.get("frames"))
+    except (TypeError, ValueError):
+        frames = 0
+    if frames <= 0:
+        raise RuntimeError(
+            "页面 qaText 返回 frames=%r（没有扫描任何采样点）。空扫描不能当「没有缺陷」通过；"
+            "检查 qaText 的 t0/t1/step 参数与页面 DURATION 是否一致。" % (result.get("frames"),))
+    return result
+
+
 def qa_text(html_path, t0=0.0, t1=None, step=0.2, deterministic=None, *,
             style=None, width=W, height=H, fps=None) -> dict:
     """浏览器端文字质检：重叠 / 出画 / 一闪而过 / 从没露面（渲染期间会临时改页面状态）。
 
     v0.8.0：跟着 style 一起检查——换了浅色主题/非 1080p 画布后，出画与重叠的判据必须用
     同一份画布尺寸（qa_text.js 读 FK.W / FK.H），否则"检查通过"只是没在检查新尺寸。
+
+    深审修复：参数与返回值 fail-closed（之前空扫描 / 扫不到的扫描 / 页面返回 {} 都是
+    exit 0，门禁看着是绿的，其实什么都没查）。见 _check_qa_window / _check_qa_result。
     """
     _setup_stdout()
+    t0, t1, step = _check_qa_window(t0, t1, step)
     return asyncio.run(_qa_text_async(html_path, t0, t1, step, deterministic,
                                       style=style, width=width, height=height, fps=fps))
 
@@ -1132,9 +1316,7 @@ async def _qa_text_async(html_path, t0, t1, step, deterministic=None, *,
                 await browser.close()
             except Exception:
                 pass
-    if not isinstance(result, dict):
-        raise RuntimeError("页面 qaText 返回值不是对象：%r" % (result,))
-    return result
+    return _check_qa_result(result)
 
 
 # ---------------------------------------------------------------- 指定帧号截 PNG（v0.8.0）
@@ -1637,6 +1819,115 @@ def selftest() -> int:
               (not bad_sizes) and len(good_sizes) == 3 and "竖屏" in portrait_msg,
               "；".join(bad_sizes) or ("合法：%s；竖屏报错点名竖屏" % "、".join(good_sizes)))
 
+        # ---- 深审：确定性开关三态 / 文字质检参数与返回值 fail-closed ----
+        # 这三条都是纯函数校验（不开浏览器），专门守"门禁看着干净、其实没在查"的三条历史路径：
+        #   · CLI --deterministic 用 store_true 时默认 False 会压掉 WEBENGINE_DETERMINISTIC；
+        #   · textqa 空扫描（t1<t0）/ 步长 >= brief 阈值时返回全 0 并 exit 0；
+        #   · 页面 qaText 返回 {} / frames=0 时同样被当成"零缺陷"。
+        det_lines = []
+        det_args = _build_parser().parse_args(["frames", "x.html", "--frames", "1"])
+        if det_args.deterministic is not None:
+            det_lines.append("未传 --deterministic 时默认值是 %r（应为 None，才能读环境变量）"
+                             % (det_args.deterministic,))
+        det_on = _build_parser().parse_args(["frames", "x.html", "--frames", "1", "--deterministic"])
+        if det_on.deterministic is not True:
+            det_lines.append("显式 --deterministic 没变成 True（%r）" % (det_on.deterministic,))
+        old_env = os.environ.get("WEBENGINE_DETERMINISTIC")
+        try:
+            os.environ["WEBENGINE_DETERMINISTIC"] = "1"
+            env_ok = bool(_use_deterministic(None))
+            cli_env_ok = "--disable-gpu" in browser_args(det_args.deterministic)
+            force_off = "--disable-gpu" in browser_args(False)
+        finally:
+            if old_env is None:
+                os.environ.pop("WEBENGINE_DETERMINISTIC", None)
+            else:
+                os.environ["WEBENGINE_DETERMINISTIC"] = old_env
+        if not env_ok:
+            det_lines.append("WEBENGINE_DETERMINISTIC=1 时 _use_deterministic(None) 不是 True")
+        if not cli_env_ok:
+            det_lines.append("CLI 未传 --deterministic 时环境变量没生效")
+        if force_off:
+            det_lines.append("显式 deterministic=False 仍然加了 --disable-gpu（三态语义坏了）")
+        check("确定性开关三态（CLI --deterministic 未传时尊重 WEBENGINE_DETERMINISTIC）",
+              not det_lines, "；".join(det_lines) or "None=读环境变量 / True=软件光栅 / False=明确关")
+
+        qa_lines = []
+        for label, args_ in (("t1<t0", (2.0, 1.0, 0.2)),
+                             ("step=0", (0.0, 2.0, 0.0)),
+                             ("step<0", (0.0, 2.0, -0.1)),
+                             ("step=brief 阈值 0.6", (0.0, 2.0, 0.6)),
+                             ("step=1.0", (0.0, 2.0, 1.0))):
+            try:
+                _check_qa_window(*args_)
+                qa_lines.append("%s 没被拒（会退化成空扫描/永远报不出 brief）" % label)
+            except ValueError:
+                pass
+        ok_args = True
+        try:
+            a_, b_, s_ = _check_qa_window(0.0, 2.0, 0.2)
+            ok_args = (a_, b_, s_) == (0.0, 2.0, 0.2)
+            # t1=None 表示"到页面 DURATION"，必须放行（由 _qa_text_async 现读）
+            _check_qa_window(0.0, None, 0.2)
+        except Exception as exc:                # noqa: BLE001
+            ok_args = False
+            qa_lines.append("合法参数被拒：%s" % exc)
+        check("文字质检参数 fail-closed（空扫描 / 无效步长不再 exit 0）",
+              ok_args and not qa_lines,
+              "；".join(qa_lines) or "t1<t0 / step<=0 / step>=0.6 全拒；t1=None、step=0.2 放行")
+
+        res_lines = []
+        for label, bad in (("{}", {}),
+                           ("缺 never", {"overlaps": [], "offscreen": [], "brief": [], "frames": 3}),
+                           ("frames=0", {"overlaps": [], "offscreen": [], "brief": [],
+                                          "never": [], "frames": 0}),
+                           ("overlaps 不是数组", {"overlaps": 0, "offscreen": [], "brief": [],
+                                                  "never": [], "frames": 3})):
+            try:
+                _check_qa_result(bad)
+                res_lines.append("%s 没被拒（会被当成零缺陷 PASS）" % label)
+            except RuntimeError:
+                pass
+        try:
+            good_res = _check_qa_result({"overlaps": [], "offscreen": [], "brief": [],
+                                         "never": ["x"], "frames": 5})
+            if good_res.get("frames") != 5:
+                res_lines.append("合法返回值被改坏")
+        except Exception as exc:                # noqa: BLE001
+            res_lines.append("合法返回值被拒：%s" % exc)
+        check("页面 qaText 返回值形状 fail-closed（缺字段 / frames=0 不再当 PASS）",
+              not res_lines, "；".join(res_lines) or "{} / 缺字段 / frames=0 / 类型不对 全拒；正常返回值放行")
+
+        # cue / event 时间必须是有限数：NaN / Infinity 会被 json.dumps 写成非法 JSON 字面量，
+        # 再被下游 json.load 照单收下 —— 时间轴静默错位，且看不出是哪条提示点。
+        t_lines = []
+        try:
+            ok_cues = _norm_cue_list([{"t": 1.0, "type": "ui_blip"}], "web")
+            if ok_cues[0]["t"] != 1.0 or ok_cues[0]["src"] != "web":
+                t_lines.append("合法 cue 被改坏：%r" % (ok_cues,))
+            ok_ev = _norm_events([{"t": 1.0, "kind": "flash"}])
+            if ok_ev[0]["t"] != 1.0:
+                t_lines.append("合法 event 被改坏：%r" % (ok_ev,))
+        except Exception as exc:            # noqa: BLE001
+            t_lines.append("合法 cue/event 被拒：%s" % exc)
+        for label, bad_cue in (("NaN", {"t": float("nan"), "type": "ui_blip"}),
+                               ("Infinity", {"t": float("inf"), "type": "ui_blip"}),
+                               ("字符串", {"t": "abc", "type": "ui_blip"})):
+            try:
+                _norm_cue_list([bad_cue], "web")
+                t_lines.append("cue t=%s 没被拒（会写出非法 JSON）" % label)
+            except ValueError:
+                pass
+        for label, bad_ev in (("NaN", {"t": float("nan"), "kind": "flash"}),
+                              ("Infinity", {"t": float("inf"), "kind": "flash"})):
+            try:
+                _norm_events([bad_ev])
+                t_lines.append("event t=%s 没被拒" % label)
+            except ValueError:
+                pass
+        check("cue / 视觉事件时间只收有限数（NaN / Infinity 不再写进 cues.json）",
+              not t_lines, "；".join(t_lines) or "1.0 放行（src 补齐）；NaN / Infinity / 字符串 全拒")
+
         style_norm, style_lines = {}, []
         try:
             style_norm["none"] = normalize_style(None)
@@ -1929,7 +2220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--to", dest="t_to", type=float)
     s.add_argument("--out", default="", help="输出目录（缺省 ./snaps）")
     s.add_argument("--tag", default="", help="文件名前缀")
-    s.add_argument("--deterministic", action="store_true",
+    s.add_argument("--deterministic", action="store_const", const=True, default=None,
                    help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
     _add_style_args(s)
 
@@ -1938,13 +2229,13 @@ def _build_parser() -> argparse.ArgumentParser:
     fr.add_argument("--frames", required=True, help="逗号分隔的帧号，如 45,270")
     fr.add_argument("--out", default="", help="输出目录（缺省 ./frames）")
     fr.add_argument("--tag", default="", help="文件名前缀")
-    fr.add_argument("--deterministic", action="store_true")
+    fr.add_argument("--deterministic", action="store_const", const=True, default=None)
     _add_style_args(fr)
 
     c = sub.add_parser("cues", help="导出 cue / 视觉事件（契约 §4.2 schema）")
     c.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
     c.add_argument("--out", default="", help="写到 JSON 文件；缺省打到标准输出")
-    c.add_argument("--deterministic", action="store_true")
+    c.add_argument("--deterministic", action="store_const", const=True, default=None)
     _add_style_args(c, fps=False)
 
     f = sub.add_parser("full", help="并行渲染整片（分块 + 断点续跑 + 缺口检测）")
@@ -1959,7 +2250,7 @@ def _build_parser() -> argparse.ArgumentParser:
     f.add_argument("--to", dest="t_to", type=float, default=None, help="结束秒（缺省到片尾）")
     f.add_argument("--crf", type=int, default=17)
     f.add_argument("--preset", default="slow")
-    f.add_argument("--deterministic", action="store_true",
+    f.add_argument("--deterministic", action="store_const", const=True, default=None,
                    help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
     _add_style_args(f)
 
@@ -1967,9 +2258,10 @@ def _build_parser() -> argparse.ArgumentParser:
     q.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
     q.add_argument("--from", dest="t0", type=float, default=0.0)
     q.add_argument("--to", dest="t1", type=float, default=None)
-    q.add_argument("--step", type=float, default=0.2)
+    q.add_argument("--step", type=float, default=0.2,
+                   help="采样步长秒；必须 < 0.6（一闪而过的判据阈值），默认 0.2")
     q.add_argument("--out", default="", help="把完整结果写到 JSON")
-    q.add_argument("--deterministic", action="store_true")
+    q.add_argument("--deterministic", action="store_const", const=True, default=None)
     _add_style_args(q)
 
     sub.add_parser("selftest", help="跑自检（等价于 --selftest）")
@@ -2066,6 +2358,12 @@ def main(argv=None) -> int:
         except (ValueError, TypeError) as exc:
             print("[错误] %s" % exc, flush=True)
             return 2
+        except RuntimeError as exc:
+            # 页面契约 / 浏览器起不来这类错误（缺 getCues、ready 超时、缺 playwright…）：
+            # 以前直接抛 traceback（exit 1，且报错淹没在栈里）。这是"要改页面/环境"的用法
+            # 错误，和 --style 写坏一样给 exit 2 + 一行可读原因。
+            print("[错误] %s" % exc, flush=True)
+            return 2
         if args.out:
             dst = _json_dump(data, args.out)
             print("[cues] %d 个 cue、%d 个视觉事件 → %s"
@@ -2095,6 +2393,11 @@ def main(argv=None) -> int:
                              deterministic=args.deterministic, style=style_spec,
                              width=args.width, height=args.height, fps=args.fps)
         except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
+        except RuntimeError as exc:
+            # 同 cues：页面 qaText 返回值形状不对 / 契约缺失 / 浏览器起不来都属于"要改页面
+            # 或环境"，给 exit 2 + 可读原因；不再让一个 traceback 决定门禁红绿。
             print("[错误] %s" % exc, flush=True)
             return 2
         print("[textqa] 重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"

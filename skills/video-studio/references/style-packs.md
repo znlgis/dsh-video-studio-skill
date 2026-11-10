@@ -112,7 +112,9 @@ v0.4 及以前，所有"身份参数"都是模块级常量：
 | voice.jitter | 0.35 | 语速/音高微扰，0 = 关 |
 | voice.max_distinct | 3 | 全片最多几把声音 |
 | pacing.* | 风格默认 | 语前留白/语后留白/最短段长/条目落位步长 |
-| lines[].voice/tone/rate/pitch/volume/lead/tail | — | 逐句覆盖（最高优先级） |
+| lines[].persona / lines[].voice / lines[].tone | — | 逐句覆盖（最高优先级，voicekit 真的读这三个） |
+| lines[].lead | — | 逐句语前留白（filmkit.build_timeline 读） |
+| lines[].rate / pitch / volume / tail | — | **当前不生效**（保留字段）：voicekit 只认 persona/voice/tone，filmcheck 会对这三个报"未知键"；要改语速/音高请换 persona 或 tone，或在顶层写 rate/pitch/volume |
 
 ## 4. 三级指纹：改错别字不会换整首曲子
 
@@ -123,7 +125,9 @@ v0.4 及以前，所有"身份参数"都是模块级常量：
 | style | 标题（配合关键词评分破平） | 风格 id |
 
 所以：改一个错别字 -> full 变（音色纹理微变），tempo/style 不变（还是同一首曲子、同一个调）；
-换一部片 -> 三个都变。要完全锁死就写 music.seed + music.seed_from_content: false。
+换一部片 -> 三个都变。`music.seed_from_content: false` 只锁住 **seed 派生**（音色细节）；
+`full` 指纹仍会传给 scorekit 参与结构变奏（和弦替换/动机偏移/鼓型 ghost，见
+[audio-variation.md](audio-variation.md) §3.3）。要把声音完全锁回 v0.4 行为，只能不写 `style`（legacy）。
 
 ## 5. 片内变化：整体是一套，但每段有呼吸
 
@@ -173,6 +177,6 @@ stylekit.theme_lint(theme) 在 --stage style 就拦，不用等渲完 300 帧：
 |---|---|---|
 | 画面换了、配乐还是老的 | 只改了 visual.theme 没改 music.style | 直接改 style，或两个都写 |
 | 同一部片前后像两部片 | 段界跨了明暗族 | 用同族主题；或拆成两部 |
-| 改台词后配乐变了 | 改了标题或 kind 结构 -> tempo 指纹变 | 写死 music.key/music.bpm，或 seed_from_content:false |
+| 改台词后配乐变了 | 改了标题或 kind 结构 -> tempo 指纹变（BPM/调性跟着换） | 写死 music.key / music.bpm（`seed_from_content:false` 只管音色 seed，压不住 BPM/调性变化） |
 | 旁白听感像广播剧 | max_distinct 太大 / 相邻句频繁换人 | 降到 2，靠 tone 而不是换人做变化 |
 | 字幕在浅色主题上看不清 | 用了 v0.4 的黑底白字 | 传 theme= 给 draw_subtitle（render.py 已自动传） |

@@ -439,7 +439,7 @@ v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具�
 
 | 层 | 行为 | 开关 |
 |---|---|---|
-| 配乐和声/动机/鼓型 | 内容指纹做稳定局部替换（每两小节、±1 级数、ghost 击） | `style: auto`（默认）；写死 `music.seed` + `seed_from_content: false` 可关 |
+| 配乐和声/动机/鼓型 | 内容指纹做稳定局部替换（每两小节、±1 级数、ghost 击） | `style: auto`（默认）；`seed_from_content: false` **只关 seed 派生**（音符细节不再随内容变），结构变奏照旧——`render.py` 只要不是 legacy 就把 `fingerprint` 传给 scorekit（`st_score` 里 `fp_hex` 那段）。想连结构一起回到旧行为只有不写 `style`（legacy） |
 | 音效 seed | `content_seed(base, style, fp, type, t)`，随内容变 | `sfx.content_seed`（默认 true；false = 旧 seed_base+i） |
 | 提示音调性 | `in_key(freq, key)` 跟随配乐调性 | `CueBus.build_audio(key=...)`，render.py 自动传 |
 | 段落边界 | [边界-2.2s, 边界] 内的 whoosh/riser 自动 -3 dB | `sfx.duck_transitions`（默认 true） |

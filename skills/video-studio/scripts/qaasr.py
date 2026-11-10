@@ -20,8 +20,8 @@ v0.7 及以前的质检只看"容器 / 响度 / 帧 / 音画同步"，都建立�
 4. 三档语义（与 gates.py 的 pass / fail / skipped 完全一致）：
      * 引擎跑不了（ffmpeg 缺失 / 无音轨 / 两个引擎都不可用 / 模型下载失败）-> skipped，
        errors 里写清原因，warnings 里写"没查不等于通过"；
-     * recall < recall_warn（默认 0.90）-> fail；
-     * recall_warn <= recall < recall_pass（默认 0.95）-> pass + warning（别装没事）；
+     * recall < recall_warn（默认 0.72，与 render.py 的 G12 同口径）-> fail；
+     * recall_warn <= recall < recall_pass（默认 0.85）-> pass + warning（别装没事）；
      * recall >= recall_pass -> pass。
 
 为什么召回率用字符级多重集：本项目旁白是中文，whisper 的错字通常是同音字（"逐句"→"逐取"），
@@ -99,9 +99,17 @@ except Exception:                                   # noqa: BLE001 —— 只有
 AUDIO_SR = 16000
 # 偏移告警阈值（秒）：旁白首字和 timeline 期望起点的差
 OFFSET_WARN_S = 0.35
+# 召回率的 pass / fail 线。**权威值在 render.py**（QA_ASR_RECALL_PASS / QA_ASR_RECALL_WARN，
+# G12 门禁从这里读），本模块只是把默认值对齐，避免"同一部片、CLI 判 fail、门禁判 pass"：
+# 同一事实只能有一个权威值（CHANGELOG v0.4 D 节）。
+# 为什么是 0.85 / 0.72 而不是 0.95 / 0.90：中文旁白实测（模板片，faster-whisper small）
+# 干净成片召回只有 0.81–0.83 —— 中英混排专名（"DeepSeek 4.1 Flash"→DIXX 变体）是 ASR 的
+# 正常误差，不是片子坏了；低于 0.72 才说明"整句丢了 / 音轨跟剧本不是一套"。
+QA_RECALL_PASS = 0.85
+QA_RECALL_WARN = 0.72
 # 行级"疑似丢句"阈值：单行字符召回低于它，就进 missing_lines 让人复核。
 # 注意：它**不参与门禁判定**（门禁只看全片字符召回），只是一个定位线索——
-# 短句错一个字就可能掉到 0.8，拿全局 fail 线 0.90 去卡行级会满屏假阳性。
+# 短句错一个字就可能掉到 0.8，拿全局 fail 线（0.72）去卡行级会满屏假阳性。
 MISS_LINE_RECALL = 0.60
 # 引擎名（进报告，别在别处硬编码字符串）
 ENGINE_FW = "faster-whisper"
@@ -389,11 +397,17 @@ def _scenes_of(tl, script=None) -> list:
 
 # ---------------------------------------------------------------- 音频抽取 / 探测
 def _audio_info(film) -> dict:
-    """探测成片音轨：{"has_audio","duration","sample_rate"}。ffprobe 缺失时用 ffmpeg -i 兜底。"""
-    info = {"has_audio": False, "duration": None, "sample_rate": None}
+    """探测成片音轨：{"has_audio","duration","sample_rate","probe_ok"}。ffprobe 缺失时用 ffmpeg -i 兜底。
+
+    probe_ok 区分两种"has_audio=False"：**真的没有音轨** 与 **没有工具可以探测**。
+    以前两者都按"成片没有音轨"报，工具缺失时错误归因到片子上（skipped 的档位不变，
+    但原因写错了，排障会往错误方向走）。
+    """
+    info = {"has_audio": False, "duration": None, "sample_rate": None, "probe_ok": False}
     film = str(film)
     fp = _ffprobe()
     if fp:
+        info["probe_ok"] = True
         try:
             p = subprocess.run([fp, "-v", "error", "-show_entries",
                                 "stream=codec_type,sample_rate:format=duration",
@@ -421,6 +435,7 @@ def _audio_info(film) -> dict:
         # 宁可多跑一次，也不能因为"没探测到音轨"就把有音轨的片子判 skipped
         ff = _ffmpeg()
         if ff:
+            info["probe_ok"] = True
             try:
                 q = subprocess.run([ff, "-hide_banner", "-i", film],
                                    capture_output=True, timeout=180)
@@ -786,7 +801,7 @@ def _assign_text(scenes, segments) -> list:
     return acc
 
 
-def _judge(scenes, segments, *, recall_pass=0.95, recall_warn=0.90,
+def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECALL_WARN,
            offset_warn=OFFSET_WARN_S) -> dict:
     """纯函数：由段落 + ASR 片段算出召回率 / 缺句 / 偏移 / 三档结论。
 
@@ -885,7 +900,8 @@ def _write_json(rep, out_json) -> None:
 
 
 def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json=None,
-           recall_pass=0.95, recall_warn=0.90, log=print, offset_warn=OFFSET_WARN_S,
+           recall_pass=QA_RECALL_PASS, recall_warn=QA_RECALL_WARN, log=print,
+           offset_warn=OFFSET_WARN_S,
            limit_seconds=None, engine="auto", asr_json=None, whisper_model=None,
            vad=False) -> dict:
     """成片旁白的 ASR 回读校验，返回可直接进门禁的 dict。
@@ -897,8 +913,8 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
       model_size    faster-whisper 模型（tiny/base/small/medium/large-v3；默认 small）
       lang          ASR 语言（默认 zh）
       out_json      报告 JSON 输出路径（可选）
-      recall_pass   >= 它 -> pass（默认 0.95）
-      recall_warn   < 它 -> fail；介于两者 -> pass + warning（默认 0.90）
+      recall_pass   >= 它 -> pass（默认 0.85，与 render.py 的 G12 同口径）
+      recall_warn   < 它 -> fail；介于两者 -> pass + warning（默认 0.72）
       offset_warn   段落 ASR 首字相对 timeline 语音起点的偏移告警阈值（默认 0.35 s）
       limit_seconds 只对前 N 秒音轨做 ASR（自测提速用；timeline 会被同步裁剪）
       engine        "auto"（默认，faster-whisper 优先）/ "faster-whisper" / "ffmpeg"
@@ -991,6 +1007,15 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
             # 回放只验判分链路，不碰音轨：必须说清楚，别让人以为"音轨查过了"
             rep["warnings"].append("离线回放模式不检查音轨：本片探测不到音轨，"
                                    "但判分用的是 --asr-json 里的片段（回放 != 成片有音轨）")
+        elif not audio_info.get("probe_ok"):
+            # 探测工具不可用时 _audio_info 也只能返回 has_audio=False，但不能把它写成
+            # "成片没有音轨"——那是把环境缺件错误归因到片子上。档位同样是 skipped，
+            # 区别只在原因必须写对（排障方向完全不同）。
+            rep["errors"].append("既没有可用的 ffprobe / ffmpeg 探测音轨，"
+                                 "也没有任何音轨信息：%s" % film)
+            rep["gate"]["detail"] = "音轨探测工具不可用，ASR 回读没有执行（skipped != 通过）"
+            rep["warnings"].append("ASR 回读**没有执行**（缺 ffprobe/ffmpeg），这不等于通过")
+            return finish()
         else:
             rep["errors"].append("成片没有音轨：%s" % film)
             rep["gate"]["detail"] = "成片无音轨，ASR 回读没有执行（没有东西可转写）"
@@ -1066,7 +1091,17 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
         try:
             if log:
                 log("== ASR 回读：%s" % os.path.basename(film))
-            _extract_wav(film, wav, limit_seconds=limit_seconds)
+            try:
+                _extract_wav(film, wav, limit_seconds=limit_seconds)
+            except Exception as e:              # noqa: BLE001
+                # 抽不出音轨（音轨为空/损坏、写盘失败、编码不支持）也是"没查成"：
+                # 三档语义里记 skipped + 原因。以前这里直接抛出去，render.py 的
+                # catch-all 会把它记成 G12 **fail**——环境/媒资问题被说成"门禁自身失败"，
+                # 而且 report() 承诺"总是返回 dict"的契约也断了。
+                rep["errors"].append("音轨抽取失败（%s: %s）" % (type(e).__name__, e))
+                rep["gate"]["detail"] = "音轨抽取失败，ASR 回读没有执行（skipped != 通过）"
+                rep["warnings"].append("ASR 回读**没有执行**（抽轨失败），这不等于通过")
+                return finish()
             if use_fw:
                 try:
                     asr = _asr_faster_whisper(wav, model_size=model_size, lang=lang,
@@ -1085,7 +1120,15 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
                         rep["warnings"].append("ASR 回读**没有完成**，这不等于通过")
                         return finish()
             if asr is None:
-                asr = _asr_ffmpeg_whisper(wav, model_path=whisper_path, lang=lang, log=log)
+                try:
+                    asr = _asr_ffmpeg_whisper(wav, model_path=whisper_path, lang=lang, log=log)
+                except Exception as e:          # noqa: BLE001
+                    # 同抽轨失败：后备引擎跑挂了 = 本次没查成，记 skipped 而不是抛异常。
+                    rep["errors"].append("ffmpeg whisper 转写失败（%s: %s）"
+                                         % (type(e).__name__, e))
+                    rep["gate"]["detail"] = "ffmpeg whisper 引擎失败，ASR 回读没有完成（skipped）"
+                    rep["warnings"].append("ASR 回读**没有完成**，这不等于通过")
+                    return finish()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1457,8 +1500,12 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default="small", help="faster-whisper 模型（默认 small）")
     ap.add_argument("--lang", default="zh", help="ASR 语言（默认 zh）")
     ap.add_argument("--out", default=None, help="报告 JSON 输出路径")
-    ap.add_argument("--recall-pass", type=float, default=0.95, help="pass 线（默认 0.95）")
-    ap.add_argument("--recall-warn", type=float, default=0.90, help="fail 线（默认 0.90）")
+    ap.add_argument("--recall-pass", type=float, default=QA_RECALL_PASS,
+                    help="pass 线（默认 %.2f，与 render.py 的 G12 门禁同一口径）"
+                         % QA_RECALL_PASS)
+    ap.add_argument("--recall-warn", type=float, default=QA_RECALL_WARN,
+                    help="fail 线（默认 %.2f，与 render.py 的 G12 门禁同一口径）"
+                         % QA_RECALL_WARN)
     ap.add_argument("--offset-warn", type=float, default=OFFSET_WARN_S,
                     help="首字偏移告警阈值秒（默认 %.2f）" % OFFSET_WARN_S)
     ap.add_argument("--limit-seconds", type=float, default=None,

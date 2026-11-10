@@ -535,18 +535,6 @@ def check_bbox(box, safe=SAFE, tag=""):
     return []
 
 
-def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
-                  family="sans"):
-    """字幕折行：优先两行，超宽逐级缩字号。返回 (lines, font)。"""
-    for sz in (size, int(size * 0.92), int(size * 0.84), int(size * 0.76)):
-        f = font(sz, weight, family)
-        lines = wrap_cn(text, f, max_w)
-        if len(lines) <= max_lines:
-            return lines, f
-    f = font(int(size * 0.76), weight, family)
-    return wrap_cn(text, f, max_w), f
-
-
 def _split_with_seps(text, words):
     """把原文按词表切开，保留**词与词之间的原始分隔符**（空格/标点）。
 
@@ -609,8 +597,13 @@ def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
         lines = None
         if words:
             lines = wrap_by_words(text, f, max_w, words)
-            if lines is not None and len(lines) > max_lines:
-                lines = None            # 词边界折不下：交给字符折行兜底
+            if lines is not None and (len(lines) > max_lines
+                                      or any(text_w(l, f) > max_w for l in lines)):
+                # 两种情况都退回字符折行：①词边界折出来超过 max_lines；
+                # ②某个"词"本身就比 max_w 宽（wrap_by_words 对单个超宽 token 不会
+                # 断开，会把它当一整行放出去）。②不兜底时字幕横向溢出安全区，而
+                # qa_text_safe 用字符折行量宽度、看不出问题——门禁和画面不是同一套折法。
+                lines = None
         if lines is None:
             lines = wrap_cn(text, f, max_w)
         if len(lines) <= max_lines:
@@ -985,6 +978,7 @@ class CueBus:
         self.scenes = scenes or []
         self.total = None if total is None else float(total)
         self.items = []
+        self._drop_warned = set()   # 已告警过的丢弃项：同一实例只报一次（见 resolved）
 
     # -- 登记 --
     def add(self, at, type, **params):
@@ -1010,15 +1004,36 @@ class CueBus:
 
     # -- 解析 --
     def resolved(self):
-        """按时间排序、去掉明显无效项（超过片长 2 秒的丢弃并告警）。"""
+        """按时间排序、去掉明显无效项（超过片长 2 秒 / 负时刻），并**真的**告警。
+
+        为什么必须告警：st_sfx 只把 build_audio 的产物当音效轨，被丢掉的 cue 不会进
+        任何报告；以前这里静默 continue（文档却写着"丢弃并告警"），少一个提示音时
+        用户只能靠听。st_sfx 会调两次 resolved()（自己一次 + build_audio 内部一次），
+        所以只在**第一次**发现丢弃时打一条汇总，避免同一件事刷两遍。
+        """
         out = []
+        dropped = []
         for row in self.items:
             t = float(row["t"])
             if t < -0.05:
+                dropped.append(("负时刻", t))
                 continue
             if self.total is not None and t > self.total + 2.0:
+                dropped.append(("超出片长", t))
                 continue
             out.append(row)
+        fresh = [d for d in dropped if d not in self._drop_warned]
+        if fresh:
+            self._drop_warned.update(fresh)
+            late = [x for x in fresh if x[0] == "超出片长"]
+            neg = [x for x in fresh if x[0] == "负时刻"]
+            parts = []
+            if late:
+                parts.append("%d 条超过片长(%.2fs)+2s" % (len(late), float(self.total)))
+            if neg:
+                parts.append("%d 条时刻为负" % len(neg))
+            print("   [WARN] CueBus: 丢弃 %d 条提示点（%s）——检查 cue 的 at 写法/场景 id"
+                  % (len(fresh), "；".join(parts)), flush=True)
         return sorted(out, key=lambda r: float(r["t"]))
 
     def to_json(self, duration=None, fps=None, width=None, height=None, events=None):
@@ -1794,9 +1809,12 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
                     audio_cached = m
             # v1 老缓存（升级前合成的）只有在参数完全等于 v1 语义时才复用，
             # 避免"改了一个 volume 却拿到老音频"这种升级期的静默错配。
-            elif (legacy_key == tts_key(text, voice, rate, pitch)
-                  and str(m.get("key") or "") == legacy_key and m.get("text") == text
-                  and vol in ("+0%", "") and m.get("voice") == voice):
+            # trim 也必须一致：v1 的 key 里没有 trim，旧记录若 trimmed=True，用户把
+            # trim_silence 改成 false 后仍会命中并返回**裁剪版**音频（v0.4 修过的同一类
+            # "关了裁剪其实没关"，只是漏在 v1 兼容分支上）。
+            elif (str(m.get("key") or "") == legacy_key and m.get("text") == text
+                  and vol in ("+0%", "") and m.get("voice") == voice
+                  and bool(m.get("trimmed")) == bool(trim)):
                 if m.get("trimmed") and m.get("path") and os.path.exists(m["path"]):
                     return m
         except Exception:
@@ -1860,12 +1878,15 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
                 raise RuntimeError("edge-tts 合成失败（重试 %d 次）：%s" % (retries, e)) from e
             _time.sleep(1.2 * (attempt + 1))
 
-    dur_raw = audio_dur(out_mp3)
+    # trim=True 时同一句 mp3 只需要解码一次：audio_dur() 内部就是 decode_pcm，
+    # 旧实现先 audio_dur 再 decode_pcm，每句多起一个 ffmpeg 进程、多做一次全量解码
+    # （55 句模板片就是 55 次多余的解码 + 进程启动，而 TTS 阶段本身是网络瓶颈）。
+    pcm_raw = decode_pcm(out_mp3) if trim else None
+    dur_raw = len(pcm_raw) / float(SR) if pcm_raw is not None else audio_dur(out_mp3)
     used = out_mp3
     dur = dur_raw
     shift = 0.0                         # 句首被裁掉的静音秒数（词时间戳要减掉它）
     if trim:
-        pcm_raw = decode_pcm(out_mp3)
         a, b = trim_silence_bounds(pcm_raw, thresh_db=trim_db)
         pcm = pcm_raw[a:b] if b > a else pcm_raw
         wav_path = os.path.splitext(out_mp3)[0] + ".trim.wav"
@@ -1998,6 +2019,11 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
       观众没看清的地方加停留，而不是把整片放慢。hold 为全局默认，hold_map 按 id 覆盖，
       行内 `hold` 字段优先级最高。bar > 0 时把每段时长向上取整到 bar 的整数倍
       （配乐小节对齐用，例如 bar=2.0 = 120 BPM 的一小节）。
+
+    max_dur 只能截留白，不能截到语音结束之前：段时长被压到 lead+语音以下时，场景变短
+    而旁白仍按 voice_start 播完整长句 -> 下一句的语音压在本句上（音频总线里两条人声
+    重叠），字幕窗口也会倒挂。所以取 max(max_dur, 硬下限) 并打印 WARN；真要缩短请减
+    句长或改 lead/tail。
     """
     scenes, t = [], 0.0
     for ln in lines:
@@ -2009,7 +2035,15 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
         tail_i = float((tail_map or {}).get(ln["id"], tail))
         d = max(float(min_dur), lead_i + voice + tail_i + extra)
         if max_dur and d > float(max_dur):
-            d = float(max_dur)
+            # 硬下限 = min_dur 与 "句前留白 + 语音" 的较大者：min_dur 是"画面撑住"的下限，
+            # lead+voice 是"人声不被切断/不与下一句重叠"的物理下限。max_dur 只压得动
+            # tail/hold 这些留白；压到语音以下时必须报警（静默重叠比参数没生效更糟）。
+            floor = max(float(min_dur), lead_i + voice)
+            d = max(float(max_dur), floor)
+            if d > float(max_dur) + 1e-9:
+                print("   [WARN] build_timeline: %s 的 lead %.2fs + 语音 %.2fs 超过 "
+                      "max_dur=%.2fs，段时长取 %.2fs（不切断旁白；要更短请减句长或调 lead）"
+                      % (ln.get("id", "?"), lead_i, voice, float(max_dur), d), flush=True)
         if bar and float(bar) > 0:
             d = math.ceil(d / float(bar) - 1e-9) * float(bar)
         row = dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
@@ -2039,7 +2073,9 @@ def sub_window(scenes, i, max_hold=None):
     s = scenes[i]
     t0 = s["voice_start"] - 0.12
     t1 = s["voice_end"] + 0.45
-    if max_hold:
+    if max_hold and float(max_hold) > 0:
+        # 0/负值当"不限制"：旧实现传 -0.5 会把 t1 钳到 voice_start-0.5，窗口倒挂、
+        # 整句字幕消失。sub_max_hold 是公共参数，外部调用可能原样透传。
         t1 = min(t1, s["voice_start"] + float(max_hold))
     t1 = min(t1, s["end"] - 0.06)
     nxt = scenes[i + 1]["voice_start"] - 0.12 if i + 1 < len(scenes) else 1e9
@@ -2074,6 +2110,10 @@ def write_srt(scenes, path, max_hold=None):
     rows = []
     for i, s in enumerate(scenes):
         t0, t1 = sub_window(scenes, i, max_hold)
+        # 时间码不能为负、不能倒挂：首句 lead < 0.12 时 t0 = -0.12，直接写会得到
+        # "-1:59:59,880" 这种非法行（播放器整条丢弃或直接报错）。
+        t0 = max(0.0, t0)
+        t1 = max(t0, t1)
         body = s.get("sub") or s.get("text", "")
         rows.append("%d\n%s --> %s\n%s\n" % (i + 1, fmt(t0), fmt(t1), body))
     d = os.path.dirname(os.path.abspath(path))
@@ -2130,6 +2170,9 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52,
     body = []
     for i, s in enumerate(scenes):
         t0, t1 = sub_window(scenes, i, max_hold)
+        # 同 write_srt：ASS 的 &H 时间码同样不接受负值（-0.12s 会写成 -1:59:59.88）。
+        t0 = max(0.0, t0)
+        t1 = max(t0, t1)
         txt = (s.get("sub") or s.get("text", "")).replace("\n", "\\N")
         body.append("Dialogue: 0,%s,%s,Default,,0,0,0,,%s" % (fmt(t0), fmt(t1), txt))
     d = os.path.dirname(os.path.abspath(path))
@@ -2204,11 +2247,19 @@ class FrameSink:
         self.frames += 1
 
     def close(self):
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            # 编码进程已经死了：真正的死因在 stderr 里，下面统一报，别让 BrokenPipe
+            # 把 ffmpeg 的错误信息顶掉（旧实现只有裸 close，异常时看不到任何诊断）。
+            pass
+        # 先排空 stderr 再 wait：-v error 的报错行也可能多到写满 64KB 管道，
+        # 而 wait() 期间没人读它 -> ffmpeg 卡在写 stderr、双方一起死等。
+        err = self.proc.stderr.read() if self.proc.stderr is not None else b""
         rc = self.proc.wait()
         if rc != 0:
-            raise RuntimeError("ffmpeg 编码失败: "
-                               + self.proc.stderr.read().decode("utf-8", "replace")[:800])
+            raise RuntimeError("ffmpeg 编码失败（exitcode=%d）: %s"
+                               % (rc, err.decode("utf-8", "replace")[:800]))
         return self.out
 
 
@@ -2323,9 +2374,15 @@ def loudness(path):
 
 
 def detect_black(path, dur=0.4, head=1.2, tail=None):
-    """长黑帧检测。head/tail 秒内是刻意的淡入淡出，不算问题。"""
+    """长黑帧检测。head/tail 秒内是刻意的淡入淡出，不算问题。
+
+    返回 None 表示**检测根本没跑成**（ffmpeg 打不开文件 / blackdetect 失败）。
+    这一点必须可区分：旧实现把失败也返回 0，qa 门禁于是把"没查"记成"0 段黑帧 = 通过"。
+    """
     p = _run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-vf",
               "blackdetect=d=%s:pic_th=0.98" % dur, "-f", "null", "-"])
+    if p.returncode != 0:
+        return None
     total = media_dur(path)
     tl = tail if tail is not None else head
     bad = 0
@@ -2338,8 +2395,11 @@ def detect_black(path, dur=0.4, head=1.2, tail=None):
 
 
 def detect_silence(path, th=-45, dur=1.2):
+    """长静音段计数。返回 None = 检测没跑成（理由同 detect_black，不许当 0 计入通过）。"""
     p = _run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-af",
               "silencedetect=n=%ddB:d=%s" % (th, dur), "-f", "null", "-"])
+    if p.returncode != 0:
+        return None
     return len(re.findall("silence_start", p.stderr.decode("utf-8", "replace")))
 
 
@@ -2517,10 +2577,15 @@ def _probe_concat_part(path):
     except Exception:                       # noqa: BLE001
         dur = 0.0
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    # 音频参数也要探测：-c copy 拼接时各段采样率/声道不一致不会被 ffmpeg 校正，
+    # 而是按参照段解释（实测 48k 段 + 44.1k 段拼完频率 440Hz -> 478.6Hz，
+    # 即整段变调 1.086 倍，而 ffmpeg 返回码仍是 0）。
     return dict(ok=True, path=p, width=int(v.get("width") or 0),
                 height=int(v.get("height") or 0), fps=round(fps, 3),
                 fps_text=rate, codec=str(v.get("codec_name") or ""),
-                audio=bool(a), dur=dur)
+                audio=bool(a), dur=dur,
+                ar=int(a.get("sample_rate") or 0) if a else 0,
+                channels=int(a.get("channels") or 0) if a else 0)
 
 
 def _fmt_fps(info):
@@ -2567,6 +2632,15 @@ def _concat_issues(parts):
             issues.append("%s%s音轨，%s%s音轨"
                           % (who, "有" if inf["audio"] else "无",
                              base, "有" if r["audio"] else "无"))
+        elif inf["audio"] and r["audio"]:
+            # 有音轨时再比音频参数：copy 不做重采样/重混，参数不一致 ->
+            # 音高/时长/声道被按参照段解释（错片但返回码 0，属于"静默错"，必须走重编码）。
+            if inf.get("ar") and r.get("ar") and inf["ar"] != r["ar"]:
+                issues.append("%s音频采样率 %d Hz != %s %d Hz（-c copy 会让音高/时长错位）"
+                              % (who, inf["ar"], base, r["ar"]))
+            if inf.get("channels") and r.get("channels") and inf["channels"] != r["channels"]:
+                issues.append("%s音频声道数 %d != %s %d"
+                              % (who, inf["channels"], base, r["channels"]))
     return infos, issues, ref
 
 
@@ -2619,7 +2693,12 @@ def _concat_reencode(parts, out, infos, ref, lst):
             fc.append("[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a%d]"
                       % (i, i))
         else:
-            dur = max(float(inf.get("dur") or 0), ref_dur, 0.1)
+            # 静音长度必须等于**这一段自己的**视频长度。旧实现取 max(段长, 参照段长)：
+            # 参照段更长时会给短的无音轨段多补几秒静音，拼接后音频比视频长
+            # （实测 3s 有声 + 1s 无声 -> 输出 6s，视频只有 4s，后半段音画差 2s）。
+            # 段长读不出来（ffprobe 没有 duration）时才退回参照段时长。
+            seg_dur = max(float(inf.get("dur") or 0), 0.0)
+            dur = max(seg_dur if seg_dur > 0 else ref_dur, 0.1)
             fc.append("anullsrc=r=48000:cl=stereo,atrim=duration=%.3f,asetpts=PTS-STARTPTS[a%d]"
                       % (dur, i))
     labels = "".join("[v%d]%s" % (i, "[a%d]" % i if any_audio else "")
@@ -2775,9 +2854,14 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
     else:
         warns.append("未能测到真峰（ebur128 解析失败），责任门禁缺一项")
     nb = detect_black(path)
-    if nb > 0:
+    if nb is None:
+        warns.append("长黑帧检测未执行（ffmpeg blackdetect 失败），本项不能当作通过")
+    elif nb > 0:
         warns.append("首尾之外检测到 %d 段长黑帧" % nb)
-    if detect_silence(path) > 0:
+    ns = detect_silence(path)
+    if ns is None:
+        warns.append("长静音检测未执行（ffmpeg silencedetect 失败），本项不能当作通过")
+    elif ns > 0:
         warns.append("检测到长静音段（确认是否有意留白）")
     if isinstance(theme, dict):
         # 主题体检的结论带进报告：这样"深色主题必然贴空窗阈值"这种事实不是靠嘴说

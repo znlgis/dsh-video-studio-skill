@@ -782,6 +782,33 @@ def tv_filter(x, kind: str, freq, q: float = 0.7071, gain_db: float = 0.0,
     return y
 
 
+def _resonator_ir(f: float, t60: float, amp: float, n_max: int,
+                  sr: int = SR) -> np.ndarray:
+    """模态谐振器的解析冲激响应 h[n] = amp · r^n · sin(ωn)，长度 ≤ n_max。
+
+    为什么不复用通用的 _iir_ir()：无 scipy 时 resonator 也要走 FFT 卷积，而金属/
+    玻璃模态的 t60 可达 5~7 s（见 MATERIALS 的 eta 量级），-80 dB 衰减长度约
+    1.33·t60·sr ≈ 40 万采样。旧的 _iir_ir(cap=20000) 在 0.42 s 处把 IR 砍成 0：
+    截断点在 -25 dB 上直接跳变，听感是长尾里多一下“咔”，且与 scipy 路径的
+    产物长度/尾音全不同（references/sfx-design.md §12 要求静态滤波与 scipy
+    相对误差 ≤ 2e-4，实测旧兜底最差 -8 dB）。这个二阶系统的 IR 有闭式解，
+    一次向量化算完，比逐样本 Python 递推快两三个数量级。
+    长度取 min(n_max, -80 dB 衰减长度)：输出只取前 n_max 个采样，h 超过 n_max
+    的部分不可能影响这些采样，所以这个截断是精确的、不是近似。
+    """
+    n_max = int(max(0, n_max))
+    if n_max == 0:
+        return np.zeros(0)
+    a1 = math.exp(-LN1000 / (max(float(t60), 1e-5) * float(sr)))
+    w = 2.0 * np.pi * float(f) / float(sr)
+    # 借 _ir_len() 的极点半径估计（它已处理不衰减/数值退化），保证与旧路径同口径
+    a = np.array([1.0, -2.0 * a1 * math.cos(w), a1 * a1])
+    b = np.array([0.0, float(amp) * a1 * math.sin(w)])
+    L = int(_ir_len(b, a, cap=n_max))
+    k = np.arange(L, dtype=float)
+    return float(amp) * np.power(a1, k) * np.sin(w * k)
+
+
 def resonator(excitation, f: float, t60: float, amp: float = 1.0,
               sr: int = SR) -> np.ndarray:
     """单个模态：二阶谐振器，冲激响应为 amp · r^n · sin(ωn)（指数衰减的正弦）。"""
@@ -794,7 +821,7 @@ def resonator(excitation, f: float, t60: float, amp: float = 1.0,
     a = np.array([1.0, -2.0 * a1 * math.cos(w), a1 * a1])
     if _sig is not None:
         return _sig.lfilter(b, a, x, axis=0)
-    return _fftconv(x, _iir_ir(b, a, _ir_len(b, a, cap=20000)))[: len(x)]
+    return _fftconv(x, _resonator_ir(f, t60, amp, len(x), sr))[: len(x)]
 
 
 def resonator_bank(excitation, freqs, t60s, amps, sr: int = SR) -> np.ndarray:
@@ -1000,13 +1027,31 @@ class Body:
         y = np.zeros(n)
         if not events:
             return y
-        # 多声道但共用事件：先把激励按模态分组（每个模态一份稀疏激励）
-        exc = np.zeros(n)
-        for i, (f, t60) in enumerate(zip(self.freqs, self.t60s)):
-            exc[:] = 0.0
-            for s, pulse, w in events:
-                exc[s:s + len(pulse)] += w[i] * pulse
-            y += resonator(exc, float(f), float(t60), 1.0, sr)
+        if _sig is not None:
+            # 有 scipy：逐模态 lfilter（保持 v0.7 及以前的产物逐样本不变——用户成片不出新声音）
+            exc = np.zeros(n)
+            for i, (f, t60) in enumerate(zip(self.freqs, self.t60s)):
+                exc[:] = 0.0
+                for s, pulse, w in events:
+                    exc[s:s + len(pulse)] += w[i] * pulse
+                y += resonator(exc, float(f), float(t60), 1.0, sr)
+            return y
+        # 无 scipy：先按事件把「加权模态 IR」合成一条，再与力脉冲卷积一次（N 模态 → 1 次 FFT）。
+        # 等价性：每个事件的模态权重 w_i 是标量，Σ_i w_i·conv(pulse, h_i) = conv(pulse, Σ_i w_i·h_i)
+        # 可换序；所以合并只减少 FFT 次数，不改变结果。只在兜底路径合并：有 scipy 的产物保持原样。
+        # 代价：IR 长度仍按 -80 dB 衰减截断，且只保留到输出末尾（h 超过 n-s 的部分影响不到输出）。
+        for s, pulse, w in events:
+            lcap = n - s
+            if lcap <= 0 or len(pulse) == 0:
+                continue
+            h = np.zeros(lcap)
+            for i, (f, t60) in enumerate(zip(self.freqs, self.t60s)):
+                if w[i] == 0.0:
+                    continue
+                hi = _resonator_ir(float(f), float(t60), float(w[i]), lcap, sr)
+                h[: len(hi)] += hi
+            seg = _fftconv(pulse, h)[:lcap]
+            y[s:s + len(seg)] += seg
         return y
 
 
@@ -2436,6 +2481,11 @@ def data_chirp(seed=0, dur=0.8, rate=28.0, base=1800.0, **kw):
     v0.7：音高跟随 **kw 里的 key（None = 旧行为 D 小调五声）。
     """
     r = float(rate)
+    # rate 是"每秒脉冲数"，必须为正：rate=0 会在下面 i / r 抛 ZeroDivisionError（内部
+    # 堆栈，用户看不出是参数问题）；rate<0 时 int(dur*r) 为负、事件时刻为负，_place 会
+    # 静默丢掉大部分脉冲——只剩哑音。与 _enum 同口径：认识但非法的值必须响亮报错。
+    if not math.isfinite(r) or r <= 0.0:
+        raise ValueError("data_chirp: rate 必须是正数（每秒脉冲数），收到 %r" % (rate,))
     n = max(2, int(float(dur) * r))
     g = rng(seed)
     x = _bus(dur, stereo=False)
@@ -3239,19 +3289,85 @@ def selftest() -> int:
         return "环境声响度贴合 master（±1.5 LU）"
 
     def t_fallback():
+        # v0.8：这条以前只查"输出是有限值"——等于只验了"没崩"，兜底路径的幅度
+        # 正确性完全没查（references/sfx-design.md §12 承诺静态滤波与 scipy 相对
+        # 误差 ≤ 2e-4）。现在按当前环境选参照：
+        #   有 scipy：同一函数跑两遍（scipy 路径 vs 兜底路径）逐样本比 —— 直接验"等价"；
+        #   无 scipy：没有 scipy 路径可比，改用**解析参照**（双二阶的阶跃稳态/频响、
+        #            谐振器的闭式冲激响应 amp·r^n·sin(ωn)），这样 CI 的 noscipy 任务
+        #            也在查"数值对不对"，而不是自己和自己比出一个假 PASS。
         old = globals().get("_sig")
+        has_ref = old is not None
+        S = globals()
         try:
-            globals()["_sig"] = None                    # 模拟没装 scipy
-            x = np.random.default_rng(0).standard_normal(24000)
-            y = lowpass(x, 1000.0)
-            if not np.all(np.isfinite(y)):
-                raise ValueError("无 scipy 兜底 lowpass 输出非有限值")
+            x = np.random.default_rng(0).standard_normal(24000) * 0.1
+            worst = 0.0
+
+            def cmp_paths(fn):
+                """有 scipy 时：两条路径逐样本相对误差；无 scipy 时返回 None。"""
+                if not has_ref:
+                    return None
+                S["_sig"] = old
+                a = fn()
+                S["_sig"] = None
+                b = fn()
+                d = float(np.max(np.abs(a - b))) / max(float(np.max(np.abs(a))), 1e-12)
+                return d
+
+            # 1) 静态滤波：有 scipy 比路径；无 scipy 用"阶跃稳态 = 解析 DC 增益"
+            for kind, f0, dc in (("lowpass", 1000.0, 1.0), ("highpass", 1000.0, 0.0)):
+                S["_sig"] = None
+                step = np.concatenate([np.zeros(4800), np.ones(43200)])
+                y = sosfilt(biquad(kind, f0), step)
+                err = abs(float(np.mean(y[-1000:])) - dc)
+                if err > 2e-3:
+                    raise ValueError("无 scipy %s(%g) 阶跃稳态 %.6f 偏离 DC 增益 %.3f"
+                                     % (kind, f0, float(np.mean(y[-1000:])), dc))
+                worst = max(worst, err)
+            d = cmp_paths(lambda: lowpass(x, 1000.0))
+            if d is not None:
+                if d > 2e-4:
+                    raise ValueError("无 scipy 静态滤波与 scipy 相对误差 %.2e > 2e-4" % d)
+                worst = max(worst, d)
+
+            # 2) 谐振器：闭式解。h[n] = amp·r^n·sin(ωn)（本函数构造的 b/a 决定的）。
+            #    注意激励必须**够长**：旧兜底把 IR 截断在 20000 采样，若只喂 4096 点冲激，
+            #    输出前 4096 点与解析解一致，截断根本测不出来（第一版断言就踩过这个坑）。
+            #    这里用 30000 点白噪声：t60=3 s 的 -80 dB 长度约 19.2 万采样，输出第 2 万点之后
+            #    的错误才会暴露，相对误差会到 3e-2 量级（远大于下面 2e-4 的阈值）。
+            n = 30000
+            exc = np.random.default_rng(7).standard_normal(n)
+            for f, t60, amp in ((300.0, 1.0, 0.7), (220.0, 3.0, 1.0)):
+                r0 = math.exp(-LN1000 / (t60 * float(SR)))
+                w0 = 2.0 * math.pi * f / float(SR)
+                k = np.arange(n, dtype=float)
+                h_ref = amp * np.power(r0, k) * np.sin(w0 * k)     # 解析 IR（独立于被测代码）
+                # 参照卷积用 FFT（30000×30000 直接 np.convolve 是 9e8 次乘加，实测要 20 s，
+                # 会把这个自检从 60 s 预算里挤爆）；零填充到 2 的幂即可，长度不足部分不影响
+                # 前 n 个输出采样。
+                L = n + len(h_ref) - 1
+                N = 1 << int(L - 1).bit_length()
+                ref = np.fft.irfft(np.fft.rfft(exc, N) * np.fft.rfft(h_ref, N), N)[:n]
+                S["_sig"] = None
+                h = resonator(exc, f, t60, amp)
+                err = float(np.max(np.abs(h - ref))) / max(float(np.max(np.abs(ref))), 1e-12)
+                if err > 2e-4:
+                    raise ValueError("无 scipy 谐振器 f=%g t60=%g 与闭式解相对误差 %.2e > 2e-4"
+                                     "（IR 被截断？）" % (f, t60, err))
+                worst = max(worst, err)
+
+            # 3) 时变滤波：文档承认"块中心系数 + 重叠相加"是近似（高频控制信号会平滑），
+            #    只查能跑 + 不出 NaN/Inf，不设等价阈值。
+            S["_sig"] = None
             z = tv_filter(x, "bandpass", np.linspace(300.0, 4000.0, len(x)), 0.9)
             if not np.all(np.isfinite(z)):
                 raise ValueError("无 scipy 兜底 tv_filter 输出非有限值")
         finally:
             globals()["_sig"] = old
-        return "无 scipy 兜底路径可用（短冲激响应 + FFT 卷积）"
+        if has_ref:
+            return "兜底 vs scipy：静态滤波/谐振器 ≤2e-4（实测 %.1e）/ tv_filter 可用" % worst
+        return ("无 scipy 环境：静态滤波阶跃稳态 DC 增益 / 谐振器闭式解 均 ≤2e-3（实测 %.1e）+ "
+                "tv_filter 可用（本环境没有 scipy 路径可比，用解析参照）" % worst)
 
     def t_analysis():
         m = analyze(render("impact", seed=6))

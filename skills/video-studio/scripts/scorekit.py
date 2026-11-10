@@ -332,28 +332,25 @@ def _short_term_db(x: np.ndarray, win: float = 0.4, hop: float = 0.1,
 
 
 def _approx_lufs(x: np.ndarray, sr: int = SR) -> float:
-    """近似积分响度（简化 K 加权 + 400/100 ms 短时块 + -70/-10 dB 双门限）。"""
+    """近似积分响度（简化 K 加权 + 400/100 ms 短时块 + -70/-10 dB 双门限）。
+
+    注意 10**(lj/10) 已经是"块均方 * 10**(-0.691/10)"：lj 里的 -0.691 是 BS.1770
+    块响度定义的一部分，把它抬回"块均方"后，积分响度就是 10*log10(门限内均值)。
+    旧实现又在均值外面减了一次 0.691，等于报告值恒定偏低 0.69 dB
+    （实测 12 s 片：本文件 -15.65 vs sfxkit.integrated_loudness -14.47，差 1.19 dB；
+    去掉多余项后 -14.96，剩余差是"12 kHz 降采样 + 移动平均近似 K 加权"的固有误差）。
+    """
     _, lj = _short_term_db(x, 0.4, 0.1, sr=sr)
     lj = lj[np.isfinite(lj)]
     lj = lj[lj > -70.0]
     if len(lj) == 0:
         return -70.0
     e = np.mean(10.0 ** (lj / 10.0))
-    rel = -0.691 + 10.0 * np.log10(max(e, 1e-20)) - 10.0
+    rel = 10.0 * np.log10(max(e, 1e-20)) - 10.0
     lj2 = lj[lj > rel]
     if len(lj2) == 0:
-        return float(-0.691 + 10.0 * np.log10(max(e, 1e-20)))
-    return float(-0.691 + 10.0 * np.log10(max(float(np.mean(10.0 ** (lj2 / 10.0))), 1e-20)))
-
-
-def _measure_section_db(x: np.ndarray, start: float, end: float, sr: int = SR) -> float:
-    """段落内短时响度的中位数（避开段首尾 0.12 s 过渡；静音块不计）。"""
-    t, lj = _short_term_db(x, 0.4, 0.1, sr=sr)
-    a, b = float(start) + 0.12, float(end) - 0.12
-    sel = (t >= a) & (t <= b) & (lj > -70.0)
-    if not np.any(sel):
-        return -70.0
-    return float(np.median(lj[sel]))
+        return float(10.0 * np.log10(max(e, 1e-20)))
+    return float(10.0 * np.log10(max(float(np.mean(10.0 ** (lj2 / 10.0))), 1e-20)))
 
 
 # ============================================================================
@@ -607,7 +604,11 @@ class _Bank:
         env = np.minimum(1.0, t / max(attack, 1e-4))
         rel = t > self._pad_dur
         if np.any(rel):
-            env[rel] = np.exp(-(t[rel] - self._pad_dur) / max(release, 1e-4))
+            # 释音必须是"乘上去"而不是"覆盖掉"：起音比一小节还慢时（bpm > ~223 的
+            # 4/4，pad_dur = 一小节 * 1.02），覆盖式写法会在 t=pad_dur 处把还在爬坡的
+            # 包络（例如 0.68）直接跳到 1.0，听感是一声"噗"；乘法写法在起音已完成时
+            # 是 1.0 * 衰减，逐位与原结果相同（既有 BPM 全部不受影响）。
+            env[rel] *= np.exp(-(t[rel] - self._pad_dur) / max(release, 1e-4))
         env = _f32(env)
         self._pad_envs[key] = env
         return env
@@ -3055,10 +3056,6 @@ def _merge_sections(anchors, sections, duration: float) -> list:
                 "energy": _clip01(a.get("energy", KIND_ENERGY.get(kind, 0.5))),
                 "anchor_id": str(a.get("id", "")),
             })
-    def _anchor_end(key: str) -> float:
-        hit = next((b for b in blocks if b.get("anchor_id") == key), None)
-        return float(hit["end"]) if hit else float(duration)
-
     extra: list[dict] = []
     for s in sections or []:
         _require(isinstance(s, dict), "sections 里的每一项都必须是对象")
@@ -3179,17 +3176,6 @@ def load(path, sr: int = SR) -> np.ndarray:
 # ============================================================================
 # 自测
 # ============================================================================
-def _demo_anchors(duration: float) -> list:
-    """selftest 用的小时间轴（按型：hook -> body -> drive -> outro）。"""
-    q = duration / 4.0
-    return [
-        {"id": "a1", "kind": "hook", "start": 0.0, "end": q},
-        {"id": "a2", "kind": "body", "start": q, "end": 2 * q},
-        {"id": "a3", "kind": "drive", "start": 2 * q, "end": 3 * q},
-        {"id": "a4", "kind": "outro", "start": 3 * q, "end": duration},
-    ]
-
-
 def _max_loudness_jump(x: np.ndarray, rep: dict, sr: int = SR) -> float:
     """段内相邻短时响度块的最大跳变（dB）；跳过设计好的"吸气"窗口。"""
     t, lj = _short_term_db(x, 0.3, 0.1, sr=sr)

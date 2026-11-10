@@ -14,7 +14,8 @@ preflight 不新写检测器，只把现成检测前移，并把结论整理成�
                 chapter / items[].text（含 timeline.scenes 里的同名字段）
                 按模板实际绘制权重检测：big/kicker=bold、lead=light、sub=reg+light、
                 items=reg、title/chapter=reg、text=bold+reg
-  3 tts         work/tts/*.mp3 若存在，必须能被 ffprobe 解析出音频流
+  3 tts         work/tts/*.mp3 若存在，必须能被 ffprobe 解析出音频流；
+                文件名要能对上行 id，时长要与台词长度相符（过短=截断/坏缓存）
   4 fonts       字体候选至少一个真的能加载（filmkit.font() 对 bold/reg/light 各取一次）
   5 web_page    engine="web" 时入口页存在（script.web.entry 或 <剧本目录>/web/index.html）
 
@@ -495,6 +496,14 @@ def _check_tts(script, work, errors, warnings, checks):
 
     目录不存在 / work 没传 = skipped（"还没跑 TTS"是正常前置状态，不是通过）。
     目录存在但一个文件都没有 = skipped（同上）。有 mp3 但 ffprobe 不可用 = error（fail-closed）。
+
+    除了"能解析出音频流"，还要**对得上剧本**，否则门禁只是看着干净：
+      * 文件名与行 id 对账：filmkit.tts_batch 的文件名恒为 "<id>.mp3"，所以
+        "某句没有对应 mp3 / 有剧本里没有的 mp3" 说明 work/tts 与剧本不是同一份
+        （改过 id、拷来的旧缓存）。只比个数会漏掉"l09 顶替 l04"——数量相同但对不上。
+      * 时长与台词长度对账：正常旁白约 0.15–0.25 s/字，连英文也不会快过 0.06 s/字。
+        比这还短只可能是音频被截断 / 缓存坏了，渲染时这一句会被压没。
+    这两项都是 warning（启发式，不阻断）：判据保守，但比静默放过强。
     """
     if not work:
         _check(checks, "tts", "skipped", "没传 work，未检查 TTS 音频")
@@ -553,6 +562,35 @@ def _check_tts(script, work, errors, warnings, checks):
     if len(files) < len(lines):
         _warn(warnings, "tts_partial", "TTS 音频 %d 个 < 剧本 %d 句（可能还没合成完）"
               % (len(files), len(lines)), "tts")
+    # ---- 文件名 <-> 行 id 对账（见函数 docstring：只比个数会漏掉"数量相同但对不上"）----
+    by_id = {str(ln.get("id")): ln for ln in lines if isinstance(ln, dict)}
+    stems = [os.path.splitext(n)[0] for n in files]
+    missing = [lid for lid in by_id if lid not in stems]
+    extra = [s for s in stems if s not in by_id]
+    if missing:
+        _warn(warnings, "tts_missing_lines",
+              "work/tts 里没有这些句子的音频：%s（剧本里这几句 id 没变、音频却不在；"
+              "重跑 --stage tts 会补齐。也可能只是 tts 还没跑完）"
+              % "、".join(missing[:8]), "tts", line_ids=missing)
+    if extra:
+        _warn(warnings, "tts_stale_files",
+              "work/tts 里有剧本用不到的音频：%s（旧片缓存/改过 id？它们不会被这次渲染使用）"
+              % "、".join(sorted(extra)[:8]), "tts", file_names=sorted(extra)[:8])
+    # ---- 时长 <-> 台词长度对账：过短几乎是截断/坏缓存 ----
+    short = []
+    for name in files:
+        dur = durs.get(name)
+        ln = by_id.get(os.path.splitext(name)[0])
+        if not dur or not isinstance(ln, dict):
+            continue
+        n_chars = sum(1 for ch in str(ln.get("text") or "") if not ch.isspace())
+        if n_chars >= 4 and float(dur) < 0.06 * n_chars:
+            short.append("%s %.2fs/%d 字" % (name, float(dur), n_chars))
+    if short:
+        _warn(warnings, "tts_suspect_short",
+              "这些 TTS 音频短得不合理（<0.06 s/字，正常旁白 0.15–0.25 s/字）：%s —— "
+              "音频被截断或缓存坏了的典型表现，渲染时这一句会被压没；"
+              "用 --stage tts --force-tts 重合成" % "、".join(short[:8]), "tts")
     if bad:
         _check(checks, "tts", "fail", "%d/%d 个音频不可用" % (bad, len(files)))
     else:

@@ -23,7 +23,11 @@
   11  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
   12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验模板（规则只留一份）
 
-退出码：0 全过；1 有 FAIL。每一项都打印证据，不打"可能有问题"。
+三档结论（与技能自己的门禁账本同口径）：PASS = 这次真的查了且通过；FAIL = 查了没过；
+SKIP = **这次没执行**（比如本地没装 node / npm），**不等于通过**。
+
+退出码：0 = 无 FAIL；1 = 有 FAIL。加 --strict 时 SKIP 也算失败（本地环境缺工具时用它自证"真的全查了"）。
+每一项都打印证据，不打"可能有问题"。
 """
 from __future__ import annotations
 
@@ -60,21 +64,35 @@ MAX_FILE_BYTES = 400 * 1024
 SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv"}
 SIZE_SKIP_EXT = {".mp4", ".mp3", ".wav", ".mov", ".webm", ".gif", ".webp", ".zip", ".tgz"}
 
-_results: list[tuple[bool, str, str]] = []
+_results: list[tuple[str, str, str]] = []
+
+# 「跳过」的前缀约定：检查函数返回这些开头的字符串表示**这次没有真的查**。
+# 以前这里只有 bool 两态，"跳过（没装 node）"会被记成 PASS——正是本仓库反复声明的
+# "skipped != 通过"，却在仓库级体检自己的汇总里破了例（本地没装 node 的人会看到
+# PASS 12/12，其实第 2、6 项根本没跑）。现在三档：PASS / FAIL / SKIP。
+SKIP_PREFIXES = ("跳过", "skip")
+
+
+def _is_skip(detail: str) -> bool:
+    head = str(detail or "").strip().lower()
+    return any(head.startswith(p) for p in SKIP_PREFIXES)
 
 
 def check(name: str, fn):
-    """跑一项检查；返回 (ok, name, detail)。任何异常都算 FAIL 并保留消息。"""
+    """跑一项检查；返回 PASS / FAIL / SKIP 三态，detail 保留证据或原因。"""
     try:
         detail = fn() or ""
-        _results.append((True, name, str(detail)))
-        return True
+        if _is_skip(detail):
+            _results.append(("SKIP", name, str(detail)))
+            return "SKIP"
+        _results.append(("PASS", name, str(detail)))
+        return "PASS"
     except AssertionError as e:
-        _results.append((False, name, str(e)))
-        return False
+        _results.append(("FAIL", name, str(e)))
+        return "FAIL"
     except Exception as e:                                      # noqa: BLE001
-        _results.append((False, name, "%s: %s" % (type(e).__name__, e)))
-        return False
+        _results.append(("FAIL", name, "%s: %s" % (type(e).__name__, e)))
+        return "FAIL"
 
 
 # ---------------------------------------------------------------- 1 语法
@@ -149,7 +167,16 @@ def t_json():
     bad_badges = [b for b in badges if b != ver]
     assert not bad_badges, ("README 徽章版本 %s 与 package.json version %s 不一致"
                             % ("/".join(bad_badges), ver))
-    return "%d 个 .json 全部可解析；version=%s 与 README 徽章一致" % (len(files), ver)
+    # CHANGELOG 的第一条标题也必须是当前版本：以前只查 README 徽章，于是"发了新版本但
+    # CHANGELOG 顶部还是上一版"没人发现（历史真发生过，见 v0.7.2 的修复记录）。
+    changelog = ROOT / "CHANGELOG.md"
+    assert changelog.is_file(), "缺 CHANGELOG.md"
+    m = re.search(r"^##\s+(\d+\.\d+\.\d+)", changelog.read_text(encoding="utf-8"), re.M)
+    assert m, "CHANGELOG.md 里找不到 \"## X.Y.Z\" 形式的版本标题"
+    assert m.group(1) == ver, ("CHANGELOG 顶部版本 %s 与 package.json version %s 不一致"
+                               "（发版时两处必须同时改）" % (m.group(1), ver))
+    return ("%d 个 .json 全部可解析；version=%s 与 README 徽章 / CHANGELOG 顶部一致"
+            % (len(files), ver))
 
 
 # ---------------------------------------------------------------- 3 技能清单
@@ -205,22 +232,55 @@ def t_pack():
     files = [f["path"] for f in meta.get("files", [])]
     # 垃圾文件可能出现在**包内任意位置**（实测踩过：队友的临时目录建在 skills/ 下，
     # 于是 skills/tmp_scratch_x/webtest/*.mp4 被一起打进包，体量翻倍）。
-    junk_suffix = (".pyc", ".pyo", ".log", ".tmp", ".orig", ".bak", ".mp4", ".wav", ".mkv", ".tgz")
+    junk_suffix = (".pyc", ".pyo", ".log", ".tmp", ".orig", ".bak", ".mp4", ".wav", ".mkv", ".tgz",
+                   # 二进制/可执行文件：技能包里不该有，出现就是某个进程把缓存写进了源码树。
+                   # 实测踩过：输入法按 %SystemDrive%\ProgramData\...\*.bin 往 cwd 落缓存，
+                   # 当时 cwd 正好是 skills/video-studio/scripts/，两个 172 KB 的 .bin 进了包，
+                   # 而旧的 junk 规则只看 .pyc/.log/.mp4 这些后缀，检查照样 PASS。
+                   ".bin", ".dll", ".exe", ".so", ".dylib", ".pyd", ".db", ".sqlite")
     junk_parts = ("__pycache__", "tmp_scratch_", "node_modules", ".pytest_cache", ".cordis")
     junk = [f for f in files
             if f.endswith(junk_suffix) or any(p in f for p in junk_parts)
-            or f.startswith(("work/", "out/", ".team/"))]
+            or f.startswith(("work/", "out/", ".team/"))
+            # 路径里带 % 段 = 某个环境变量没被展开（Windows 上的典型坏路径）。
+            # 发布包里不可能有合法的含 % 路径段，直接判垃圾，而不是去猜是哪个变量。
+            or any("%" in part for part in f.split("/"))]
     assert not junk, ("包内不该有这些文件（临时产物/日志/媒体，属于打包污染）：%s"
                       % ", ".join(junk[:6]))
-    must = ["index.js", "cordis.patch.yml", "icon.svg", "package.json", "README.md",
-            "skills/video-studio/SKILL.md", "skills/video-studio/scripts/filmkit.py",
-            "skills/video-studio/scripts/render.py", "skills/video-studio/scripts/selfcheck.py",
-            "skills/video-studio/assets/film.json", "skills/video-studio/references/quality-gates.md",
-            "schemas/film.schema.json", "tools/ci_check.py", "tools/estimate.py",
-            "tools/audio_similarity.py", "tools/selftest_noscipy.py"]
+    # 根文件清单仍然手写：它们少一个插件就装不起来，而且数量少、变动少。
+    must = ["index.js", "cordis.patch.yml", "icon.svg", "package.json", "README.md"]
     missing = [m for m in must if m not in files]
     assert not missing, "包内缺文件：%s" % ", ".join(missing)
-    return "%d 个文件 / %.0f KB" % (len(files), meta.get("size", 0) / 1024.0)
+    # 目录部分改成**派生式**：skills/ schemas/ locale/ tools/ docs/ 下磁盘上有的（除缓存/字节码）
+    # 必须全部进包。以前这里是手写 must 列表，于是 v0.6 新增的 gates.py / stagewatch.py、
+    # v0.8 新增的 preflight.py / qavmaf.py / qaasr.py / tools/golden_frames.py 都不在列表里——
+    # "必需文件必须在包里"这条检查对**新增文件天然免疫**，等于只保护了第一版写下的那些路径。
+    shipped_dirs = ("skills", "schemas", "locale", "tools", "docs")
+    on_disk = []
+    for d in shipped_dirs:
+        base = ROOT / d
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file():
+                continue
+            if "__pycache__" in p.parts or p.suffix == ".pyc":
+                continue
+            rel = p.relative_to(ROOT).as_posix()
+            # 命中 junk 的文件不参与"必须进包"的比对：它们本来就不该进包，
+            # 而"磁盘上有就必须进包"会把垃圾反向当成必需文件（实测：给 package.json 加
+            # "!skills/**/*.bin" 排除规则时，这条派生检查反过来 FAIL 了）。
+            if rel.endswith(junk_suffix) or any(k in rel for k in junk_parts) \
+                    or any("%" in part for part in rel.split("/")):
+                continue
+            on_disk.append(rel)
+    packed_set = {f.replace("\\", "/") for f in files}
+    not_packed = [p for p in on_disk if p not in packed_set]
+    assert not not_packed, (
+        "这些文件在仓库里但没进包（package.json 的 files 漏了？）：%s"
+        % ", ".join(not_packed[:8]))
+    return "%d 个文件 / %.0f KB；%d 个受管目录文件全部进包" % (
+        len(files), meta.get("size", 0) / 1024.0, len(on_disk))
 
 
 # ---------------------------------------------------------------- 6 文档引用
@@ -304,16 +364,74 @@ def t_size():
 
 
 # ---------------------------------------------------------------- 8 兼容 Python 3.9（README/THIRD_PARTY 的承诺）
+# 3.10+ 才有、但**语法上**能通过 3.9 解析的 API —— ast.parse(feature_version=(3,9)) 看不见它们。
+# 这正是"门禁看着干净、其实没在查"的典型形态：zip(..., strict=True) 在 3.9 上是 TypeError
+# （zip() takes no keyword arguments），而语法检查一路绿灯。
+# 只查**确定**不兼容且容易误用的这几个；不要按 BinOp|BitOr 一律报错（numpy 位或会刷假失败）。
+def _py39_runtime_violations(tree):
+    """扫 3.10+ 运行期 API。返回 [(行号, 说明)]。"""
+    out = []
+    has_future_annotations = False
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            if any(a.name == "annotations" for a in node.names):
+                has_future_annotations = True
+    ann_nodes = set()
+    for node in ast.walk(tree):
+        # 收集"注解位置"的节点：只有这里的 X | Y 才是类型联合，函数体里的是 numpy 位或
+        for attr in ("annotation", "returns"):
+            sub = getattr(node, attr, None)
+            if sub is not None:
+                for x in ast.walk(sub):
+                    ann_nodes.add(id(x))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+            if name == "zip":
+                for kw in node.keywords:
+                    if kw.arg == "strict":
+                        out.append((node.lineno, "zip(..., strict=...) 需要 Python 3.10+"))
+            if name == "bit_count":
+                out.append((node.lineno, "int.bit_count() 需要 Python 3.10+"))
+            if name == "dataclass":
+                for kw in node.keywords:
+                    if kw.arg in ("slots", "kw_only"):
+                        out.append((node.lineno,
+                                    "dataclass(slots=/kw_only=) 需要 Python 3.10+"))
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[0] == "tomllib":
+                    out.append((node.lineno, "tomllib 需要 Python 3.11+"))
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] == "tomllib":
+                out.append((node.lineno, "tomllib 需要 Python 3.11+"))
+        elif isinstance(node, ast.TryStar):
+            out.append((node.lineno, "except* 需要 Python 3.11+"))
+        elif isinstance(node, ast.Match):
+            out.append((node.lineno, "match/case 需要 Python 3.10+"))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            if not has_future_annotations and id(node) in ann_nodes:
+                out.append((node.lineno,
+                            "X | Y 类型注解需要 3.10+（用 Union[X, Y] 或加 "
+                            "from __future__ import annotations）"))
+    return out
+
+
 def t_py39():
     bad = []
     for p in _py_files():
         src = p.read_text(encoding="utf-8")
         try:
-            ast.parse(src, filename=str(p), feature_version=(3, 9))
+            tree = ast.parse(src, filename=str(p), feature_version=(3, 9))
         except SyntaxError as e:
             bad.append("%s:%s %s" % (p.name, e.lineno, e.msg))
-    assert not bad, "；".join(bad)
-    return "%d 个 .py 通过 3.9 语法解析（运行期兼容仍需真 3.9 实测）" % len(_py_files())
+            continue
+        for lineno, why in _py39_runtime_violations(tree):
+            bad.append("%s:%s %s" % (p.name, lineno, why))
+    assert not bad, "；".join(bad[:6])
+    return ("%d 个 .py 通过 3.9 语法解析 + 3.10+ 运行期 API 扫描"
+            "（真 3.9 运行仍需实测）" % len(_py_files()))
 
 
 
@@ -419,6 +537,8 @@ def t_film_contract():
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印每一节的详细证据")
+    ap.add_argument("--strict", action="store_true",
+                    help="SKIP 也算失败（本地缺 node/npm 时想确认\"真的全查了\"就用它）")
     a = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -442,16 +562,27 @@ def main(argv=None) -> int:
     print("ci_check  %s" % ROOT)
     print("-" * 66)
     for name, fn in checks:
-        ok = check(name, fn)
-    for ok, name, detail in _results:
-        print("  %s %-24s %s" % ("PASS" if ok else "FAIL", name, detail if (ok or a.verbose) else ""))
-    fails = [r for r in _results if not r[0]]
+        check(name, fn)
+    for status, name, detail in _results:
+        # PASS 的 detail 只在 -v 下打印（它通常只是"N 个文件全部可编译"）；FAIL/SKIP 一律打印原因
+        print("  %s %-24s %s" % (status, name, detail if (status != "PASS" or a.verbose) else ""))
+    fails = [r for r in _results if r[0] == "FAIL"]
+    skips = [r for r in _results if r[0] == "SKIP"]
+    n_pass = len(_results) - len(fails) - len(skips)
     print("-" * 66)
-    print("PASS %d / FAIL %d" % (len(_results) - len(fails), len(fails)))
+    print("PASS %d / FAIL %d / SKIP %d" % (n_pass, len(fails), len(skips)))
     if fails:
         print("\n失败项：")
-        for ok, name, detail in fails:
+        for _status, name, detail in fails:
             print("  - %s：%s" % (name, detail))
+    if skips:
+        print("\n跳过项（**不等于通过**）：")
+        for _status, name, detail in skips:
+            print("  - %s：%s" % (name, detail))
+    # 退出码口径：默认只把 FAIL 当失败（CI 里 node/npm 一定在，SKIP 不该出现）；
+    # --strict 把 SKIP 也算失败——本地没装 node 的人想确认"真的全查了"就用它。
+    if a.strict and skips:
+        return 1
     return 1 if fails else 0
 
 

@@ -666,8 +666,12 @@
         "vmaf": {
           "type": "object",
           "additionalProperties": true,
-          "description": "全片 VMAF/SSIM 门禁（参考帧由场景函数实时渲染，不是成片抽帧）",
+          "description": "全片 VMAF/SSIM 门禁（参考帧由场景函数实时渲染，不是成片抽帧）。注意：本对象里的 enabled 与 qa.require_vmaf 是**惰性键**（v0.8 起草时留下，代码无读取点），真正生效的开关是 mode=off / --vmaf off；filmcheck.py 对惰性键会报 WARN。",
           "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "惰性键：写它不生效（要跳过 G11 请写 mode=\"off\" 或命令行 --vmaf off）"
+            },
             "mode": {
               "type": "string",
               "enum": [
@@ -681,13 +685,13 @@
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "VMAF 低于此值 -> fail（默认 88，实测标定见 render.QA_VMAF_PASS）"
+              "description": "VMAF 低于此值 -> fail（默认 92，权威定义在 qavmaf.py 的 VMAF_PASS；标定依据见 references/v08-quality.md）"
             },
             "warn": {
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "介于 pass 与 warn 之间 -> pass+warning（默认 94）"
+              "description": "介于 pass 与 warn 之间 -> pass+warning（默认 96，权威定义在 qavmaf.py 的 VMAF_WARN）"
             },
             "sample_step": {
               "type": "integer",
@@ -699,8 +703,12 @@
         "ssim": {
           "type": "object",
           "additionalProperties": true,
-          "description": "SSIM 阈值（诊断项，不单独阻断）",
+          "description": "SSIM 阈值（诊断项，不单独阻断；默认 pass=0.95 / warn=0.98，权威定义在 qavmaf.py）",
           "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "惰性键：写它不生效（SSIM 本来就只是诊断项，不单独阻断）"
+            },
             "pass": {
               "type": "number",
               "minimum": 0,
@@ -712,6 +720,10 @@
               "maximum": 1
             }
           }
+        },
+        "require_vmaf": {
+          "type": "boolean",
+          "description": "惰性键：写它不生效（要强制 G11 不许记 skipped，请用 --strict-gates）"
         },
         "asr": {
           "type": "object",

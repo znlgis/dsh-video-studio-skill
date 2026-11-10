@@ -381,9 +381,22 @@ def render_report(work, out=None):
     ch = str(g.get("contentHash") or "")
     items = list(g.get("items") or [])
     counts = {OK: 0, FAIL: 0, SKIP: 0}
+    # 坏条目必须先归到"不通过"里，不能让它从三种计数里漏出去：
+    # 以前 st 不是 pass/fail/skipped 时 counts 只加了个 count[x]，而结论分支只看
+    # counts[FAIL] / counts[SKIP] —— 于是 "status": "warn"（或大小写写错、null）
+    # 的条目在矩阵里照样列出来，结论却写"所有门禁本次都执行且通过"。
+    # 这正是本模块开头要防的"看起来干净、其实没在查"，所以未知状态一律按 fail 计。
+    bad_items = 0
     for x in items:
-        st = x.get("status", SKIP)
-        counts[st] = counts.get(st, 0) + 1
+        if not isinstance(x, dict):
+            bad_items += 1
+            continue
+        st = x.get("status")
+        if st not in (OK, FAIL, SKIP):
+            bad_items += 1
+            counts[FAIL] += 1
+            continue
+        counts[st] += 1
     state, stale = signoff_state(work, ch)
     signed_n = sum(1 for v in state.values() if v["status"] == OK)
 
@@ -408,6 +421,9 @@ def render_report(work, out=None):
              % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(g.get("at") or time.time())))
     L.append("| 门禁合计 | pass %d · fail %d · skipped %d |"
              % (counts.get(OK, 0), counts.get(FAIL, 0), counts.get(SKIP, 0)))
+    if bad_items:
+        L.append("| 账本损坏条目 | %d 条（status 不是 pass/fail/skipped）——按 fail 计 |"
+                 % bad_items)
     L.append("| 人工签核 | %d/%d 有效 |" % (signed_n, len(GATE_ORDER)))
     L.append("")
     L.append("## 一、门禁矩阵")
@@ -416,6 +432,12 @@ def render_report(work, out=None):
         L.append("| 门禁 | 判据 | 结果 | 实测 / 说明 |")
         L.append("|---|---|---|---|")
         for x in items:
+            if not isinstance(x, dict):
+                # 坏条目不能让整份报告炸掉（.get 会 AttributeError，_finish_gates 只
+                # 打一行 WARN，交付目录里就没有 QC-REPORT.md 了）：照实列成一行。
+                L.append("| `?` | （账本条目损坏） | **fail** | %r |"
+                         % (str(x)[:60].replace("|", "\\|"),))
+                continue
             L.append("| `%s` | %s | **%s** | %s |"
                      % (x.get("id", "?"), x.get("title", ""), x.get("status", "?"),
                         (x.get("detail") or "-").replace("|", "\\|")))
@@ -478,6 +500,11 @@ def render_report(work, out=None):
                  "产出真实门禁再交付。" % why)
     elif counts.get(FAIL):
         L.append("- **未通过**：fail %d 项，按上表逐条修，别宣称完成。" % counts.get(FAIL))
+    elif bad_items:
+        # 条目损坏 / 状态值不认识：既不能算"通过"，也不该说成"查了没过"。
+        L.append("- **未判定**：账本里有 %d 条损坏的记录（不是合法 dict 或 status 不是 "
+                 "pass/fail/skipped），无法判断这些门禁到底查没查、过没过。"
+                 "**这不等于通过**——重跑 --stage qa 重新产出账本。" % bad_items)
     elif counts.get(SKIP):
         L.append("- **有条件通过**：skipped %d 项（明确没执行），交付时必须逐项说明原因。"
                  % counts.get(SKIP))

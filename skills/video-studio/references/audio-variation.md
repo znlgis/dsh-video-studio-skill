@@ -71,7 +71,8 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 - **必须保证**：同 `fingerprint` 逐采样一致；不同 fingerprint 的相关性显著下降（§5 阈值）。
 - 新增报告字段：`variation`（dict：`{"chord_swaps": n, "motif_shifts": n, "drum_ghosts": n}`），
   写进 work/score.json，方便审计。
-- legacy 路径（style=None）**逐字节不变**（selfcheck 第 20 条会验）。
+- legacy 路径（style=None）**逐字节不变**（`scorekit.py --selftest` 的第 20 条会验；
+  别和 `selfcheck.py` 的编号搞混——那边第 21 条只查 scorekit 同 seed 确定性）。
 
 ### 3.4 assets/scenes.py 的 cues()（B 路）
 
@@ -132,7 +133,7 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 2. `python skills/video-studio/scripts/scorekit.py --selftest` 全 PASS。
 3. `python skills/video-studio/scripts/sfxkit.py --selftest` 全 PASS。
 4. `python <REPO>/tools/ci_check.py` 全 PASS（在包根执行）。
-5. legacy 逐样本不变：selfcheck 第 20/26/33 条不得改动其断言。
+5. legacy 逐样本不变：`scorekit.py --selftest` 第 20 条 + `selfcheck.py` 第 26（风格 legacy）/33（音效 legacy）条，**这些断言不要改**。
 
 ## 6. 协作规则
 

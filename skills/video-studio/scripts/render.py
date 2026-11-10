@@ -91,14 +91,22 @@ def _file_sha1(path):
 
 
 def _frames_plan_stamp(tl, script, scenes_path, chunk):
-    """分块计划的指纹：时长 / scenes.py 内容 / 剧本快照任一变化，旧分块就画出错帧。
+    """分块计划的指纹：时长 / scenes.py 内容 / 剧本快照 / 时间轴内容任一变化，旧分块就画出错帧。
 
     断点续跑只看"分块文件在不在"是危险的：改一句台词 -> 时间轴变了 -> 旧分块
     仍然被跳过复用，最后拼出一部"画面和旁白对不上"的片子却不报错。
+
+    为什么不能只哈希 total/frames/fps：字幕窗口（voice_start/voice_end）与词级断点
+    （words_abs）都在 tl["scenes"] 里，而它们可以在 total 分毫不动的情况下变化
+    ——逐句被 min_dur 夹住时，重新合成的 TTS 只改句内时长、不改段落总长。只比三个
+    标量会让这种情况静默复用旧分块（字幕按上一版的词断行画）。代价是每家分块计划
+    多一次 timeline.json 的 json.dumps（几十 KB，相对渲一帧可忽略）。
     """
     body = json.dumps(dict(script), sort_keys=True, ensure_ascii=False, default=str)
+    tl_body = json.dumps(tl, sort_keys=True, ensure_ascii=False, default=str)
     payload = dict(total=round(float(tl["total"]), 3), frames=int(tl["frames"]),
                    fps=int(tl["fps"]), chunk=int(chunk),
+                   timeline=hashlib.sha1(tl_body.encode("utf-8")).hexdigest()[:16],
                    scenes=_file_sha1(scenes_path),
                    script=hashlib.sha1(body.encode("utf-8")).hexdigest()[:16])
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -325,6 +333,14 @@ def _theme_for(script):
     plan = resolve_style(script)
     if plan.get("legacy"):
         return None
+    # plan["theme"] 是 stylekit 合并过 film.json 的 visual.theme_overrides 之后的最终主题，
+    # resolve_style 的对比度体检（theme_lint）用的就是它。这里必须用同一份：否则
+    # scenes 画背景吃 overrides、字幕底板/字色仍用基础主题——字幕压在同色背景上会看不清，
+    # 而体检还照报通过（"门禁看着干净、其实没在查"）。老 stylekit / 老计划没有 theme
+    # 字段时回落到基础主题，行为与本行改动前一致。
+    th = plan.get("theme")
+    if isinstance(th, dict):
+        return th
     return _stylekit().THEMES[plan["theme_id"]]
 
 
@@ -1530,6 +1546,11 @@ def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
                       ("ssim_pass", "ssim_pass"), ("ssim_warn", "ssim_warn")):
         if cfg.get(ckey) is not None:
             kw[key] = float(cfg[ckey])
+    # 抽样步长：qavmaf.report 的正式参数名是 sample_step（schema 里也是这个名字）。
+    # 不传的话 mode=sample 永远按 qavmaf 内部默认步长 5 抽样——用户写了 sample_step
+    # 也毫无效果（"配置存在但没人读"正是最容易被忽略的那类静默缺陷）。
+    if cfg.get("sample_step") is not None:
+        kw["sample_step"] = max(1, int(cfg["sample_step"]))
     if cfg.get("ssim") and isinstance(cfg["ssim"], dict):
         for key, ckey in (("ssim_pass", "pass"), ("ssim_warn", "warn")):
             if cfg["ssim"].get(ckey) is not None:
@@ -2009,6 +2030,10 @@ def run_batch(a):
                                   "；".join(r["errors"][:3]) if r["errors"] else ""))
     if bad:
         rep_p = os.path.join(os.path.dirname(os.path.abspath(jobs[0]["work"])), "batch-report.json")
+        # 预检阶段 work/ 目录通常还不存在（子进程要跑起来才会建），这里必须先建父目录：
+        # 否则"清单里有一条写错"这个**本来只想报错退出**的路径，会先抛 FileNotFoundError，
+        # 用户看到的是"[ERROR] 文件/目录操作失败"，既丢了"一条都没跑"的说明，也没有台账。
+        os.makedirs(os.path.dirname(rep_p), exist_ok=True)
         json.dump(dict(phase="preflight", films=checks), open(rep_p, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
         raise SystemExit("[batch] 预检有 %d 条不通过，**一条都没跑**（清单/剧本先修好）：%s\n"
@@ -2157,11 +2182,18 @@ def main():
         直接跳过检查连痕都没有——那就成了静默。
         """
         if name:
+            # 本阶段本轮一定真的会跑，所以必须进 pending：`--stage tts` 会顺带排轴、
+            # `--stage stills` 会自动补 tts/layout，这些"顺手跑的下游"不在 _planned(stage)
+            # 里；不加的话 --strict-stale 下刚写完的 tts.json 会把 layout 判成
+            # "输入变了却还要用旧产物"，把自动补前置这条路径整个堵死。
+            pending = list(_planned(stage))
+            if name not in pending:
+                pending.append(name)
             errs, _warns = SW.report(a.work, [name], strict=a.strict_stale,
-                                      allow_stale=a.allow_stale,
-                                      ledger=_LEDGER, sources=_sources(),
-                                      self_built=not work_pre_exists,
-                                      pending=_planned(stage))
+                                     allow_stale=a.allow_stale,
+                                     ledger=_LEDGER, sources=_sources(),
+                                     self_built=not work_pre_exists,
+                                     pending=pending)
             if errs:
                 # --strict-stale 的承诺是"上游产物过时算失败"。stagewatch.report 只把
                 # 问题放进返回值（并往账本记一条 fail），它自己不抛异常——所以必须在这里
@@ -2398,8 +2430,10 @@ def main():
             _need(os.path.exists(os.path.join(a.work, "style.json")), "style.json 没写出来")
             _LEDGER.ok("style", "风格包解析", str(script["_style"].get("style")))
             _LEDGER.write_json()
-            _finish_gates(a)
-            return 0
+            # 不能无条件 return 0：--strict-gates 下 skipped 会让 _finish_gates 返回 1，
+            # 账本里也可能已经有 fail —— 门禁结论必须落到退出码，否则 CI 把失败当成功。
+            rc = _finish_gates(a)
+            return 1 if (rc or _LEDGER.fails()) else 0
 
     if stage in ("all", "tts"):
         _t0 = _stage_begin("tts")
@@ -2470,8 +2504,10 @@ def main():
         _stage_end("stills", _t0)
         _LEDGER.add("stills", "母版静帧已产出", GT.OK if made else GT.FAIL,
                     "%d 张（要人看过才算过：--stage accept --gate stills）" % len(made or []))
-        _finish_gates(a)
-        return 0
+        # 0 张静帧 = fail 门禁：以前这里无条件 return 0，`--stills 写错 id` 会
+        # "全部跳过 + 退出码 0"，CI 看不出根本没出图。
+        rc = _finish_gates(a)
+        return 1 if (rc or _LEDGER.fails()) else 0
 
     if stage == "qa":
         # qa 不重渲、也不重新合成：缺成片就直接报错；缺 scenes.py 只丢参考帧、不阻断质检。
@@ -2507,8 +2543,9 @@ def main():
             _stage_end("frames", _t0, frames=int(tl["frames"]))
             if stage == "frames":
                 _LEDGER.ok("frames", "逐帧渲染", "%d 帧（%s）" % (int(tl["frames"]), engine))
-                _finish_gates(a)
-                return 0 if not _LEDGER.fails() else 1
+                # 同上：strict-gates 下 skipped 也要反映到退出码（以前这里只看 fails()）。
+                rc = _finish_gates(a)
+                return 1 if (rc or _LEDGER.fails()) else 0
         if stage in ("all", "mux"):
             # mux 只需要 silent.mp4 + audio.wav：不加载 scenes.py（缺场景模块也能合成）
             _need(os.path.exists(silent), "没有 silent.mp4，先跑 --stage frames")
@@ -2519,8 +2556,9 @@ def main():
             _check_signoff("mux")
             if stage == "mux":
                 _LEDGER.ok("mux", "合成（视频流 copy + loudnorm）", a.out)
-                _finish_gates(a)
-                return 0 if not _LEDGER.fails() else 1
+                # 同上：strict-gates 下 skipped 也要反映到退出码（以前这里只看 fails()）。
+                rc = _finish_gates(a)
+                return 1 if (rc or _LEDGER.fails()) else 0
             if stage == "all":
                 _t0 = _stage_begin("qa")
                 errs = st_qa(film, tl, a.work, scenes_mod=mod, script=script,
