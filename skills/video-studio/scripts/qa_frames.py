@@ -213,6 +213,7 @@ def _probe(path) -> dict:
     path = str(path)
     info = {"fps": FPS_FALLBACK, "duration": 0.0, "width": None, "height": None,
             "has_audio": False, "sample_rate": None, "duration_source": "none"}
+    fps_parsed = False      # ffprobe 已经给出合法帧率？（拿它判要不要跑 ffmpeg -i 兜底）
     p = subprocess.run(
         [_ffprobe(), "-v", "error",
          "-show_entries",
@@ -247,6 +248,7 @@ def _probe(path) -> dict:
                     fps = _parse_rate(st.get("avg_frame_rate"))
                 if fps and 1.0 <= fps <= 240.0:
                     info["fps"] = float(fps)
+                    fps_parsed = True
                 if not info["duration"]:
                     try:
                         vd = float(st.get("duration") or 0.0)
@@ -262,7 +264,10 @@ def _probe(path) -> dict:
                         info["sample_rate"] = int(st.get("sample_rate") or 0) or None
                     except Exception:   # noqa: BLE001
                         pass
-    if info["width"] is None or info["fps"] == FPS_FALLBACK or not info["duration"]:
+    # 只在 ffprobe 真的没给全信息时才回退到 ffmpeg -i。
+    # 旧条件写的是 info["fps"] == FPS_FALLBACK，于是**所有 30 fps 成片**都会白跑一次
+    # ffmpeg -i（实测每片多一次进程 + 全文件解析），而 30fps 恰恰是本项目最常见情况。
+    if info["width"] is None or not fps_parsed or not info["duration"]:
         txt = ""
         try:
             q = subprocess.run([_ffmpeg(), "-hide_banner", "-i", path], capture_output=True)
@@ -624,6 +629,30 @@ def _event_kind(ev) -> str:
     return str(ev.get("kind") or ev.get("type") or "").strip().lower()
 
 
+def _src_of(obj) -> str:
+    """取 cue / event 的来源标记（web / pil / file / …）；没写返回空串。"""
+    try:
+        return str(obj.get("src") or "").strip().lower()
+    except AttributeError:                      # noqa: BLE001 —— 坏条目当"没写"
+        return ""
+
+
+def _src_compatible(cue, ev) -> bool:
+    """两个条目能不能做同步配对：只有**双方都明确标了来源且不同**时才认为时间基准不同。
+
+    v0.7.1 起 render.py 在 engine=web 时把三路 cue 合并（film.json / scenes.py / 页面），
+    其中 scenes.py 的 cue 按 PIL 时间轴、页面事件按页面时间轴——跨基准配对会报假 FAIL
+    （实测：cue ui_blip @7.725s 配 页面事件 @9.550s，dt=+1.825s）。
+    没标 src 的条目（手写 events / 老版本 cues.json）一律视作兼容，保持向后兼容。
+    """
+    cs, es = _src_of(cue), _src_of(ev)
+    return not (cs and es and cs != es)
+
+
+def _compatible_events(cue, events) -> list:
+    return [e for e in (events or []) if isinstance(e, dict) and _src_compatible(cue, e)]
+
+
 def _match_cue(cue, events, tol) -> tuple[dict | None, float | None, str]:
     """给一个 cue 找对应视觉事件。
 
@@ -640,6 +669,8 @@ def _match_cue(cue, events, tol) -> tuple[dict | None, float | None, str]:
     """
     ct = float(cue.get("t") or 0.0)
     typ = str(cue.get("type") or "").strip().lower()
+    # 只在**同时间基准**的事件里找（跨源配对会报假 FAIL，见 _src_compatible）
+    events = _compatible_events(cue, events)
     same = [e for e in events if _event_kind(e) == typ]
     if same:
         ev = min(same, key=lambda e: abs(float(e.get("t") or 0.0) - ct))
@@ -677,6 +708,9 @@ def sync_check(cues, events, tol=SYNC_TOL) -> list[dict]:
          超过容差就不配对——跨 kind 的"最近事件"不是"预期事件"，据此判超差会制造假 FAIL。
     配不上的 cue 视为"没有对应视觉事件"，不判超差（很多音效本来就没有画面事件）。
     ⚠ 命名约定见 references/frame-qa.md §2.5：events 与 cue 不同名时本检查会静默全过。
+    ⚠ 来源（src）过滤（v0.7.1 起）：cue 与事件**双方都标了 src 且不同**时不配对——web 引擎
+    三路合并时 PIL 时间轴的 cue 与页面事件基准不同，跨基准配对会报假 FAIL。跳过数量由
+    _sync_coverage().src_skipped 计数并在 _load_cues 里转成 warning（不静默）。
     """
     out = []
     cues = [c for c in (cues or []) if isinstance(c, dict)]
@@ -740,22 +774,30 @@ def _cue_anchor(cue) -> float | None:
 
 
 def _sync_coverage(cues, events) -> dict:
-    """统计"音画同步到底查了多少条"：返回 {"cues","anchors","same","judged"}。
+    """统计"音画同步到底查了多少条"：返回 {"cues","anchors","same","judged","src_skipped"}。
 
-    judged = 能给出 dt 判定的 cue 数 = 自带锚点的 cue + 至少存在同名 kind 事件的 cue。
+    judged = 能给出 dt 判定的 cue 数 = 自带锚点的 cue + 至少存在同名 kind 且**同源**事件的 cue。
     这是防"静默全过"的量化指标：judged == 0 而 cues > 0 时，sync 为空没有意义。
+    src_skipped = 因为"cue 与事件时间基准不同"（src 不同）而无法参与对照的 cue 数：
+    web 引擎三路合并（film.json/scenes.py 用 PIL 时间轴、页面事件用页面时间轴）时会有，
+    这种情况不能算"同步失败"，但也不能静默跳过 —— 由 _load_cues 转成 warning 点名。
     """
     cues = [c for c in (cues or []) if isinstance(c, dict)]
+    events = [e for e in (events or []) if isinstance(e, dict)]
     anchors = sum(1 for c in cues if _cue_anchor(c) is not None)
-    ev_kinds = {_event_kind(e) for e in (events or []) if isinstance(e, dict)}
     same = 0
+    src_skipped = 0
     for c in cues:
         if _cue_anchor(c) is not None:
             continue
-        if str(c.get("type") or "").strip().lower() in ev_kinds:
+        compat = _compatible_events(c, events)
+        if not compat and events:
+            src_skipped += 1
+            continue
+        if str(c.get("type") or "").strip().lower() in {_event_kind(e) for e in compat}:
             same += 1
     return {"cues": len(cues), "anchors": anchors, "same": same,
-            "judged": anchors + same}
+            "judged": anchors + same, "src_skipped": src_skipped}
 
 
 def _load_cues(cues_json):
@@ -789,7 +831,27 @@ def _load_cues(cues_json):
         info["blockers"].append("cues.json 结构不是对象")
         return [], [], ["cues.json 结构不是对象，跳过音画同步对照"], info
     cues = [c for c in (data.get("cues") or []) if isinstance(c, dict)]
-    events = [e for e in (data.get("events") or []) if isinstance(e, dict)]
+    raw_events = [e for e in (data.get("events") or []) if isinstance(e, dict)]
+    # 只认"带有限数值 t"的事件：sync_check 内部本来就这么过滤（e.get("t") is not None），
+    # 但 _sync_coverage / 命名约定守卫以前拿的是**未过滤**的列表 —— 于是 events 里只要有
+    # {"kind": "impact"} 这种缺 t 的条目，judged 就会被算成 1，命名约定守卫也被骗过，
+    # 结果是"门禁看起来在查、实际一条都没判"且不报警（实测：cues=1/events=[{kind:impact}]
+    # -> coverage judged=1，report errors=[] warnings=[]）。
+    events = []
+    dropped_t = 0
+    for e in raw_events:
+        t = e.get("t")
+        try:
+            tv = float(t)
+        except (TypeError, ValueError):
+            dropped_t += 1
+            continue
+        if not math.isfinite(tv):
+            dropped_t += 1
+            continue
+        ev = dict(e)
+        ev["t"] = tv
+        events.append(ev)
     bad_anchor = []
     for c in cues:
         for k in CUE_ANCHOR_KEYS:
@@ -800,8 +862,19 @@ def _load_cues(cues_json):
                 else:
                     c["_anchor_t"] = a
                 break
+    if dropped_t:
+        warns.append("cues.json 有 %d 个 event 缺数值 t（秒），已忽略；"
+                     "音画同步只看得到带时间的视觉事件" % dropped_t)
     cov = _sync_coverage(cues, events)
     info.update(cov)
+    if cov.get("src_skipped"):
+        msg = ("有 %d 条 cue 因时间基准不同未参与音画同步对照（cue 与事件的 src 不是同一来源）："
+               "web 引擎会把 film.json / scenes.py / 页面 cue 三路合并，其中 scenes.py 的 cue 按 "
+               "PIL 时间轴、页面事件按页面时间轴 —— 跨基准配对会报假 FAIL，所以跳过并在这里计数。"
+               "要让这些 cue 也参与对照，给 cue 写数值 visual_at（见 references/frame-qa.md §2.5）。"
+               % cov["src_skipped"])
+        warns.append(msg)
+        info.setdefault("notes", []).append(msg)
     if bad_anchor:
         warns.append("有 %d 条 cue 的 %s 不是数值秒，已忽略（只认数字，如 12.42）：%s"
                      % (len(bad_anchor), "/".join(CUE_ANCHOR_KEYS),
@@ -819,14 +892,14 @@ def _load_cues(cues_json):
         warns.append(msg)
         info["blockers"].append(msg)
     elif cues and events:
-        # 门禁静默失效的最后一道保险：同 kind 配对要求 events.kind == cue.type。
+        # 门禁静默失效的最后一道保险：同 kind 配对要求 events.kind == cue.type，
+        # 且按来源（src）过滤后仍要有可配对项（见 _src_compatible）。
         # 若一个都对不上，sync_check 会"零超差"通过——看起来干净，其实一条都没在查。
         cue_types = {str(c.get("type") or "").strip().lower() for c in cues}
         ev_kinds = {_event_kind(e) for e in events}
-        paired = cue_types & ev_kinds
-        if not paired and cov["anchors"] == 0:
-            msg = ("音画同步检查可能没生效：%d 个 cue 的 type 与 %d 个事件的 kind 没有任何同名项"
-                   "（同 kind 配对要求 events.kind == cue 的配方名）。"
+        if cov["same"] == 0 and cov["anchors"] == 0:
+            msg = ("音画同步检查可能没生效：%d 个 cue 的 type 与 %d 个事件的 kind 没有任何可配对的同名项"
+                   "（同 kind 配对要求 events.kind == cue 的配方名，且双方 src 需属同一时间基准）。"
                    "sync 为空不代表同步正确——请按 references/frame-qa.md §2.5 的命名约定登记事件，"
                    "或把某个 cue 故意改错 0.3 s 重跑做反证。" % (len(cue_types), len(ev_kinds)))
             warns.append(msg)
@@ -1010,6 +1083,11 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
             exp = float(expect_duration)
         except Exception:               # noqa: BLE001
             exp = None
+        if exp is not None and not math.isfinite(exp):
+            # nan 会让 abs(duration - nan) > 0.5 恒为 False —— 也就是"传了预期时长，校验静默失效"。
+            # 这属于调用方写错，不当作通过：记 warning 说明这次没查，别让它假扮成 PASS。
+            warnings.append("expect_duration 不是有限数字（%r），本次不做预期时长校验" % (expect_duration,))
+            exp = None
         if exp is not None and abs(duration - exp) > 0.5:
             errors.append("时长 %.3fs 与预期 %.3fs 不符（差 %+.3fs，容差 ±0.5s）"
                           % (duration, exp, duration - exp))
@@ -1026,7 +1104,10 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     warnings.extend(_static_warnings(drift, fps, blacks=blacks))
 
     rep = {"flicker": flicker, "black_windows": blacks, "luma": luma, "loudness": loud,
-           "sync": sync, "errors": errors, "warnings": warnings}
+           "sync": sync, "errors": errors, "warnings": warnings,
+           # sync_info：同步门禁到底查了多少（render.py:1172 一直在读 deep["sync_info"]["judged"]，
+           # 但 report() 以前从来不写这个键 —— 所以 QC 报告的 G9 永远显示"同步未判"）。
+           "sync_info": dict(sync_info)}
     if out_json:
         _write_json(rep, out_json)
     if out_png:
@@ -1302,9 +1383,12 @@ def _print_summary(rep, film, out_json=None, out_png=None):
     print("   成片:", film)
     n_sup = sum(1 for w in (rep.get("warnings") or []) if "高分异常被判为运动" in str(w))
     n_static = sum(1 for w in (rep.get("warnings") or []) if "画面长时间静止" in str(w))
-    print("   闪烁 %d（其中与已登记视觉事件重合 %d） / 空窗 %d / 同步超差 %d%s%s"
+    si = rep.get("sync_info") or {}
+    n_src = int(si.get("src_skipped") or 0)
+    print("   闪烁 %d（其中与已登记视觉事件重合 %d） / 空窗 %d / 同步超差 %d%s%s%s"
           % (len(fl), explained, len(rep.get("black_windows") or []),
              len(rep.get("sync") or []),
+             ("  / 跨基准未对照 %d" % n_src) if n_src else "",
              ("  / 静止段 %d" % n_static) if n_static else "",
              ("  / 高分异常待复核 %d" % n_sup) if n_sup else ""))
     print("   亮度采样 %d 点 / 响度采样 %d 点"
@@ -1729,8 +1813,13 @@ def selftest() -> int:
                          out_json=out_json, out_png=out_png)
             keys = {"flicker", "black_windows", "luma", "loudness", "sync",
                     "errors", "warnings"}
-            if set(rep) != keys:
-                return False, "顶层字段 %s 不符 §4.5" % sorted(rep)
+            # sync_info 是 v0.7.2 的**增量**字段（render.py 的 G9 从 deep["sync_info"]["judged"]
+            # 读"同步到底判了几条"，以前 report() 不写它 -> QC 报告永远显示"同步未判"）。
+            # 契约 §4.5 的 7 个键必须齐全，允许额外的只读统计键。
+            if not keys.issubset(set(rep)):
+                return False, "顶层字段 %s 缺 §4.5 键" % sorted(keys - set(rep))
+            if not isinstance(rep.get("sync_info"), dict):
+                return False, "sync_info 缺失或不是 dict：%r" % (rep.get("sync_info"),)
             if len(rep["flicker"]) != 1 or rep["flicker"][0].get("expected") is not False:
                 return False, "flicker=%s" % (rep["flicker"],)
             if len(rep["black_windows"]) != 1:
@@ -1776,9 +1865,10 @@ def selftest() -> int:
                 return False, "deep.png 缺失或过小"
             with open(out_json, encoding="utf-8") as fp:
                 data = json.load(fp)
-            if set(data) != {"flicker", "black_windows", "luma", "loudness", "sync",
-                             "errors", "warnings"}:
-                return False, "JSON 字段不符"
+            need = {"flicker", "black_windows", "luma", "loudness", "sync",
+                    "errors", "warnings"}
+            if not need.issubset(set(data)):
+                return False, "JSON 字段不符（缺 %s）" % sorted(need - set(data))
             img = Image.open(out_png)
             img.load()
             if img.width < 1000 or img.height < 600:

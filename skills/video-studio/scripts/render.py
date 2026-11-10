@@ -143,6 +143,26 @@ def _web_entry(script):
     return entry
 
 
+def _web_where(entry):
+    """报错里告诉用户 DURATION / FPS 到底写在哪：入口 HTML + 同目录脚本 + 一条能照抄的 grep。
+
+    只报入口 HTML 不够用：模板的 window.DURATION 写在 web/film.js 开头（engine.js 另有
+    兜底默认值），用户拿到 index.html 还是得全文翻。这里把候选文件一起列出来。
+    """
+    d = os.path.dirname(entry)
+    try:
+        scripts = sorted(n for n in os.listdir(d)
+                         if n.lower().endswith((".js", ".mjs", ".html")))
+    except OSError:
+        scripts = []
+    tail = ("要改的文件：%s（入口 HTML）" % entry)
+    if scripts:
+        tail += "；页面脚本在 %s%s" % (
+            d, "（%s）" % " / ".join(scripts) if len(scripts) <= 6 else "")
+    tail += "\n  查 DURATION / FPS 定义在哪：grep -n \"window.DURATION\\|global.DURATION\\|DURATION =\" %s" % d
+    return tail
+
+
 # ---------------------------------------------------------------- 装载
 def load_module(path: str, name="film_scenes"):
     """每次都用独立模块名 + 全新 module 对象，避免跨片污染（历史坑：渲染出上一部片）。"""
@@ -229,8 +249,13 @@ def resolve_style(script, work=None, verbose=True):
         return script["_style"]
     ST = _stylekit()
     plan = ST.resolve_script_style(script)
-    # 主题体检：坏主题现在拦，不要等渲完 300 帧
-    bad = ST.theme_lint(ST.THEMES[plan["theme_id"]])
+    # 主题体检：坏主题现在拦，不要等渲完 300 帧。
+    # v0.7.2 修：以前只体检**基础主题**（ST.THEMES[theme_id]），而 scenes 实际用的是
+    # plan["theme"]（= 基础主题 + film.json 的 visual.theme_overrides）。于是用 overrides
+    # 把 ink/bg 调成低对比度时，体检照样 PASS，渲完才发现字幕看不清。
+    # 实测：overrides ink=[30,30,30] / bg=[10,10,10] -> 基础主题 lint 为空，
+    #       最终主题 lint = ['ink 与背景对比度 1.09 < 7.0']。
+    bad = ST.theme_lint(plan.get("theme") or ST.THEMES[plan["theme_id"]])
     if bad:
         raise SystemExit("[主题体检失败] %s：%s" % (plan["theme_id"], "；".join(bad)))
     script["_style"] = plan
@@ -439,6 +464,19 @@ def st_cues(script, work, tl, engine="pil"):
         except Exception as e:                              # noqa: BLE001
             raise SystemExit("scenes.py 的 cues() 钩子报错：%s" % e) from e
         n_hook = _extend_safe(got, "scenes.py")
+        # v0.7.2：web 引擎下要提醒"两套时间基准混用"。
+        # scenes.py 的 cues() 是按 **PIL 时间轴**（timeline.json 的段落与 visual_at）算的，
+        # 页面动画则按 **页面自己的时间轴**（window.DURATION）。两者合并进同一份 cues.json 后：
+        #   - 音效会按 PIL 时间响（页面画面此刻可能正在另一幕）；
+        #   - 音画同步门禁能把这种配对识别为"跨基准"并跳过（qa_frames 的 src 过滤），不报假 FAIL，
+        #     但**声音与画面对不上的事实仍然存在**。
+        # 不静默：说清现象与两条改法，让用户自己选路线。
+        if engine == "web" and n_hook:
+            print("   [WARN] web 引擎下仍合并了 scenes.py 的 %d 条 cue —— 它们按 PIL 时间轴生成，"
+                  "页面动画按页面时间轴播放，两者基准不同：音效可能响在错误的幕上。" % n_hook)
+            print("          两种改法：① 走 PIL 路线（--engine pil）用 scenes.py 这套 cue；"
+                  "② 走 web 路线就把 cue 写进页面（window.getCues()）或 film.json 的 sfx.cues，"
+                  "并删除 scenes.py 的 cues() 钩子。")
 
     # web 引擎：从页面导出（需要浏览器）
     n_web = 0
@@ -537,18 +575,32 @@ def st_score(script, work, tl):
             "hold": float(plan_s["pacing"]["hold"])}
     mood_arg = str(mp.get("mood") or "steady")
     samples = report = None
-    for attempt in (
-            dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kw_fp),
-            dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kwargs),
-            dict(style=style_arg, mood=mood_arg, **kwargs),
-            dict(**kwargs)):
+    # v0.7.2：多级签名兼容链以前对**任何** TypeError 都继续换签名试，最后统一报
+    # "不接受任何一种已知签名"。scorekit 内部真出 TypeError（例如某个参数是 None 被拿去做
+    # 算术）时，用户会照着"签名不兼容"的方向白找半天。这里区分两类：
+    #   - 报错文本含 "unexpected keyword argument" -> 确实是不认识这个参数，换签名重试；
+    #   - 其它 TypeError -> 是**内部**错误，带上签名与错误信息立刻报，别吞。
+    attempts = (
+        dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kw_fp),
+        dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kwargs),
+        dict(style=style_arg, mood=mood_arg, **kwargs),
+        dict(**kwargs),
+    )
+    for attempt in attempts:
         try:
             samples, report = sk.render(float(tl["total"]), **attempt)
             break
-        except TypeError:
-            continue
+        except TypeError as err:
+            if "unexpected keyword argument" in str(err):
+                continue
+            raise SystemExit(
+                "[score] scorekit.render() 内部报错（不是签名不兼容，别去改调用参数）：%s\n"
+                "  本次签名：%s\n  要看完整 traceback：set RENDER_DEBUG=1 后重跑"
+                % (err, ", ".join(sorted(k for k in attempt if k != "self")))
+            ) from err
     if samples is None:
-        raise SystemExit("[score] scorekit.render() 不接受任何一种已知签名，无法出配乐")
+        raise SystemExit("[score] scorekit.render() 不接受任何一种已知签名，无法出配乐"
+                         "（试过 %d 种：从最全的参数到最简）" % len(attempts))
     if report and not plan_s["legacy"]:
         print("   配乐风格: %s / mood %s / %s BPM / %s"
               % (report.get("style") or style_arg, mp.get("mood"),
@@ -840,9 +892,36 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
     return sink.close()
 
 
+def _seg_usable(path, frames):
+    """已有分块能不能复用：体积够 + 头部声明的帧数与计划一致。
+
+    为什么不能只看 size>1024：Ctrl-C / 杀进程留下的半截 mp4 也 >1024，被当成
+    "已存在"跳过后，拼接只在最后报一句"拼接后时长 0.07s != 预期 29.00s"。
+    v0.7.2 起分块先写 .part 再 os.replace，正常中断不会留下半截正式文件；这里
+    再补一道头部 nb_frames 比对，挡住"文件在/大小对但帧数不对"的异常（例如被
+    外部工具截断过）。
+
+    注意：**不做** -count_frames 逐帧核对。实测 390 帧的块要 3.5 s（只读头部
+    0.2 s），长片几十个块会让每次 --resume 多花几分钟；被截断的 mp4 头部仍写着
+    完整 nb_frames，逐帧核对才是唯一能查出来的手段，代价与收益不成比例——真遇到
+    这种情况由拼接后的时长校验兜底，并在报错里指明怎么重来。
+    """
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) <= 1024:
+            return False
+        info = K.probe(path) or {}
+        for st in info.get("streams") or []:
+            if st.get("codec_type") == "video" and st.get("nb_frames"):
+                return int(st["nb_frames"]) == int(frames)
+        # 读不出 nb_frames（老封装 / ffprobe 版本差异）：退回到"体积够就信"
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
 def _render_chunk_worker(args):
     """分块渲染工作单元（供 multiprocessing 调用；函数必须模块级可 pickle）。"""
-    (tl_path, scenes_path, script_path, f0, f1, out_path, crf, preset) = args
+    (tl_path, scenes_path, script_path, f0, f1, out_path, crf, preset, part_path) = args
     tl = json.load(open(tl_path, encoding="utf-8"))
     script = json.load(open(script_path, encoding="utf-8"))
     script["_total"] = tl["total"]
@@ -857,7 +936,12 @@ def _render_chunk_worker(args):
         print("   [WARN] 子进程重解风格失败，回退到快照里的 _style：%s" % e)
         script["_style"] = json.load(open(script_path, encoding="utf-8")).get("_style")
     mod = load_module(scenes_path, "film_scenes_chunk_%d" % f0)
-    return _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=False)
+    # 先写 .part 再改名：中途被 Ctrl-C / 被杀时，目标文件名对应的永远是一段**完整**
+    # 编码结果。否则半截 mp4 只要 >1024 字节就会被 --resume 当成"已存在"跳过，
+    # 拼接后时长对不上才报错（实测：截断到 60 KB 的块 -> 拼接后 0.07s vs 预期 29.00s）。
+    _render_range(tl, mod, script, f0, f1, part_path, crf, preset, progress=False)
+    os.replace(part_path, out_path)
+    return out_path
 
 
 def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
@@ -921,13 +1005,31 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
 
     todo = []
     planned = set()
+    # 上次被中断留下的半成品（编码中途的残片）：不算分块，直接清掉，别让它占盘。
+    # 名字带 _part_ 前缀，既不会被 stale 检测当成"不属于当前计划的旧分块"，
+    # 也不会被 _seg_usable 当成"已存在的分块"跳过。
+    for n in os.listdir(seg_dir):
+        if n.startswith("_part_"):
+            try:
+                os.remove(os.path.join(seg_dir, n))
+            except OSError:
+                pass
     for (f0, f1) in plan:
         seg = os.path.join(seg_dir, "seg_%06d_%06d.mp4" % (f0, f1))
         planned.add(os.path.basename(seg))
-        if resume and os.path.exists(seg) and os.path.getsize(seg) > 1024:
+        if resume and _seg_usable(seg, int(f1) - int(f0)):
             print("   skip 段 %d-%d（已存在）" % (f0, f1))
             continue
-        todo.append((tl_path, scenes_path, script_path, f0, f1, seg, crf, preset))
+        if os.path.exists(seg):
+            # 存在但不可用（半截 / 时长不符）：删掉重渲，别让它混进拼接
+            print("   [WARN] 段 %d-%d 已存在但帧数/时长对不上，重渲（%d 字节）"
+                  % (f0, f1, os.path.getsize(seg)))
+            try:
+                os.remove(seg)
+            except OSError:
+                pass
+        part = os.path.join(seg_dir, "_part_" + os.path.basename(seg))
+        todo.append((tl_path, scenes_path, script_path, f0, f1, seg, crf, preset, part))
 
     # 旧计划留下的分块不会参与拼接，但会一直占盘：说出来，不静默
     stale = [n for n in os.listdir(seg_dir)
@@ -985,13 +1087,16 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
     if abs(float(page_fps) - float(tl["fps"])) > 1e-6:
         raise RuntimeError(
             "页面 FPS=%s 与 timeline fps=%s 不一致。浏览器逐帧渲染的帧号就是 f/FPS，"
-            "两边必须同帧率：改页面 window.FPS，或重新 --stage layout。"
-            % (page_fps, tl["fps"]))
+            "两边必须同帧率：把页面里的 window.FPS 改成 %s（或重新 --stage layout 生成"
+            "与页面一致的 timeline）。\n  %s"
+            % (page_fps, tl["fps"], tl["fps"], _web_where(entry)))
     if abs(float(page_dur) - float(tl["total"])) > 0.05:
         raise RuntimeError(
             "页面 DURATION=%.3fs 与 timeline 总时长 %.3fs 不一致（差 %.3fs）。\n"
-            "  页面里的时长必须等于 timeline.total；跑 --stage layout 后把新的 total 写进页面。"
-            % (float(page_dur), float(tl["total"]), abs(float(page_dur) - float(tl["total"]))))
+            "  页面里的时长必须等于 timeline.total；把页面里的 window.DURATION 改成 %.3f"
+            "（跑过新的 --stage layout 之后，取 timeline.json 的 total）。\n  %s"
+            % (float(page_dur), float(tl["total"]), abs(float(page_dur) - float(tl["total"])),
+               float(tl["total"]), _web_where(entry)))
 
     out = we.render_full(entry, silent, float(tl["total"]),
                          workers=max(1, int(jobs)),
@@ -1272,23 +1377,84 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
     return made
 
 
-def _finish_gates(a):
-    """一次运行收尾：落 gates.json + 写 out/QC-REPORT.md + 统一退出码。"""
+def _reload_ledger_from_disk(work, ledger):
+    """把 work/gates.json 里已有的门禁条目搬回内存账本（accept 这类独立进程用）。
+
+    只搬**内容指纹一致**的条目：指纹不同说明剧本/场景/引擎已经变过，那些结论属于
+    上一版内容，搬进来等于拿旧结论冒充本版（比丢条目更糟）。搬不回来时明确说一句，
+    让用户知道报告里的门禁矩阵为什么是空的（该重跑 --stage all）。
+    """
+    p = os.path.join(str(work), "gates.json")
+    if not os.path.exists(p):
+        return 0
+    try:
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        print("   [WARN] 旧账本读不了（%s）：报告里只会有本次的条目" % e)
+        return 0
+    if not isinstance(d, dict):
+        return 0
+    if str(d.get("contentHash") or "") != str(getattr(ledger, "content_hash", "") or ""):
+        print("   [WARN] 旧账本的内容指纹与当前不一致（剧本/场景/引擎改过），"
+              "不搬旧门禁结论：交付前请重跑 --stage qa")
+        return 0
+    n = 0
+    for it in d.get("items") or []:
+        if not isinstance(it, dict) or not it.get("id"):
+            continue
+        try:
+            ledger.add(str(it["id"]), str(it.get("title") or ""),
+                       str(it.get("status") or ""), str(it.get("detail") or ""),
+                       at=it.get("at"))
+            n += 1
+        except (ValueError, TypeError) as e:
+            print("   [WARN] 旧账本条目 %r 搬不回来：%s" % (it.get("id"), e))
+    for b in d.get("bypassed") or []:
+        if isinstance(b, dict) and b.get("what"):
+            ledger.bypassed.append(dict(what=str(b["what"]), why=str(b.get("why") or ""),
+                                        at=float(b.get("at") or time.time())))
+    return n
+
+
+def _report_path(a):
+    """QC 报告的唯一落点：**站在成片旁边**（--out 的目录），不猜 work 的兄弟目录。
+
+    v0.7.2 修：accept 分支以前用 dirname(abspath(work))/out/QC-REPORT.md，而 all/mux/qa
+    用 dirname(abspath(out))。--out 指到任何非 out/ 的目录（deliver/、中文工作区/成品/…）
+    时，签核更新的是另一份没人交付的文件，交付出去的那份仍是"未签核"——正好打穿
+    "报告是交付凭据"这条承诺。两处必须走同一个函数。
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(str(a.out))), "QC-REPORT.md")
+
+
+# 会写交付账本（work/gates.json + QC-REPORT.md）的阶段。中间产物阶段
+# （tts/layout/cues/score/sfx/audio）只做自己的事，不去覆盖上一轮完整跑出来的
+# 交付报告——否则 `--stage layout` 一次就会把「全片通过」的报告改写成「未判定」。
+_PERSIST_STAGES = ("style", "frames", "mux", "qa", "stills", "all", "accept")
+
+
+def _finish_gates(a, persist=True):
+    """一次运行收尾：落 gates.json + 写 QC-REPORT.md（在成片旁边）+ 统一退出码。
+
+    persist=False：只打印本次门禁汇总与退出码，不动磁盘上的交付账本（中间阶段用）。
+    """
     lg = _LEDGER
     if lg is None:
         return 0
     errs = lg.exit_errors(strict=bool(getattr(a, "strict_gates", False)))
-    try:
-        gj = lg.write_json()
-    except Exception as e:                                  # noqa: BLE001
-        print("[WARN] gates.json 写入失败:", e)
-        gj = ""
-    try:
-        rep = GT.write_report(a.work, os.path.join(
-            os.path.dirname(os.path.abspath(a.out)), "QC-REPORT.md"))
-    except Exception as e:                                  # noqa: BLE001
-        print("[WARN] QC 报告写入失败:", e)
-        rep = ""
+    gj = rep = ""
+    if persist:
+        # 交付账本只在交付阶段写；中间阶段（layout 等）写一次就会把上一轮
+        # 「pass 8 / skipped 1」的完整报告换成「只有本阶段一条」的半成品。
+        try:
+            gj = lg.write_json()
+        except Exception as e:                              # noqa: BLE001
+            print("[WARN] gates.json 写入失败:", e)
+        try:
+            rep = GT.write_report(a.work, _report_path(a))
+        except Exception as e:                              # noqa: BLE001
+            print("[WARN] QC 报告写入失败:", e)
     c = lg.counts()
     print("")
     print("== 门禁汇总：pass %d · fail %d · skipped %d%s"
@@ -1342,6 +1508,8 @@ def main():
                     help="每个 stage 往 work/cost.jsonl 记一行实测耗时")
     a = ap.parse_args()
 
+    # work/ 本来就不存在 = 这一跑自己产出全部中间物，别把"我还没跑到"当成"产物过时"。
+    work_pre_exists = os.path.isdir(a.work)
     try:
         os.makedirs(a.work, exist_ok=True)
     except OSError as e:
@@ -1355,8 +1523,18 @@ def main():
 
     # ---- 门禁账本（v0.6.0）----
     global _LEDGER
+    # engine=web 时把入口页实际引用的同目录页面脚本一起纳入内容指纹：web 的画面逻辑在
+    # web/*.js 里，不在 scenes.py 里——不纳入的话改动画后旧签核仍然"有效"，正好违背
+    # v0.6「签核绑内容指纹，改了画面代码旧签核自动失效」的承诺。
+    web_entry = ""
+    if engine == "web":
+        try:
+            web_entry = _web_entry(script)   # 入口页不存在时这里会 SystemExit（本来就该早失败）
+        except SystemExit:
+            web_entry = ""                   # 页面还没建：交给后面的 stage 报错，账本先照建
     _LEDGER = GT.GateLedger(a.work, script, scenes_path=a.scenes,
-                            script_path=a.script, engine=engine)
+                            script_path=a.script, engine=engine,
+                            web_entry=web_entry)
     if a.no_gate:
         _LEDGER.bypass("人工签核检查（--no-gate）", "本条不算通过，只记录")
         print("[gate] --no-gate：跳过人工签核检查（会在 QC 报告里留痕）")
@@ -1365,11 +1543,56 @@ def main():
         """源头输入：剧本与 scenes.py（改它们等于改了所有下游的依据）。"""
         return {"script": a.script, "scenes": a.scenes}
 
+    # 本次命令行**计划要跑**的 stage 集合：--stage all 展开成 10 个，单 stage 就是它自己。
+    # 用途见 stagewatch.check 的 pending：本阶段马上要用新输入重算，那种"输入变了"不是过时。
+    _ALL_ORDER = ("style", "tts", "layout", "cues", "score", "sfx", "audio",
+                  "frames", "mux", "qa")
+
+    def _planned(stage_name):
+        if stage_name == "all":
+            return list(_ALL_ORDER)
+        return [stage_name] if stage_name in STAGES else []
+
     def _stage_begin(name):
-        """stage 开始时查新鲜度并计时。返回 t0。"""
-        if name and not a.allow_stale:
-            SW.report(a.work, [name], strict=a.strict_stale, allow_stale=False,
-                      ledger=_LEDGER, sources=_sources())
+        """stage 开始时查新鲜度并计时。返回 t0。
+
+        report() 自己负责打印 "[stale] <stage>: <原因>" 与"最小重跑"两行
+        （v0.7.2 修：以前只调不接，用户只看到"最小重跑"不知道是哪个阶段、
+        为什么过时，得上 --stage explain 才知道）。
+        --allow-stale 也要调用：它承诺的是"放行并留痕"（QC 报告里记一条 skipped），
+        直接跳过检查连痕都没有——那就成了静默。
+        """
+        if name:
+            errs, _warns = SW.report(a.work, [name], strict=a.strict_stale,
+                                      allow_stale=a.allow_stale,
+                                      ledger=_LEDGER, sources=_sources(),
+                                      self_built=not work_pre_exists,
+                                      pending=_planned(stage))
+            if errs:
+                # --strict-stale 的承诺是"上游产物过时算失败"。stagewatch.report 只把
+                # 问题放进返回值（并往账本记一条 fail），它自己不抛异常——所以必须在这里
+                # 真的失败。以前丢弃了返回值，于是 --stage layout --strict-stale 报完过时
+                # 照跑、退出码 0，help 文本与行为对不上。
+                #
+                # 选择"立刻退出"而不是"跑完再在收尾处报"：过时的输入会把旧产物掺进
+                # 新结果（比如拿旧 cues.json 渲新时间轴的画面），跑完再报既已浪费渲染
+                # 时间，产出的东西也不能用。--stage all 同理：一发现就停。
+                # 不写 work/gates.json：那是**交付账本**（上一轮 --stage all 的完整
+                # 结论）。中间阶段一次失败就把它覆盖成单条 fail，用户手里那份
+                # QC-REPORT.md 会变成「未判定」，比留证据代价更大。失败证据在
+                # stdout 与退出码里，够定位。
+                # 原因行 report() 已经逐条打过了，这里只补"为什么停下 + 怎么办"，
+                # 不再把 errs 原样贴一遍。
+                raise SystemExit(
+                    "[stale][strict] 上面 %d 处上游产物过时 -> 本阶段不跑，直接失败。\n"
+                    "  （--strict-stale 下过时=失败；继续跑会把旧产物掺进新结果，"
+                    "白渲一遍还是错的。）\n"
+                    "  怎么办：\n"
+                    "    1) 照着每条下面的『最小重跑』先补上游，再重跑当前阶段\n"
+                    "    2) 确认旧产物可以接受：加 --allow-stale 显式放行"
+                    "（退出码 0，QC 报告里记 skipped）\n"
+                    "    3) 只想看现状不跑：python render.py --stage explain"
+                    % len(errs))
         return time.time()
 
     def _stage_end(name, t0, **extra):
@@ -1499,16 +1722,32 @@ def main():
               % (a.gate, rec["verdict"], _LEDGER.content_hash, rec["atText"]))
         if a.verdict == "rejected":
             print("[accept] 已记「否决」（不算签核通过）；改了内容后需重新签。")
-        p_rep = GT.write_report(a.work, os.path.join(
-            os.path.dirname(os.path.abspath(a.work)), "out", "QC-REPORT.md"))
+        # accept 是**独立进程**：本次账本是空的。直接 write_json 会把上一次 all/mux/qa
+        # 记的 8 条门禁结论整个覆盖掉（报告变成 "pass 0 · skipped 1"，交付凭据被打穿）。
+        # 先把磁盘上的旧账本搬回来（内容指纹一致才搬），再追加签核状态。
+        _reload_ledger_from_disk(a.work, _LEDGER)
+        # 签核状态进账本：否则报告里的"人工签核"一行仍是上一次 all/mux 收尾时记的
+        # skipped，用户签完再打开报告却看不到"已签"——签核就不算兑现。
+        try:
+            _check_signoff(stage)
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] 签核状态没记进账本:", e)
+        try:
+            _LEDGER.write_json()
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] gates.json 写入失败:", e)
+        p_rep = GT.write_report(a.work, _report_path(a))
         print("[accept] QC 报告已更新:", p_rep)
         return 0
 
     if stage in ("all", "style"):
-        _nm = "style" if stage == "style" else None
-        _t0 = _stage_begin(_nm)
+        # --stage all 也要把 style 这一行记进 manifest：以前 _nm 在 all 下是 None，
+        # 而 _stage_begin/_stage_end 对 None 是空操作 -> work/style.json 写出来了、
+        # manifest.json 却从来没有 style 记录。于是之后任何一次 `--stage style` 都会
+        # 命中「产物在但没有记录」的判据，报成 no-manifest（--stage all 的用户 100% 踩到）。
+        _t0 = _stage_begin("style")
         resolve_style(script, a.work)
-        _stage_end(_nm, _t0, n_tts=None)
+        _stage_end("style", _t0, n_tts=None)
         if stage == "style":
             print("== Style")
             _print_style(script["_style"])
@@ -1562,14 +1801,22 @@ def main():
         # 而文档三步上手就把它排在第 4 步（照抄必失败）。这里自动补前置：
         # 缺 tts.json 就真合成一次旁白（要联网），缺 timeline 就排一次轴——
         # 但每一步都**明说**自己在补什么，不偷偷跑。
+        # 自动补的这几步也要 _stage_begin/_stage_end：否则 manifest 里只有 stills 一条记录，
+        # 下次 --stage tts 会看到 tts.json 在、账本里没有 tts 记录 -> 误报「接手旧 work」。
         if not os.path.exists(tts_p):
             print("[stills] 没有 tts.json，自动先跑 --stage tts（需要联网合成旁白）")
+            _t0 = _stage_begin("tts")
             lines = st_tts(script, a.work, force=a.force_tts)
+            _stage_end("tts", _t0, n_tts=len(lines) if isinstance(lines, list) else None)
+            _t0 = _stage_begin("layout")
             tl_tmp = st_layout(script, a.work, lines)
+            _stage_end("layout", _t0)
             tl = tl_tmp
         elif not os.path.exists(tl_p):
             print("[stills] 没有 timeline.json，自动先跑 --stage layout")
+            _t0 = _stage_begin("layout")
             tl = st_layout(script, a.work)
+            _stage_end("layout", _t0)
         else:
             tl = ensure_tl()
         mod = load_scenes()
@@ -1635,13 +1882,27 @@ def main():
                     print("\n[质检未过] 成片已生成但没有通过门禁，按上面 [FAIL] 逐条修。")
                     return 1
                 return 0
-    rc = _finish_gates(a) if stage == "all" else 0
-    return rc
+    # 所有 stage 统一收尾：落 gates.json + QC-REPORT.md，并按门禁结果给退出码。
+    # v0.7.2 修：以前只有 style/frames/mux/qa 这几条分支自己调 _finish_gates，其余
+    # （tts/layout/cues/score/sfx/audio/stills）落在这行 return 0——于是 ledger 里
+    # 记的 fail 传不到退出码，"门禁失败 -> 非 0"这个承诺按 stage 不同行为不一样。
+    # 默认路径不受影响：没有 fail（且没开 --strict-gates）时 _finish_gates 返回 0。
+    rc = _finish_gates(a, persist=(stage in _PERSIST_STAGES))
+    return 1 if (rc or _LEDGER.fails()) else 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except KeyboardInterrupt:
+        # Ctrl-C：给「能不能续跑」的明确答复，而不是甩 traceback 或静默退出 130。
+        # 分块渲染先写 _part_ 再改名，所以中断不会留下被 --resume 误认的半截分块；
+        # 已完成的段下次加 --resume 直接复用，残留的 _part_ 会被自动清掉。
+        _setup_stdio()
+        print("\n[中断] 收到 Ctrl-C，本次运行已停止。", file=sys.stderr)
+        print("  已完成的产物都留在 work/ 里：分块渲染请加 --resume 续跑"
+              "（半成品段不会被当成完成段复用）。", file=sys.stderr)
+        sys.exit(130)
     except RuntimeError as e:
         # 领域错误（音视频时长不符 / 分块缺口 / 编码失败 / TTS 重试耗尽 …）给一句话，
         # 不要甩 Python traceback；要完整栈就 set RENDER_DEBUG=1。

@@ -293,6 +293,10 @@ def _decimate_mono(x: np.ndarray, k: int = 4) -> np.ndarray:
 def _moving_avg(v: np.ndarray, w: int) -> np.ndarray:
     """移动平均（边界复制），O(n)，用来做"一阶高通/低通"的近似。"""
     w = max(2, int(w))
+    if len(v) == 0:
+        # 空输入：np.pad(mode="edge") 对空数组直接抛 "can't extend empty axis 0"，
+        # 而空数组只在 duration*sr < 4（不足 4 个采样）时出现（duration=1e-6 实测崩这）。
+        return np.zeros(0, dtype=np.float64)
     pad = w // 2
     vp = np.pad(v, (pad, w - pad), mode="edge")
     c = np.cumsum(vp)
@@ -1432,7 +1436,10 @@ class Score:
         peak = float(np.max(np.abs(master))) if n else 0.0
         if peak > 1e-9:
             master *= np.float32(_db_amp(TARGET_PEAK_DB) / peak)
-        peak_db = float(20.0 * math.log10(max(float(np.max(np.abs(master))), 1e-12)))
+        # 亚采样时长（duration*sr < 1）时 master 是 (0,2)：np.max 对空数组直接抛
+        # "zero-size array to reduction operation maximum"（duration=1e-6 实测崩这）。
+        peak_db = (float(20.0 * math.log10(max(float(np.max(np.abs(master))), 1e-12)))
+                   if n else -240.0)
         lufs = _approx_lufs(master, self.sr)
         meas = [{"name": s["name"], "start": round(s["start"], 3), "end": round(s["end"], 3),
                  "energy": round(s["energy"], 3), "gain_db": round(lv["gain"], 2),
@@ -1441,7 +1448,7 @@ class Score:
             "rendered": True,
             "peak_dbfs": round(peak_db, 2),
             "lufs_approx": round(lufs, 1),
-            "dc_max": round(float(np.max(np.abs(master.mean(axis=0)))), 9),
+            "dc_max": round(float(np.max(np.abs(master.mean(axis=0)))), 9) if n else 0.0,
             "render_s": round(time.perf_counter() - t_start, 3),
             "measured_sections": meas,
         }
@@ -3125,6 +3132,12 @@ def save(path, x, sr: int = SR) -> Path:
     """把配乐写成 24-bit PCM WAV（通道数自适应；峰值由 render 保证 ≤ -1 dBFS）。"""
     path = Path(path)
     arr = np.asarray(x)
+    if arr.size and not np.all(np.isfinite(arr)):
+        # NaN 经 np.rint(...).astype(np.int32) 会落到 INT_MIN（不是 0），24-bit 写出后是
+        # 满幅负样本 —— 成片里一声爆响，且没有任何报错。与 filmkit.wav_write 同口径：报错。
+        bad = int(arr.size - np.count_nonzero(np.isfinite(arr)))
+        raise ValueError("scorekit.save: 采样里有 %d 个 NaN/Inf（%s）——配乐渲染有数值错误，"
+                         "拒绝写出损坏的 WAV" % (bad, path))
     if arr.ndim == 1:
         arr = np.stack([arr, arr], axis=1)
     _require(arr.ndim == 2 and arr.shape[1] in (1, 2), f"只支持单/双声道，收到 shape={arr.shape}")

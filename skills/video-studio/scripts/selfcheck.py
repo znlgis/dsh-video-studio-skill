@@ -42,6 +42,11 @@
   36  （v0.7.1）旁白优先默认值：配乐 -12 dB 基线 + 旁白侧链 6 dB（读 st_audio 源码）
   37  （v0.7.1）旁白清晰度 SNR 兜底：背景天然太响时自动补压到 >=12 dB
   38  （v0.7.1）无旁白时混音不受影响（voice_env/guard 不得空转改电平）
+  39  （v0.7.2）音频边界：极短旁白不崩、NaN/Inf 拒绝写盘、负起点与 seg=0 有守卫
+  40  （v0.7.2）QC 报告落点只有一个来源（--out 的目录，不许 accept 另算一套）
+  41  （v0.7.2）空门禁账本不许写成"通过"（没记录 != 通过）
+  42  （v0.7.2）单阶段产物归属：不许把别的 stage 写的文件算成自己的（假 stale）
+  43  （v0.7.2）theme_overrides 必须参与主题体检（否则能造出"看不清"的成片）
 """
 import argparse
 import io
@@ -77,7 +82,9 @@ def _setup_stdio():
 def run(name, fn):
     try:
         detail = fn()
-        if detail == "skip":
+        # 前缀判定：SKIP 的理由要能写给人看（"skip（缺 xxx.py）"），但 "skipped != 通过"
+        # 这条语义不能被理由文字冲掉——旧实现只认精确 "skip"，带理由的降级会被记成 PASS。
+        if str(detail or "").strip().lower().startswith("skip"):
             RESULTS.append(("SKIP", name, "-"))
             print("  SKIP %s" % name)
         else:
@@ -1003,6 +1010,137 @@ def t_mix_no_voice():
     assert abs(float(np.max(np.abs(out))) - 0.2) < 1e-5, "无旁白时配乐被改动了（峰值 %.3f）" % float(np.max(np.abs(out)))
     return "无旁白时背景不被压"
 
+# ------------------------------------------------------------------ v0.7.2 新增（全项目深审）
+def t_audio_edge_inputs():
+    """39 音频入口的边界：极短旁白不能崩、NaN/Inf 必须拒绝、seg=0 不许死循环。
+
+    这几条都是"真跑一次就会遇到"的输入。v0.7.1 及以前的行为：
+      * voice_env 在极短音频上 np.convolve(mode="same") 返回核长 -> np.maximum 广播失败；
+      * duck_voice 在"旁白比背景短"时包络与背景长度不同 -> 广播失败；
+      * wav_write 对 NaN 做 clip 再 astype(int16)，把 NaN 静默写成 0（写出损坏 WAV 却不报错）；
+      * AudioBus.place 传负起点时负下标切片 -> n=0 -> 广播崩；
+      * music_bed 的 seg=0 让 t 不前进 -> while 死循环（有 100000 次上限，6 秒片要 2 分钟）。
+    """
+    import numpy as np
+    short = np.full(600, 0.2, dtype=np.float32)          # 12.5 ms
+    assert len(K.voice_env(short)) >= 1, "voice_env 对极短音频返回空包络"
+    bg = np.full((K.SR, 2), 0.2, dtype=np.float32)
+    got = K.duck_voice(bg, short, depth_db=6.0)
+    assert got.shape == (K.SR, 2), "duck_voice 在旁白比背景短时形状不对: %r" % (got.shape,)
+    m = np.full((600, 2), 0.2, dtype=np.float32)
+    assert K.duck(m, short).shape == (600, 2), "duck 在短信号上形状不对"
+
+    with tempfile.TemporaryDirectory() as d:
+        for name, bad in (("nan", np.float32("nan")), ("inf", np.float32("inf"))):
+            p = os.path.join(d, name + ".wav")
+            try:
+                K.wav_write(p, np.array([0.1, bad], dtype=np.float32))
+            except ValueError:
+                assert not os.path.exists(p), "wav_write 报错了却仍写出文件（%s）" % p
+            else:
+                raise AssertionError("wav_write 把 %s 静默写进了 WAV（应当报错）" % name)
+
+    bus = K.AudioBus(2, K.SR, 1.0)
+    bus.place(np.ones(1000, dtype=np.float32), -0.25)     # 负起点：从 0 秒开始，不许崩
+    bus2 = K.AudioBus(2, K.SR, 0.3)
+    try:
+        bus2.music_bed([[220.0, 277.0, 330.0]], seg=0.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("music_bed(seg=0) 没被拒绝（会死循环）")
+    return "极短旁白不崩 / NaN·Inf 拒绝 / 负起点与 seg=0 有守卫"
+
+
+def t_report_single_source():
+    """40 QC 报告落点只能有一个来源：--out 的目录。
+
+    v0.7.2 修的真 bug：all/mux/qa 用 dirname(abspath(out))，accept 用
+    dirname(abspath(work))/out。--out 指到 deliver/ 时，签核更新的是另一份没人
+    交付的文件，交付出去的那份仍是"未签核"——正好打穿"报告是交付凭据"这条承诺。
+    """
+    import types
+    try:
+        import render
+    except Exception as e:                                  # noqa: BLE001
+        return "skip（import render 失败：%s）" % e
+    assert hasattr(render, "_report_path"), "render 没有统一的 _report_path"
+    a = types.SimpleNamespace(out=os.path.join("deliver", "film.mp4"), work="work")
+    got = render._report_path(a)
+    want = os.path.join("deliver", "QC-REPORT.md")
+    assert os.path.abspath(got) == os.path.abspath(want), \
+        "报告没落在 --out 旁边：%s（期望 %s）" % (got, want)
+    src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
+    n = src.count('"QC-REPORT.md"')
+    assert n == 1, "QC-REPORT.md 路径出现了 %d 处（应只有 _report_path 一处，否则又会两边漂移）" % n
+    return "报告落点统一到 --out 目录（源码里只有一处拼接）"
+
+
+def t_empty_ledger_not_pass():
+    """41 门禁账本为空时，QC 报告不许说"通过"。
+
+    render_report 原来 if counts.get(FAIL): ... else: **通过**——gates.json 被删、
+    写坏、或根本没跑 qa 时，交付凭据会是一份宣称通过的纸。这条盯的就是那个 else。
+    """
+    try:
+        import gates as GT
+    except Exception as e:                                  # noqa: BLE001
+        return "skip（没有 gates.py：%s）" % e
+    with tempfile.TemporaryDirectory() as d:
+        p = GT.write_report(d, os.path.join(d, "QC-REPORT.md"))
+        txt = open(p, encoding="utf-8").read()
+    assert "**通过**" not in txt, "空门禁账本却写成『通过』（交付凭据撒谎）"
+    assert "未判定" in txt, "空门禁账本没写『未判定』（用户会以为跑过了）"
+    return "0 条门禁 -> 未判定（不是通过）"
+
+
+def t_stage_io_no_phantom_output():
+    """42 单阶段连跑不许报"自己的产物不见了"（假 stale）。
+
+    v0.7.2 修：stagewatch 的 STAGE_IO[style].outputs 里把 voice_plan.json 也算成
+    style 的产物，而它其实是 tts 阶段写的（render.py 的 st_tts）。于是 --stage style
+    连跑两次，第二次必然报"产物 voice_plan.json 不见了"；打开 --strict-stale 就变成
+    硬失败——SKILL.md 第 3 步（全新项目第一条生产命令）自己走不通。
+    """
+    try:
+        import stagewatch as SW
+    except Exception as e:                                  # noqa: BLE001
+        return "skip（没有 stagewatch.py：%s）" % e
+    style_out = list((SW.STAGE_IO.get("style") or {}).get("outputs") or [])
+    tts_out = list((SW.STAGE_IO.get("tts") or {}).get("outputs") or [])
+    if "voice_plan.json" in style_out:
+        assert "voice_plan.json" in tts_out, \
+            "voice_plan.json 被算成 style 的产物，但没有别的 stage 认领它（假 stale 会回来）"
+    dup = [(n, st) for st, io in SW.STAGE_IO.items() for n in (io.get("outputs") or [])
+           if n in style_out and st != "style"]
+    assert not dup, \
+        "style 的产物被别的 stage 也声明成输出（会产生假 stale）：%r" % (dup,)
+    return "style 产物 %s / tts 产物 %s" % (",".join(sorted(style_out)), ",".join(sorted(tts_out)))
+
+
+def t_theme_overrides_linted():
+    """43 theme_overrides 必须参与主题体检（否则用户能造出"看不清"的成片）。
+
+    v0.7.2 修的真 bug：render.resolve_style 以前只体检**基础主题**
+    （ST.THEMES[theme_id]），而 scenes 实际用的是 plan[theme]（基础主题 + film.json 的
+    visual.theme_overrides）。于是把 ink/bg 调成低对比度时体检照样 PASS，渲完才发现字幕看不清。
+    实测 overrides ink=[30,30,30]/bg=[10,10,10]：基础主题 lint 为空，最终主题 lint 报对比度 1.09。
+    """
+    import stylekit as ST
+    base = {'title': 'x', 'style': 'auto',
+            'lines': [{'id': 'l01', 'kind': 'body', 'text': 'y'}]}
+    p = ST.resolve_script_style(dict(base, visual={'theme_overrides': {
+        'ink': [30, 30, 30], 'bg': [10, 10, 10]}}))
+    assert ST.theme_lint(ST.THEMES[p['theme_id']]) == [], \
+        "前提变了：基础主题本身就有 lint 问题，这条断言失去意义"
+    bad = ST.theme_lint(p['theme'])
+    assert bad, '低对比度的 theme_overrides 没被 lint 抓到（用户能造出看不清的字幕）'
+    src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
+    assert "ST.theme_lint(plan.get('theme')" in src or 'ST.theme_lint(plan.get("theme")' in src, \
+        "render.resolve_style 仍在体检基础主题而不是最终主题"
+    return "最终主题参与体检（%s）" % "；".join(bad)[:60]
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -1042,6 +1180,11 @@ CASES = [
     ("36 旁白优先默认值（配乐 -12 dB + 侧链）", t_music_gain_default),
     ("37 旁白清晰度 SNR 兜底（背景太响时自动补压）", t_snr_guard),
     ("38 无旁白时混音不受影响", t_mix_no_voice),
+    ("39 音频边界：极短/NaN·Inf/负起点/seg=0", t_audio_edge_inputs),
+    ("40 QC 报告落点只有一个来源", t_report_single_source),
+    ("41 空门禁账本不许写成通过", t_empty_ledger_not_pass),
+    ("42 单阶段产物归属（防假 stale）", t_stage_io_no_phantom_output),
+    ("43 theme_overrides 参与主题体检", t_theme_overrides_linted),
 ]
 
 

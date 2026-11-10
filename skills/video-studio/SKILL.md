@@ -26,6 +26,11 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 > 下文的 `<SKILL_DIR>` 指**本次加载技能时 `skill` 工具回报的 `resourceBase.path`**。装成插件后它就是
 > 本插件包内的 `skills/video-studio/`（profile 的 `node_modules/@dsh-gis/dsh-video-studio-skill` 是链接）。
 > 找不到时按名字定位：`find ~ -path '*/skills/video-studio/scripts/filmkit.py'`。
+>
+> `<REPO>` 指**包根**（仓库根，或装好后 profile 里的 `node_modules/@dsh-gis/dsh-video-studio-skill/`），
+> 即 `<SKILL_DIR>` 往上两级。**`tools/` 与 `schemas/` 在 `<REPO>` 下，不在 `<SKILL_DIR>` 下**：
+> 本节的 `cp <SKILL_DIR>/scripts/...` 把技能拷成 `myfilm/` 之后，那个工作目录里**没有** `tools/`，
+> 所以 `tools/estimate.py` 这类仓库工具要按 `<REPO>/tools/...` 调用（或从包/仓库里取一份过来）。
 
 ```bash
 # 1) 建工作目录，拷模板
@@ -39,7 +44,7 @@ cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,s
 cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：38 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：43 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
@@ -59,7 +64,9 @@ python render.py --script film.json --scenes scenes.py --work work --stage still
 # 4.5) 【v0.6】先算成本再开渲：帧数 / 各阶段耗时 / 磁盘 / 分块建议
 #      项目原则是"成本敏感"，而在此之前开渲前拿不到任何数字。
 #      （--json 可机读；有 work/timeline.json 时用真实时长，否则按字数粗估并标注）
-python <SKILL_DIR>/../../../tools/estimate.py --script film.json --jobs 4
+# 注意：estimate.py 是**仓库/包里的工具**（<REPO>/tools/），不在 skills/video-studio/ 里，
+#      quickstart 拷出来的 myfilm/ 也不会有它；想用就按包根路径调用，或从包/仓库里复制过来。
+python <REPO>/tools/estimate.py --script film.json --jobs 4
 
 # 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
@@ -401,7 +408,7 @@ v0.7 把指纹推进到**结构层**（详见 **references/audio-variation.md**�
 验收工具（改音频相关代码后必须跑）：
 
 ```bash
-python tools/audio_similarity.py --strict    # A/B/C 三组阈值，失败 exit 1
+python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败 exit 1（在包根执行）
 ```
 
 ## 6. 停留窗口：让观众看清楚，而不是整片放慢（v0.3.0）
@@ -428,7 +435,7 @@ python tools/audio_similarity.py --strict    # A/B/C 三组阈值，失败 exit 
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（38 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（43 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -473,8 +480,9 @@ python render.py ... --stage accept --gate stills --note "看过联系表"   # �
 
 ```bash
 python render.py ... --stage explain          # 哪些阶段过时了、为什么、最小重跑命令
-python render.py ... --stage explain --json   # 机读
 python render.py ... --stage qa --strict-stale   # 有过时就失败（CI / 交付前）
+# 机读：问 stagewatch（render.py 的 explain 只打人读文本，不接受 --json）
+python scripts/stagewatch.py --work work --json
 ```
 
 机制：每个 stage 结束往 `work/manifest.json` 记一行 `{stage, at, inputs:{名:指纹}, outputs:{名:指纹}}`；
@@ -634,11 +642,13 @@ v0.4 给了两条真正能用的路：
 - `references/pipeline.md` — 八阶段详细规格、契约 JSON 格式、目录约定、并行分工
 - `references/scene-authoring.md` — 场景函数写法、构图规则、Canvas/CDP 方案、超采样与后处理
 - `references/audio.md` — 采样级混音、程序化配乐/音效、响度链路、循环环境音、提示点系统
+- `references/audio-variation.md` — **（v0.7）片间差异**：内容指纹怎么进和声/进行/动机/鼓型，legacy 兼容与验收阈值
 - `references/sfx-design.md` — **（v0.3）音效设计**：物理拆解流程、配方表、听感诊断表、QC 规则
 - `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
 - `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
 - `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单
 - `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/style/scenes.py 各要重跑什么
+- `references/style-packs.md` — **（v0.5）风格包**：主题/配乐/声线字段、三级指纹规则、加第 9 套风格的步骤
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
 
 ## 10. 脚本资产
@@ -650,15 +660,15 @@ v0.4 给了两条真正能用的路：
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**38 条**"曾真的坏过"的断言，不联网 20 秒出结论（可选模块缺失标 SKIP） |
+| `scripts/selfcheck.py` | 回归自检：**43 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP） |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
 | `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
 | `scripts/qa_frames.py` | **（v0.3）帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
 | `assets/scenes.py` | 场景模板（开场/正文卡片/收尾 + **`cues()` 提示点钩子示范**），含缓存排版与预烘焙背景的正确写法 |
 | `assets/film.json` | 剧本模板（含 `hold`/`bpm`/`music`/`sfx.cues`/`engine` 等新字段） |
-| `../../schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，模板由 `tools/ci_check.py` 第 12 项守着 |
-| `../../tools/estimate.py` | **（v0.6）开渲前预演**：帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，`--json` 可机读。基准常量集中在文件顶部，换机请重测后回填 |
+| `<REPO>/schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，模板由 `tools/ci_check.py` 第 12 项守着 |
+| `<REPO>/tools/estimate.py` | **（v0.6）开渲前预演**：帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，`--json` 可机读。基准常量集中在文件顶部，换机请重测后回填 |
 | `assets/web/` | **（v0.3）浏览器页面模板**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本 |
 | `requirements.txt` | **（v0.4）Python 依赖清单**：必需（numpy/Pillow/edge-tts）/ 强烈建议（cv2）/ 可选（scipy、playwright）三档，带注释说明"缺了会怎样"。`pip install -r requirements.txt` 即可 |
 
@@ -697,7 +707,7 @@ v0.4 给了两条真正能用的路：
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 38 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 自检：selfcheck PASS 43 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
 > 音频：work/score.json 的 variation 非 0（指纹参与了结构变奏）、audio_similarity --strict 全 PASS
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
@@ -759,7 +769,23 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ## 13. 升级须知（从旧版迁移要动的地方）
 
-### 13.0 v0.3.0 → v0.4.0
+### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 要做什么）
+
+**一句话**：v0.4 的老项目**不写新字段就能继续跑**（不写 `style` = legacy 行为，配乐逐样本不变），
+但**工作目录要多拷文件**，且有两处默认值变了要重新听。按版本逐条过：
+
+| 从 → 到 | 你要做的动作 | 依据 |
+|---|---|---|
+| v0.4 → **v0.5** | 新工作目录多拷 `scripts/stylekit.py`（**必需**，render 直接 import）、`scripts/voicekit.py`（可选，缺了单声线降级）；`--stage` 多出 `style`，`--stage all` 顺序变为 `style → tts → …`；改用 `style: "auto"` 才会自动选风格，不写仍是 legacy | CHANGELOG 0.5.0「升级须知（v0.4 -> v0.5）」 |
+| v0.5 → **v0.6** | **必需**多拷 `scripts/gates.py`、`scripts/stagewatch.py`（少一个 render.py 直接 `ModuleNotFoundError`）；首次跑会多出 `work/manifest.json` / `work/gates.json` / `out/QC-REPORT.md`，属新增文件 | CHANGELOG 0.6.0「升级须知（v0.5 → v0.6）」 |
+| v0.6 → **v0.7** | 想吃到「配乐/音效随内容变化」就保持 `style: "auto"`，**不要**写死 `music.seed` 或关掉 `seed_from_content`；音效想更丰富就把提示点写进 `scenes.py` 的 `cues()` | CHANGELOG 0.7.0「升级须知（v0.6 → v0.7）」 |
+| v0.7 → **v0.7.1** | 配乐基线默认值从 `music.gain_db=-1.5` 变成 **-12**（模板也已改），有人声处再压配乐 6 dB / 音效 3 dB；**之前手调过 `gain_db`/`duck_db` 的片子要重新听一遍**（现在背景整体更低）。显式写 0 可关掉对应侧链 | CHANGELOG 0.7.1「修了什么」+ `assets/film.json` 的 `music` 默认值 |
+| v0.7.1 → **v0.7.2** | `QC-REPORT.md` 现在**只落在 `--out` 的目录**（以前 `accept` 分支按 `work` 的兄弟目录算，`--out deliver/film.mp4` 时签核会更新到另一份没人交付的文件）。如果你用 `--out` 指到了非 `out/` 的目录，交付时请看新位置；旧的 `out/QC-REPORT.md` 不会被再写 | `render._report_path()` 的 docstring + `selfcheck` 第 40 条（本轮新增） |
+
+> 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
+> 升级后建议按 §14 重跑一次自检（43 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+
+### 13.1 v0.3.0 → v0.4.0
 
 **多数项目不用改任何东西**（默认行为向后兼容），但下面几处会**改变你看到的输出或报错**：
 
@@ -773,7 +799,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 | `film.json` 校验变严 | 缺 `text` / `lines` 空 / id 重复 / bpm 非法 会直接报错 | 按提示修剧本 |
 | 可选 peer 改成按需 import | 缺 `@deepseek-ai/dsh-skill-filesystem` 时插件不再整体加载失败，只是不挂载技能并打日志 | 想用技能就按日志里的命令装依赖 |
 
-### 13.1 v0.2 → v0.3.0
+### 13.2 v0.2 → v0.3.0
 
 **兼容性优先：老项目不做任何改动也能跑**（`engine` 默认 `pil`、`music.mode` 缺省时按老的和弦床走、`whoosh` 行为保留）。
 
@@ -790,7 +816,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 **新增文件**：`sfxkit.py` / `scorekit.py` / `webengine.py` / `qa_frames.py` / `assets/web/`（都是可选，缺失时对应能力自动降级并打印 WARN）。
 
-### 13.2 v0.1 → v0.2（历史）
+### 13.3 v0.1 → v0.2（历史）
 
 | 变更 | v0.1 | v0.2 | 迁移动作 |
 |---|---|---|---|
@@ -808,7 +834,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 38 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 43 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（24 项，会真起无头浏览器，约 15 秒）
@@ -821,7 +847,7 @@ selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依
 **别把"没装可选件"和"坏了"混为一谈**。
 
 > **仓库级体检**（v0.4 起）是另一层，别和 selfcheck 搞混：
-> `python tools/ci_check.py -v` 只查"这个仓库作为可分发包是否完整"（语法/JSON/依赖白名单/
+> `python <REPO>/tools/ci_check.py -v`（在包根执行）只查"这个仓库作为可分发包是否完整"（语法/JSON/依赖白名单/
 > 打包卫生/文档路径引用），**不需要 ffmpeg、字体或网络**，任何机器都能跑；
 > selfcheck 查的是"技能还能不能真的出片"。两层都在 CI 里跑。
 >

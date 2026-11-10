@@ -12,6 +12,11 @@
   <canvas id="stage" width="1920" height="1080"></canvas>
 
   <script src="engine.js"></script>
+  <!-- 页面契约（references/web-engine.md §3）：DURATION 必须等于成片秒数。
+       模板默认由场景表自动推导（film.js 的 resolveDuration）；
+       要锁死就取消下面这行注释并改成 timeline.json 的 total：
+  <script>window.WINDOW_DURATION = 12.0;</script>
+  -->
   <script src="film.js"></script>
   <script src="qa_text.js"></script>
   <script>

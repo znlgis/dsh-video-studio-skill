@@ -861,6 +861,14 @@ def main(argv=None):
         return _cli_list()
     if a.calibrate:
         only = [x.strip() for x in (a.only or "").split(",") if x.strip()] or None
+        if only:
+            unknown = [x for x in only if x not in VOICE_PERSONAS]
+            if unknown:
+                # 以前拼错 persona 会静默变成空集合 -> 打出"所有音色都合成失败（多半是没网）"，
+                # 把配置错误伪装成网络错误。这里先点名校验，给人话可照抄的可用清单。
+                print("[未知 persona] %s；可用：%s"
+                      % ("、".join(unknown), " / ".join(PERSONA_IDS)), file=sys.stderr)
+                return 2
         return calibrate(only, log=print)
     if a.plan:
         return _cli_plan(a.plan)

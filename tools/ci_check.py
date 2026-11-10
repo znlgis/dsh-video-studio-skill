@@ -6,17 +6,22 @@
 它检查的是**这个仓库作为"可分发的技能插件"的完整性**，而不是视频能不能出片
 （出片要靠 selfcheck.py + 真跑一遍 render.py，见 SKILL.md §14）：
 
-  1  语法：所有 .py 能编译、index.js 能通过 node --check
-  2  JSON：所有 .json 能被解析（locale / marketplace-entry / assets / package.json）
-  3  技能清单：SKILL.md 的 frontmatter 有 name/description，name 与目录名一致
-  4  依赖白名单：scripts/*.py 与 assets/*.py 只允许 stdlib + numpy/PIL/cv2/scipy/edge_tts/playwright
+  1  语法：scripts/ + assets/ + tools/ 下的 .py 全部能编译（SyntaxWarning 也算失败）
+  2  JS 语法：根目录与 assets/web/ 的 .js 通过 node --check
+  3  JSON：所有 .json 能被解析（locale / marketplace-entry / assets / package.json），
+     且 package.json 的 version 与 README 徽章一致
+  4  技能清单：SKILL.md 的 frontmatter 有 name/description，name 与目录名一致
+  5  依赖白名单：scripts/*.py 与 assets/*.py 只允许 stdlib + numpy/PIL/cv2/scipy/edge_tts/playwright
      （技能是"整目录拷走就能跑"的，偷偷引入一个三方依赖会在用户机器上炸）
-  5  打包卫生：npm pack 的内容里不能有 __pycache__ / *.pyc / 临时目录
-  6  文档引用：SKILL.md / references 里引用的 scripts/xxx.py、assets/xxx 必须真的存在
-  7  Python 3.9 语法兼容（THIRD_PARTY_NOTICES 写的是 3.9+；这里只验语法，运行期 API 仍要真机实测）
-  8  Markdown 围栏成对（不平衡会让整篇渲染成代码块）
-  9  GitHub Actions workflow 里 step 名的裸冒号（会让整份 workflow 静默不跑）
-  10  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
+  6  打包卫生：npm pack 的内容里不能有 __pycache__ / *.pyc / 临时目录；必需文件必须在包里
+  7  文档路径：SKILL.md / references / README 里引用的 scripts/xxx.py、assets/xxx，
+     以及正文里的相对 Markdown 链接与图片，必须真的存在
+  8  Python 3.9 语法兼容（THIRD_PARTY_NOTICES 写的是 3.9+；这里只验语法，运行期 API 仍要真机实测）
+  9  Markdown 围栏成对（不平衡会让整篇渲染成代码块；按围栏状态机判，不是数出现次数）
+  10  CI workflow：step 名的裸冒号（会让整份 workflow 静默不跑），
+     以及 run 里 python <路径>.py 指向的文件必须存在
+  11  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
+  12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验模板（规则只留一份）
 
 退出码：0 全过；1 有 FAIL。每一项都打印证据，不打"可能有问题"。
 """
@@ -35,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "video-studio"
 SCRIPTS = SKILL / "scripts"
 ASSETS = SKILL / "assets"
+TOOLS = ROOT / "tools"
 REFS = SKILL / "references"
 
 # 技能允许的三方依赖（与 README「环境前提」一一对应；加东西必须先改文档）
@@ -65,20 +71,38 @@ def check(name: str, fn):
 
 # ---------------------------------------------------------------- 1 语法
 def _py_files() -> list[Path]:
-    out = sorted(SCRIPTS.glob("*.py")) + sorted(ASSETS.glob("*.py"))
+    """技能脚本 + 技能资产里的 .py + 仓库工具脚本。
+
+    tools/ 以前不在扫描范围里，于是 ci_check.py 自己的 invalid escape sequence
+    （Python 3.12 的 SyntaxWarning）一路带到发布，没人发现——"语法检查"只查了半边。
+    """
+    out = sorted(SCRIPTS.glob("*.py")) + sorted(ASSETS.glob("*.py")) + sorted(TOOLS.glob("*.py"))
     return [p for p in out if p.name != "__init__.py"]
 
 
 def t_syntax_py():
+    """编译所有 .py；SyntaxWarning 也算失败。
+
+    为什么要警告转错误：invalid escape sequence（反斜杠 + 普通字母，比如 Python 里的"\\d"）在 3.12 起是 SyntaxWarning，
+    只打印不失败——脚本照跑，但 warning 会出现在每个用户的第一次导入里，而且掩盖真问题。
+    """
+    import warnings
+
     bad = []
     for p in _py_files():
         src = p.read_text(encoding="utf-8")
         try:
-            compile(src, str(p), "exec")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", SyntaxWarning)
+                compile(src, str(p), "exec")
+            warns = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+            if warns:
+                bad.append("%s:%s SyntaxWarning: %s"
+                           % (p.name, warns[0].lineno, warns[0].message))
         except SyntaxError as e:
             bad.append("%s:%s %s" % (p.name, e.lineno, e.msg))
     assert not bad, "；".join(bad)
-    return "%d 个 .py 全部可编译" % len(_py_files())
+    return "%d 个 .py 全部可编译（含 tools/，SyntaxWarning 记失败）" % len(_py_files())
 
 
 def t_syntax_js():
@@ -107,7 +131,17 @@ def t_json():
             json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:                                  # noqa: BLE001
             raise AssertionError("%s: %s" % (p.relative_to(ROOT), e))
-    return "%d 个 .json 全部可解析" % len(files)
+    # 版本号三处必须一致：package.json / README 徽章 / marketplace-entry 描述里提到的 vX.Y。
+    # 这条以前没人查，于是 README 的徽章停在 0.6.0、包已经是 0.7.1 也没人发现（真发生过）。
+    ver = json.loads((ROOT / "package.json").read_text(encoding="utf-8")).get("version", "")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ver), "package.json version 不像 semver：%r" % ver
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    badges = re.findall(r"badge/version-(\d+\.\d+\.\d+)-", readme)
+    assert badges, "README 里找不到 version 徽章（badge/version-x.y.z）"
+    bad_badges = [b for b in badges if b != ver]
+    assert not bad_badges, ("README 徽章版本 %s 与 package.json version %s 不一致"
+                            % ("/".join(bad_badges), ver))
+    return "%d 个 .json 全部可解析；version=%s 与 README 徽章一致" % (len(files), ver)
 
 
 # ---------------------------------------------------------------- 3 技能清单
@@ -170,8 +204,12 @@ def t_pack():
             or f.startswith(("work/", "out/", ".team/"))]
     assert not junk, ("包内不该有这些文件（临时产物/日志/媒体，属于打包污染）：%s"
                       % ", ".join(junk[:6]))
-    must = ["index.js", "cordis.patch.yml", "icon.svg", "package.json",
-            "skills/video-studio/SKILL.md", "skills/video-studio/scripts/filmkit.py"]
+    must = ["index.js", "cordis.patch.yml", "icon.svg", "package.json", "README.md",
+            "skills/video-studio/SKILL.md", "skills/video-studio/scripts/filmkit.py",
+            "skills/video-studio/scripts/render.py", "skills/video-studio/scripts/selfcheck.py",
+            "skills/video-studio/assets/film.json", "skills/video-studio/references/quality-gates.md",
+            "schemas/film.schema.json", "tools/ci_check.py", "tools/estimate.py",
+            "tools/audio_similarity.py", "tools/selftest_noscipy.py"]
     missing = [m for m in must if m not in files]
     assert not missing, "包内缺文件：%s" % ", ".join(missing)
     return "%d 个文件 / %.0f KB" % (len(files), meta.get("size", 0) / 1024.0)
@@ -191,8 +229,54 @@ def t_doc_refs():
             cands = [SKILL / rel, SKILL / "references" / rel, ROOT / rel]
             if not any(c.exists() for c in cands):
                 missing.append("%s 里引用 %s（不存在）" % (md.name, rel))
+    # 正文里的相对 Markdown 链接 / 图片是另一类：上面的正则只覆盖 scripts|assets|references 前缀，
+    # [说明](references/foo.md) 之外的写法（比如 [x](../schemas/film.schema.json)）会漏掉。
+    link_bad = []
+    for md in md_files:
+        if not md.is_file():
+            continue
+        txt = md.read_text(encoding="utf-8")
+        for m in re.finditer(r"!?\[([^\]]*)\]\(([^)\s]+)\)", txt):
+            target = m.group(2)
+            if re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|#)", target):
+                continue                                          # 外链 / 纯锚点
+            rel = target.split("#", 1)[0]
+            if not rel:
+                continue
+            cands = [md.parent / rel, ROOT / rel, SKILL / rel]
+            if not any(c.exists() for c in cands):
+                link_bad.append("%s 里链接 %s（不存在）" % (md.name, target))
+        # README 的效果图是 HTML <img src="docs/...">，不是 Markdown 语法，单独查一遍。
+        for m in re.finditer(r"<img[^>]*\ssrc=[\"']([^\"']+)[\"']", txt):
+            target = m.group(1)
+            if re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", target):
+                continue
+            rel = target.split("?", 1)[0].split("#", 1)[0]
+            cands = [md.parent / rel, ROOT / rel]
+            if rel and not any(c.exists() for c in cands):
+                link_bad.append("%s 里 <img src> 指向 %s（不存在）" % (md.name, target))
+    # 第三种：带占位符的路径（<SKILL_DIR>/... 与 <REPO>/...）。ci_check 之前只认 scripts/|assets/|references/
+    # 前缀，SKILL.md 里 <SKILL_DIR>/../../../tools/estimate.py 这种写错两级相对层级的命令一直没人查——
+    # 实测它指向仓库上一级，是条**跑不通的命令**。语义：<SKILL_DIR> = skills/video-studio/，
+    # <REPO> = 包根（仓库根）。注意**不能**把它们当成"当前工作目录"：quickstart 把技能拷进 myfilm/ 后，
+    # 那里的 skills 与 tools 都不存在，但文档里的占位符指的是包内位置，仍然应当成立。
+    ph_bad = []
+    ph_re = re.compile(r"(<SKILL_DIR>|<REPO>)/([A-Za-z0-9_.\-/{}*]+)")
+    for md in md_files:
+        if not md.is_file():
+            continue
+        for ln_no, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
+            for m in ph_re.finditer(line):
+                base = SKILL if m.group(1) == "<SKILL_DIR>" else ROOT
+                rel = m.group(2).rstrip(".,;:")
+                if any(ch in rel for ch in "{}*"):
+                    rel = rel.split("{")[0].split("*")[0].rsplit("/", 1)[0] if ("{" in rel or "*" in rel) else rel
+                if not (base / rel).exists():
+                    ph_bad.append("%s:%d 的 %s/%s 不存在" % (md.name, ln_no, m.group(1), rel))
+    assert not ph_bad, "；".join(sorted(set(ph_bad))[:8])
+    assert not link_bad, "；".join(sorted(set(link_bad))[:8])
     assert not missing, "；".join(sorted(set(missing))[:8])
-    return "%d 篇文档的路径引用全部存在" % sum(1 for m in md_files if m.is_file())
+    return "%d 篇文档的路径引用 + 正文相对链接全部存在" % sum(1 for m in md_files if m.is_file())
 
 
 # ---------------------------------------------------------------- 7 体积
@@ -226,28 +310,45 @@ def t_py39():
 
 # ---------------------------------------------------------------- 9 Markdown 围栏平衡
 def t_md_fences():
-    """每篇 .md 的 \`\`\` 必须成对：围栏不平衡会让后面整篇渲染成代码块，人眼未必看得出。"""
+    """每篇 .md 的代码围栏必须成对（按围栏状态机判，不是数出现次数）。
+
+    v0.7.1 之前这里写的是 startswith("\\`\\`\\`")——那是一个无效转义，Python 把反斜杠原样保留，
+    于是永远匹配不到真实的 ``` 行，检查恒过（"看着在查，其实查不出"，正是本仓库最怕的形态）。
+    现在改成状态机：开围栏记下字符与长度，闭合围栏必须同字符、长度不小于开口、且不带信息串。
+    """
     bad = []
     files = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "THIRD_PARTY_NOTICES.md",
              SKILL / "SKILL.md"] + sorted(REFS.glob("*.md"))
+    fence_re = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
     for p in files:
         if not p.is_file():
             continue
-        n = sum(1 for line in p.read_text(encoding="utf-8").splitlines()
-                if line.lstrip().startswith("\`\`\`"))
-        if n % 2:
-            bad.append("%s: %d 个围栏（奇数）" % (p.name, n))
+        opened = None
+        close_line = None
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            m = fence_re.match(line)
+            if not m:
+                continue
+            fence, info = m.group(1), m.group(2).strip()
+            if opened is None:
+                opened, close_line = (fence[0], len(fence)), i
+            elif fence[0] == opened[0] and len(fence) >= opened[1] and not info:
+                opened = None
+        if opened is not None:
+            bad.append("%s: 第 %d 行开的 %s 围栏没有闭合" % (p.name, close_line, opened[0] * 3))
     assert not bad, "；".join(bad)
-    return "%d 篇 Markdown 围栏都成对" % len([p for p in files if p.is_file()])
+    return "%d 篇 Markdown 围栏都成对（状态机判定）" % len([p for p in files if p.is_file()])
 
 
 # ---------------------------------------------------------------- 10 CI workflow 基本语法
 def t_ci_workflow():
-    """GitHub Actions workflow 的「裸冒号」陷阱。
+    """GitHub Actions workflow 的两个高频错误。
 
-    「- name: selftest: xxx」里第二个冒号会让整份 YAML 解析失败，而 GitHub 上的表现是
-    「workflow 根本没跑」——没有任何报错提示，最容易被忽略（本项目真踩过）。
-    不引第三方 YAML 库（CI 里不一定装了 pyyaml），只查这一类高频错误。
+    1) 「裸冒号」：「- name: selftest: xxx」里第二个冒号会让整份 YAML 解析失败，而 GitHub 上的表现是
+       「workflow 根本没跑」——没有任何报错提示，最容易被忽略（本项目真踩过）。
+    2) 「run 里指向不存在的脚本」：`run: python tools/xxx.py` 写错路径时，本地 ci_check 看不出来，
+       要等 CI 跑红——而那一步本来就该秒级失败，所以在这里先查一遍文件是否存在。
+    不引第三方 YAML 库（CI 里不一定装了 pyyaml），只查这两类高频错误。
     """
     wf = ROOT / ".github" / "workflows"
     if not wf.is_dir():
@@ -257,16 +358,26 @@ def t_ci_workflow():
     for f in files:
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             m = re.match(r"^(\s*)-\s+name:\s*(.+)$", line)
-            if not m:
+            if m:
+                val = m.group(2).strip()
+                if val[:1] not in ("'", '"') and ": " in val:
+                    bad.append("%s:%d 的 step 名含未加引号的冒号（YAML 会解析失败，整份 workflow 不跑）"
+                               % (f.name, i))
                 continue
-            val = m.group(2).strip()
-            if val[:1] in ("'", '"'):
+            # run 块里的 python <相对路径>.py：工作目录可能是仓库根，也可能是技能 scripts 目录。
+            # 只看「行首是 python」的行（含 `run: |` 块里的缩进行），不做 YAML 解析，避免把注释/名称
+            # 里的 python 字样当命令（误报比漏报更烦人）。
+            if not re.match(r"^\s*(?:-\s+)?(?:run:\s*)?python[0-9.]*\s+", line):
                 continue
-            if ": " in val:
-                bad.append("%s:%d 的 step 名含未加引号的冒号（YAML 会解析失败，整份 workflow 不跑）"
-                           % (f.name, i))
+            for pm in re.finditer(r"python[0-9.]*\s+(?!-)([A-Za-z0-9_./-]+\.py)", line):
+                rel = pm.group(1)
+                if rel.startswith("/") or ":" in rel:
+                    continue                                  # 绝对路径 / URL，不归本检查管
+                cands = [ROOT / rel, SCRIPTS / rel, SKILL / rel]
+                if not any(c.exists() for c in cands):
+                    bad.append("%s:%d 里 python 调用的 %s 不存在" % (f.name, i, rel))
     assert not bad, "；".join(bad[:4])
-    return "%d 个 workflow 的 step 名没有裸冒号" % len(files)
+    return "%d 个 workflow：step 名无裸冒号、run 里的 python 脚本都存在" % len(files)
 
 # ---------------------------------------------------------------- 12 film.json 契约
 def t_film_contract():

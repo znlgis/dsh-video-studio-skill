@@ -1,11 +1,17 @@
 # 仓库体检 + 技能自检。
 #
 # 两个 job 分工明确（别把两者混为一谈）：
-#   repo     —— tools/ci_check.py：语法 / JSON / 技能清单 / 依赖白名单 / 打包卫生 / 文档路径引用。
-#               不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：29 条"曾经真的坏过"的回归断言。
+#   repo     —— tools/ci_check.py 的 12 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
+#               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
+#               film.json 契约）。不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
+#   skill    —— skills/video-studio/scripts/selfcheck.py：43 条"曾经真的坏过"的回归断言。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
+#
+# 为什么 skill 只在 Linux 跑：selfcheck 要 ffmpeg（libx264/aac/loudnorm）+ 中文字体，
+# windows-latest 镜像是否预装这两样没有核实过（本机 Windows 能跑≠runner 能跑）；
+# 与其押一个可能天天红的 job，不如先只跑 repo 检查。等核实（或改用 setup-ffmpeg + 字体下载）
+# 之后再决定要不要补 Windows skill job——这条留给维护者决策，不是遗漏。
 #
 # 不联网跑 TTS：selfcheck 只用合成信号与本地编码，不需要 edge-tts 真的合成。
 name: ci

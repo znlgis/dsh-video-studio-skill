@@ -37,8 +37,15 @@ BIG_BYTES = 8 << 20          # > 8 MB 走 size+mtime 快路径
 # 早期版本只跟踪"stage 之间的产物"，于是"改了一句台词但没重跑 tts"查不出任何过时——
 # 而那正是最需要它报警的场景（旧 tts 配新剧本 = 配音和字幕全错位）。
 STAGE_IO = {
-    "style":   dict(sources=["script"], inputs=[], outputs=["style.json", "voice_plan.json"]),
-    "tts":     dict(sources=["script"], inputs=["style.json"], outputs=["tts.json"]),
+    # voice_plan.json 是 **tts** 阶段写的（render.py 的 st_tts：非 legacy 才写），
+    # 不是 style 写的——v0.7.2 前它被挂在 style.outputs 下，于是单跑 `--stage style`
+    # 之后每次重跑都报「产物 voice_plan.json 不见了」（其实从来没写过），
+    # 开了 --strict-stale 就直接失败，而 --stage style 是全新项目的第一条生产命令。
+    # legacy 剧本本来就不写这个文件：check() 只在「上次记录的是具体指纹、现在没了」
+    # 时才报 output-missing，所以 legacy 下记为 missing 不会被当成永久过时。
+    "style":   dict(sources=["script"], inputs=[], outputs=["style.json"]),
+    "tts":     dict(sources=["script"], inputs=["style.json"],
+                    outputs=["tts.json", "voice_plan.json"]),
     "layout":  dict(sources=["script"],
                     inputs=["tts.json", "style.json", "voice_plan.json"],
                     outputs=["timeline.json", "sub.srt", "sub.ass"]),
@@ -54,8 +61,11 @@ STAGE_IO = {
                     inputs=["timeline.json", "audio.wav", "cues.json"],
                     outputs=["silent.mp4"]),
     "mux":     dict(sources=["script"], inputs=["silent.mp4", "audio.wav"], outputs=[]),
+    # gates.json 不列进 qa 的产物：它由 _finish_gates 在 style/frames/mux/qa 任何一次收尾时
+    # 都会写，不能当"qa 跑过"的证据（否则删掉 qa 记录后它还在，会误判 no-manifest）。
+    # qa/sheet.png（联系表）只在 --stage qa 里生成，才是真凭证。
     "qa":      dict(sources=["script", "scenes"], inputs=[],
-                    outputs=["gates.json", "qa/sheet.png"]),
+                    outputs=["qa/sheet.png", "qa/deep.json"]),
     "stills":  dict(sources=["script", "scenes"], inputs=["timeline.json", "style.json"],
                     outputs=[]),
 }
@@ -123,6 +133,19 @@ def save(work, d):
     return p
 
 
+def _producer_of(art):
+    """work/ 里的产物文件是哪个 stage 写的（由 STAGE_IO 反查，找不到返回 None）。"""
+    for st, io in STAGE_IO.items():
+        if art in (io.get("outputs") or []):
+            return st
+    return None
+
+
+# 硬类型：这些永远参与 --strict-stale 判定（产物丢了 / 源头改了 / 上游自己就过时）
+HARD_KINDS = ("source-changed", "output-missing", "no-manifest", "input-stale")
+SOFT_KINDS = ("input-pending",)
+
+
 def _src_fp(kind, sources):
     """源头输入指纹：script=剧本（film.json）、scenes=场景代码（scenes.py）。"""
     p = (sources or {}).get(kind)
@@ -146,32 +169,64 @@ def snapshot(work, stage, sources=None):
     return d["stages"][str(stage)]
 
 
-def check(work, stage, sources=None):
+def _upstream_hard(work, stage, sources=None, _seen=None):
+    """产出某输入的 stage 是否有**硬**问题（源头变了 / 它的输入也变了 / 产物丢了）。
+
+    只取硬类型：软化过的 input-pending 不算（那只说明"它也会重跑"）。
+    递归带上 _seen 防环——STAGE_IO 是 DAG，但用户手改的 manifest 不该把检查器搞成死循环。
+    """
+    if not stage:
+        return []
+    issues = check(work, stage, sources, pending=(), _seen=_seen)
+    return [it["reason"] for it in issues if it.get("kind") in HARD_KINDS]
+
+
+def check(work, stage, sources=None, self_built=False, pending=(), _seen=None):
     """stage 开始前查新鲜度：返回问题列表（每项含 stage / reason / rerun）。
+
+    pending: 本次命令行**已经计划要跑**的 stage 集合（render.py 传 args.stage 展开后的列表）。
+      对本 stage 来说，"自己上次跑完之后上游变了" + "本轮马上就要重跑自己" = 正常待办，
+      不是过时（`--stage frames mux` 里 frames 刚重出 silent.mp4，mux 报"输入变了"是自相矛盾）。
+      这类问题标 kind="input-pending"、soft=True：照实打印，但不参与 --strict-stale 判定。
+      真问题不受影响：上游 stage **自己**过时（它的输入也变了）仍按 input-stale/output-missing 硬报，
+      所以"单独跑 mux、上游 frames 早过时"照样失败。
 
     只报"这一跑真的会读到旧东西"的情况：
       1) 本 stage 的上游输入与上次记录不同（上游被重跑过，或人手改过文件）；
       2) 本 stage 自己的产物比它的输入还旧（上次跑到一半被中断）。
     另一个 stage 的产物变了但**不**是本周 stage 的输入时，不报（跟我们无关）。
+
+    self_built: 这些输入是**本次运行自己刚写出来的**（render.py --stage all 跑在
+    一个刚建的 work/ 上）。此时"manifest 没有本阶段记录"只是因为我们还没跑到它，
+    不是旧产物；报 no-manifest 等于让全新目录的首跑刷一屏假警报（v0.7.2 修）。
     """
     io = STAGE_IO.get(str(stage))
     if io is None:
         return []
+    _seen = set(_seen or ())
+    if str(stage) in _seen:
+        return []
+    _seen.add(str(stage))
     d = load(work)
     stages = d.get("stages") or {}
     rec = stages.get(str(stage))
+    planned = set(str(x) for x in (pending or ()))
     issues = []
     if not isinstance(rec, dict):
-        # 从没跑过这个 stage：只有当"别的 stage 有记录"（说明是接手别人的 work 目录，
-        # 或这套产物是旧版本跑出来的）时才提示；全新目录第一次跑不刷噪声。
-        present = [k for k in io["inputs"]
-                   if _fp(k, work) != "missing"]
-        # 只有"有声明产物"的阶段才谈得上"跑过但没记录"。stills / mux 的产物不在 work 里
-        # （mux 写 --out，stills 写 work/stills/），无从证明跑过，就别冤枉它们过时。
-        if stages and io["outputs"] and len(present) == len(io["inputs"]) and io["inputs"]:
+        # 从没记录过这个 stage。判据必须能区分两件事：
+        #   * 「还没跑到它」——分步跑（SKILL.md 主推：--stage style / tts / layout / …）时，
+        #     刚跑完 style，tts 的输入 style.json 当然存在、manifest 里当然没有 tts 记录。
+        #     这**不是**过时，按"输入齐了"报会把这套标准用法整个打成红（--strict-stale 下必然失败）。
+        #   * 「跑过它但查不到记录」——旧版本产物 / 手改 / 复制来的 work 目录。
+        # 区分证据：本 stage **自己声明的产物**已经在 work/ 里。产物在、记录没有，才证明它跑过。
+        # 输入齐全不能当证据（分步跑时本来就齐），输出存在才可以。
+        present_out = [k for k in (io.get("outputs") or []) if _fp(k, work) != "missing"]
+        # stills / mux 的产物不在 work/（mux 写 --out，stills 写 work/stills/），无从证明跑过，
+        # 不冤枉它们；self_built（本次新建的 work/）连 manifest 都刚建，也不报。
+        if not self_built and stages and present_out:
             issues.append(dict(stage=str(stage), kind="no-manifest",
-                               reason="work 里有 %s 但 manifest.json 没有本阶段的记录"
-                                      "（旧版本跑过 / 手改过）" % "、".join(io["inputs"]),
+                               reason="work 里已经有本阶段的产物（%s），但 manifest.json 没有本阶段的记录"
+                                      "（旧版本跑过 / 手改过）" % "、".join(present_out),
                                rerun=RERUN_HINT.get(str(stage), "")))
         return issues
     # 源头先查：剧本 / scenes.py 改了但本 stage 没重跑 -> 产物一定过时
@@ -191,16 +246,44 @@ def check(work, stage, sources=None):
     for name in io["inputs"]:
         now = _fp(name, work)
         was = old_inputs.get(name, "missing")
-        if now != was:
+        if now == was:
+            continue
+        if str(stage) in planned:
+            # 本阶段本轮就要重跑：拿新输入重算正是它该干的事。照实打一行（不静默），
+            # 但不参与 strict 判定——否则 `--stage frames mux` 这种 stagewatch 自己建议的
+            # 重跑组合，会在 mux 开跑前被自己拦下，strict 下永远出不了片。
+            issues.append(dict(
+                stage=str(stage), kind="input-pending", file=name, soft=True,
+                reason="输入 %s 在上次跑本阶段之后变了（%s -> %s）；本阶段本轮会重跑，"
+                       "按新输入重算" % (name, was, now),
+                rerun=RERUN_HINT.get(str(stage), ""),
+            ))
+            continue
+        # 不由本阶段重算时：还要确认产出这个输入的 stage **自己**没坏。
+        # 上游自己就过时（源头改了 / 它的输入也变了 / 它的产物丢了），那这台旧货是真的不能用。
+        prod = _producer_of(name)
+        ups = _upstream_hard(work, prod, sources, _seen) if prod else []
+        if ups:
+            issues.append(dict(
+                stage=str(stage), kind="input-stale", file=name,
+                reason="输入 %s 变了（%s -> %s），并且产出它的 %s 阶段本身就已经过时：%s"
+                       % (name, was, now, prod, "；".join(ups[:3])),
+                rerun=RERUN_HINT.get(str(stage), ""),
+            ))
+        else:
             issues.append(dict(
                 stage=str(stage), kind="input-changed", file=name,
                 reason="输入 %s 在上次跑本阶段之后变了（%s -> %s），本次会拿**新输入**算，"
                        "但它下游的产物仍是旧的" % (name, was, now),
                 rerun=RERUN_HINT.get(str(stage), ""),
             ))
-    # 自己的产物丢了：上次跑到一半被中断 / 被删 / 被挪走（与"输入变了"是两件事，都要报）
-    out_fps = {k: _fp(k, work) for k in (rec.get("outputs") or {})}
-    missing_out = [k for k, v in out_fps.items() if v == "missing"]
+    # 自己的产物丢了：上次跑到一半被中断 / 被删 / 被挪走（与"输入变了"是两件事，都要报）。
+    # 只报「上次记录到真实指纹、现在没了」的文件：有些产物是**条件性**的（legacy 剧本
+    # 不写 voice_plan.json），它们上次就记为 missing，现在还是 missing，那是正常状态；
+    # 一律按"现在是 missing 就报"会让这类文件变成永久误报（--strict-stale 下直接失败）。
+    rec_out = rec.get("outputs") or {}
+    missing_out = [k for k, was in rec_out.items()
+                   if was not in (None, "missing") and _fp(k, work) == "missing"]
     if missing_out:
         issues.append(dict(stage=str(stage), kind="output-missing",
                            reason="上次跑过本阶段，但产物 %s 不见了（被删 / 被挪 / 磁盘满）"
@@ -209,8 +292,11 @@ def check(work, stage, sources=None):
     return issues
 
 
-def explain(work, stages=None, sources=None):
-    """--explain-stale：把"现在哪些阶段是旧的、为什么、该跑什么"一次说清。"""
+def explain(work, stages=None, sources=None, self_built=False, pending=()):
+    """--explain-stale：把"现在哪些阶段是旧的、为什么、该跑什么"一次说清。
+
+    pending: 本次命令行要跑的 stage 集合（见 check）；--stage explain 不传 = 全按"不重跑"判。
+    """
     d = load(work)
     rows = []
     for st in (stages or STAGE_ORDER):
@@ -218,7 +304,7 @@ def explain(work, stages=None, sources=None):
         if io is None:
             continue
         rec = (d.get("stages") or {}).get(st)
-        issues = check(work, st, sources)
+        issues = check(work, st, sources, self_built=self_built, pending=pending)
         rows.append(dict(stage=st, recorded=bool(rec),
                          at=(rec or {}).get("atText", ""),
                          issues=issues))
@@ -226,40 +312,64 @@ def explain(work, stages=None, sources=None):
 
 
 def report(work, stages=None, strict=False, allow_stale=False, ledger=None, write=None,
-           sources=None):
+           sources=None, self_built=False, pending=()):
     """查 + 打印 + 判定。返回 (errors, warnings)；errors 在 strict 下非空。
 
     ledger: 传 gates.GateLedger 时把结论记进账本（一条汇总 gate）。
     write:  传 callable(str, str) 时按行输出（方便测试捕获）。
+    self_built: 见 check()——本次运行的 work/ 是刚建的，别报"没有记录=过时"。
+    pending: 本次命令行要跑的 stage 集合（见 check）。其中"本阶段会重算"的输入变化
+             标 soft，照实打印但不参与 strict 判定。
     """
     out = write or (lambda level, msg: print(msg))
-    rows = explain(work, stages, sources)
+    rows = explain(work, stages, sources, self_built=self_built, pending=pending)
     problems = [(r["stage"], i) for r in rows for i in r["issues"]]
     warns, errs = [], []
     for st, it in problems:
-        msg = ("[stale] %s: %s" % (st, it["reason"]))
-        if allow_stale:
+        soft = bool(it.get("soft")) or it.get("kind") in SOFT_KINDS
+        # 两类不要用同一个前缀：soft 是"本轮会重算"的待办，不是过时。用 [stale] 会把
+        # 人吓一跳，也会让"grep [stale] 判红"的 CI 配方误报。
+        msg = (("[待重算] %s: %s" if soft else "[stale] %s: %s") % (st, it["reason"]))
+        if soft:
+            # 本轮会重算的输入变化：照实说，但不算失败。--strict-stale 也不拦。
+            warns.append(msg)
+        elif allow_stale:
             warns.append(msg + "（--allow-stale 已放行，本次结果可能掺旧数据）")
         elif strict:
             errs.append(msg)
         else:
             warns.append(msg)
-        if it.get("rerun"):
+        # 原因行必须打出来：调用方（render.py --stage all）只显示"最小重跑"，
+        # 用户会看到"共 1 处过时"却不知道是哪个 stage、为什么——这正是本模块
+        # 开头承诺的"可以保守，但不能静默"。返回的 warns/errs 是给调用方判定的，
+        # 不代替人读的输出。
+        out(("warn" if soft else "err") if (strict and not allow_stale) else "warn", msg)
+        if it.get("rerun") and not soft:
             out("warn", "   最小重跑: %s" % it["rerun"])
+    hard = [(st, it) for st, it in problems
+            if not (it.get("soft") or it.get("kind") in SOFT_KINDS)]
     if problems:
         out("warn", "")
-        out("warn", "   ↑ 共 %d 处过时。默认只告警；--strict-stale 让它失败，"
-                    "--allow-stale 显式放行（会记进 QC 报告）。" % len(problems))
+        if hard:
+            out("warn", "   ↑ 共 %d 处过时。默认只告警；--strict-stale 让它失败，"
+                        "--allow-stale 显式放行。放行会记进本次门禁账本，"
+                        "交付阶段（qa / mux / all / stills / style）会体现在 QC 报告里。"
+                        % len(hard))
+        else:
+            out("warn", "   ↑ 上面 %d 条都是「本轮会重算」的输入变化（不是过时，不拦 strict）。"
+                        % len(problems))
     if ledger is not None:
         try:
-            if not problems:
-                ledger.ok("stale", "阶段新鲜度", "上游输入与上次记录一致")
+            if not hard:
+                ledger.ok("stale", "阶段新鲜度",
+                          "上游输入与上次记录一致" if not problems
+                          else "%d 处输入会在本轮重算，无需拦" % len(problems))
             elif errs:
-                ledger.fail("stale", "阶段新鲜度", "%d 处过时（--strict-stale）" % len(problems))
+                ledger.fail("stale", "阶段新鲜度", "%d 处过时（--strict-stale）" % len(hard))
             else:
                 ledger.skip("stale", "阶段新鲜度",
                             "%d 处过时，已告警未阻断%s"
-                            % (len(problems), "（--allow-stale）" if allow_stale else ""))
+                            % (len(hard), "（--allow-stale）" if allow_stale else ""))
         except Exception:                                   # noqa: BLE001
             pass
     return errs, warns

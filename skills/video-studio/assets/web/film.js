@@ -1,6 +1,11 @@
 /* film.js — 场景模板（v0.3.0）
  *
- * 12 秒 / 3 个场景，示范 5 件事：
+ * 3 个场景 / 默认 12 秒（global.DURATION 由场景表推出，见下方 resolveDuration：
+ * 加一幕、改一幕时长都不用手工同步常量；要锁死就写 window.WINDOW_DURATION）。
+ * 这是**独立的 12 秒演示片**，不是"随便配一份 film.json 就能出全片"的成品页面：
+ * 换剧本必须自己重写场景，让画面覆盖到片尾，再按需写 WINDOW_DURATION。
+ *
+ * 示范 5 件事：
  *   ① 逐字入场（0–4s）  ② 数字滚动（4–8s）  ③ 粒子 / 发光（8–12s）
  *   ④ HUD 标注（贯穿全片）  ⑤ cue / event 登记（由 window.getCues()/getEvents() 导出）
  *
@@ -15,7 +20,21 @@
   var W = F.W, H = F.H, g = F.g, E = F.E;
   var seg = F.seg, lerp = F.lerp, clamp = F.clamp;
 
-  global.DURATION = 12.0;   // 成片秒数（webengine.py 会读它做分块与校验）
+  /* 成片秒数（webengine.py / render.py 会读它做分块与校验）。
+   * 默认由场景表推出 = 最后一个场景的 end（加/删/改场景后自动跟着变，不会忘记同步）；
+   * 要显式锁死（例如页面里还有场景以外的动画），在 index.html 里先写
+   *   <script>window.WINDOW_DURATION = 12.0;</script>
+   * 或在引入 film.js 之前赋值即可覆盖。使用说明见 references/web-engine.md §3。 */
+  function resolveDuration(F) {
+    var explicit = Number(global.WINDOW_DURATION);
+    if (isFinite(explicit) && explicit > 0) return explicit;
+    // 也认"在 film.js 之前直接写 window.DURATION = 秒数"的写法：render.py 的报错就是
+    // 教用户改 window.DURATION（页面里的时长必须等于 timeline.total）。
+    // engine.js 自己写的兜底值不算显式，否则模板永远锁死在 12 秒，加场景也不生效。
+    var pre = Number(global.DURATION);
+    if (isFinite(pre) && pre > 0 && pre !== Number(F.defaultDuration)) return pre;
+    return F.timelineEnd();
+  }
 
   var C = {
     ink: '#eaf2ff',
@@ -190,8 +209,14 @@
     });
   });
 
+  /* ================================================================ 时间轴总长（DURATION） */
+  /* 必须在所有 F.scene(...) 注册完之后求值：resolveDuration 读的就是场景表。
+   * 放在 HUD 之前、注册之后，这样 HUD 里读 global.DURATION 时它已经是正确值（boot 在最后）。 */
+  global.DURATION = resolveDuration(F);
+
   /* ================================================================ HUD 层（最后注册 → 最后画，压在所有场景之上） */
   F.always(function (t) {
+    var dur = Number(global.DURATION) || 12.0;
     g.text('DSH VIDEO STUDIO', 64, 60, {
       size: 24, weight: '500', color: 'rgba(234,242,255,0.55)', key: 'hud.brand'
     });
@@ -200,14 +225,14 @@
       size: 22, weight: '500', color: 'rgba(90,210,255,0.8)', key: 'hud.ch', group: 'hud.ch'
     });
     // 时间码每帧都在变 → 也保证「不同帧渲染结果不同」
-    var tc = 'T ' + (t < 10 ? '0' : '') + t.toFixed(2) + ' / 12.00';
+    var tc = 'T ' + (t < 10 ? '0' : '') + t.toFixed(2) + ' / ' + dur.toFixed(2);
     g.text(tc, W - 64, 60, {
       size: 22, weight: '500', align: 'right', color: 'rgba(234,242,255,0.45)',
       key: 'hud.tc', group: 'hud.tc'
     });
     // 顶部进度线
     g.rect(64, 122, W - 128, 1, 'rgba(90,210,255,0.16)');
-    g.rect(64, 122, (W - 128) * clamp(t / 12, 0, 1), 2, 'rgba(255,140,66,0.85)');
+    g.rect(64, 122, (W - 128) * clamp(t / dur, 0, 1), 2, 'rgba(255,140,66,0.85)');
     // 底部品牌行
     g.text('v0.3.0 · Canvas2D 逐帧渲染 · 不使用 GSAP / three.js', 64, H - 52, {
       size: 20, weight: '400', color: 'rgba(234,242,255,0.3)', key: 'hud.foot'

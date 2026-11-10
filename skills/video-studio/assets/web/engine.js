@@ -14,6 +14,7 @@
   'use strict';
 
   var W = 1920, H = 1080, FPS = 30, BG = '#0b0e14';
+  var DEFAULT_DURATION = 12.0;   // 页面没给时长时的兜底；film.js 用它区分"显式时长"与"兜底值"
   var FAMILY = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
   var TAU = Math.PI * 2;
 
@@ -409,6 +410,20 @@
   function getCues() { return copySorted(cueList); }
   function getEvents() { return copySorted(eventList); }
 
+  /* 场景表推出的时间轴总长（最后一个场景的 end）。
+   * 为什么要它：页面契约里的 DURATION 必须等于真正的成片秒数，而 v0.3 的模板在 film.js
+   * 开头写死 global.DURATION = 12.0 —— 加一幕/改一幕时长后忘了同步这个常量，就会
+   * "明明改了场景、成片还是 12 秒"或者直接和 timeline.json 对不上（render.py 报
+   * 页面 DURATION 与 timeline 总时长不一致）。让 DURATION 从场景表推，就不会漏改。 */
+  function timelineEnd() {
+    var end = 0;
+    for (var i = 0; i < scenes.length; i++) {
+      var e = Number(scenes[i].start) + Number(scenes[i].dur);
+      if (isFinite(e) && e > end) end = e;
+    }
+    return Math.round(end * 1000) / 1000;
+  }
+
   /* ---------------------------------------------------------------- 逐帧渲染 */
   var currentFrame = -1;
 
@@ -467,11 +482,13 @@
   /* ---------------------------------------------------------------- 导出 */
   var FK = {
     W: W, H: H, FPS: FPS, BG: BG, TAU: TAU, FAMILY: FAMILY,
+    defaultDuration: DEFAULT_DURATION,
     canvas: canvas, ctx: ctx,
     clamp: clamp, lerp: lerp, seg: seg, E: E, hash: hash, rng: rng,
     g: g,
     scene: scene, always: always, watch: watch, qaReset: qaReset,
     texts: texts, watched: watched, drawnKeys: drawnKeyList,
+    timelineEnd: timelineEnd,
     getCues: getCues, getEvents: getEvents, renderFrame: renderFrame, boot: boot,
     frame: function () { return currentFrame; }
   };
@@ -480,6 +497,6 @@
   global.renderFrame = renderFrame;
   global.getCues = getCues;
   global.getEvents = getEvents;
-  if (typeof global.DURATION === 'undefined') global.DURATION = 12.0;
+  if (typeof global.DURATION === 'undefined') global.DURATION = DEFAULT_DURATION;
   global.ready = false;
 })(window);

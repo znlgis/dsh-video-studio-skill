@@ -52,6 +52,11 @@ PITCH_RE = re.compile(r"^\s*[+-]?\d+\s*Hz\s*$")
 ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 CPS = 4.2                                   # 每秒约 4.2 字（voicekit 实测中位口径）
+# 语速区间而不是单一 4.2：voicekit 校准实测 3.84–4.61 cps（9 个 persona，固定校准句），
+# 而 stylekit 的声线策略允许的 cps_band 是 3.6–5.6（rate 覆盖 ±15% 后）。
+# 只用中位数会误报：模板片实测 5.2 字/秒的句子被按 4.2 估 -> 全片多算 5.2 s ->
+# "剧本与 timeline 差 5.23 s"的假 WARN（v0.7.2 修，模板片复现）。
+CPS_LO, CPS_HI = 3.6, 5.6
 DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR = 0.62, 0.92, 3.0
 TIMELINE_TOL = 0.5                          # 估算与 timeline 差超过这个秒数就 WARN
 
@@ -299,6 +304,9 @@ SCRIPT_SPEC = {
             "enabled": {"t": "bool"},
             "gain_db": {"t": "num"},
             "mix_gain_db": {"t": "num"},
+            # render.py 的 st_sfx 把它透传给 CueBus.build_audio()：按配方名覆盖基础电平。
+            # 以前 schema/filmcheck 都没写，用户写了会被当未知键警告（其实真的会生效）。
+            "base_db": {"t": "dict", "open": True},
             # v0.7 音频差异化：content_seed 由 CueBus 读（位置派生 vs 内容派生）；
             # duck_transitions 由 render.st_sfx 读（段落边界前的转场音效自动让位）。
             "content_seed": {"t": "bool"},
@@ -477,6 +485,18 @@ def check_cross(script, script_path, rep, ctx):
         ids.append(lid)
     idset = set(ids)
 
+    # ---- lines[].tail 当前不生效（保留字段）：写了会静默无效，必须说出来 ----
+    for i, ln in enumerate(lines):
+        if _f(ln.get("tail", 0.0)) > 0:
+            lid = ln.get("id") or ("l%02d" % (i + 1))
+            rep.warn("lines[%d].tail" % i, (
+                "film.json 的逐句 tail 目前**不生效**：filmkit.build_timeline 只读 "
+                "tail_map，不读 lines[].tail（渲染跑得通，但句后留白没变）。要逐句"
+                "控制句后留白，请写顶层 tail_map（形如 l03: 1.4），或交给 voicekit 的 "
+                "voice_plan（--stage tts 落 work/voice_plan.json，st_layout 会并进 "
+                "tail_map）。例如 %s: 1.4" % lid),
+                "inert_line_tail")
+
     # ---- sfx.cues[].at 引用的场景 id 必须在 lines 里 ----
     sfx = script.get("sfx") if isinstance(script.get("sfx"), dict) else {}
     cues = sfx.get("cues") if isinstance(sfx.get("cues"), list) else []
@@ -506,23 +526,63 @@ def check_cross(script, script_path, rep, ctx):
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
         rep.warn(str(tl_path), "读不了 timeline（%s），跳过时长对账" % e, "timeline_unreadable")
         return
-    lead = _f(script.get("lead", DEFAULT_LEAD), DEFAULT_LEAD) or DEFAULT_LEAD
-    tail = _f(script.get("tail", DEFAULT_TAIL), DEFAULT_TAIL) or DEFAULT_TAIL
-    min_dur = _f(script.get("min_dur", DEFAULT_MIN_DUR), DEFAULT_MIN_DUR) or DEFAULT_MIN_DUR
-    ghold = _f(script.get("hold", 0.0))
-    holds, est, speech = 0.0, 0.0, 0.0
+    # 节拍覆盖的优先级与 stylekit.resolve_script_style 一致：pacing > 顶层字段 > 默认。
+    # 不读 pacing 会把"pacing.lead=2.0"当成"没写 lead"，估出来的时长偏小一半 -> 假 WARN。
+    pace = script.get("pacing") if isinstance(script.get("pacing"), dict) else {}
+
+    def _pace(key, default):
+        for box in (pace, script):
+            v = box.get(key) if isinstance(box, dict) else None
+            if v is not None:
+                return _f(v, default)
+        return float(default)
+
+    lead = _pace("lead", DEFAULT_LEAD)
+    tail = _pace("tail", DEFAULT_TAIL)
+    min_dur = _pace("min_dur", DEFAULT_MIN_DUR)
+    ghold = _pace("hold", 0.0)
+    holds, speech, est_lo, est_hi = 0.0, 0.0, 0.0, 0.0
     for ln in lines:
-        voice = _weighted_chars(ln.get("text")) / CPS
+        chars = _weighted_chars(ln.get("text"))
         hold = _f(ln.get("hold", ghold))
         holds += hold
-        speech += voice
-        est += max(min_dur, lead + voice + tail + hold)
-    if abs(est - total) > TIMELINE_TOL:
+        speech += chars / CPS
+        # 快语速 = 时长短（下界），慢语速 = 时长长（上界）
+        est_lo += max(min_dur, lead + chars / CPS_HI + tail + hold)
+        est_hi += max(min_dur, lead + chars / CPS_LO + tail + hold)
+    # bar > 0 把每段向上取整到小节倍数，total 天然比逐句估算大；这时不拿估算对账。
+    drift = 0.0
+    if not (_f(script.get("bar", 0.0)) > 0):
+        if total < est_lo - TIMELINE_TOL:
+            drift = total - est_lo
+        elif total > est_hi + TIMELINE_TOL:
+            drift = total - est_hi
+    if drift:
         rep.warn(str(tl_path),
-                 "剧本 hold 合计 %.2f s + 语音预估 %.2f s（含 lead/tail）≈ 全片 %.2f s，"
-                 "与 timeline 的 total=%.2f s 差 %.2f s > %.1f s。"
+                 "剧本 hold 合计 %.2f s + 语音预估 %.2f–%.2f s（含 lead/tail）≈ 全片 "
+                 "%.2f–%.2f s，与 timeline 的 total=%.2f s 差 %.2f s > %.1f s。"
                  "改过台词 / hold / 节奏参数就重跑 --stage layout（别拿旧时间轴直接渲）"
-                 % (holds, speech, est, total, abs(est - total), TIMELINE_TOL), "timeline_drift")
+                 % (holds, est_lo, est_hi, est_lo, est_hi, total,
+                    abs(drift), TIMELINE_TOL), "timeline_drift")
+    # 台词内容逐句对账（最可靠的一条：build_timeline 把整条 line 原样拷进 scene，
+    # 所以 timeline.scenes[i].text 就是"上次排轴时那句话"）。改过台词没重跑 layout，
+    # 这里能精确点出来；比按时长估算准得多，也不会被语速/语气差异干扰。
+    tl_by_id = {str(s.get("id")): s for s in (tl.get("scenes") or []) if isinstance(s, dict)}
+    text_drift = []
+    for ln in lines:
+        lid = ln.get("id")
+        if lid is None or not str(lid).strip():
+            continue
+        scene = tl_by_id.get(str(lid))
+        if not isinstance(scene, dict) or "text" not in scene:
+            continue                                  # 老版本 timeline 不带 text：跳过
+        if str(scene.get("text")) != str(ln.get("text")):
+            text_drift.append(str(lid))
+    if text_drift:
+        rep.warn(str(tl_path),
+                 "timeline 里 %d 句的台词与 film.json 不一致（%s）：TTS 与字幕都还是旧词，"
+                 "改完台词必须重跑 --stage tts layout 再渲"
+                 % (len(text_drift), ", ".join(text_drift[:6])), "timeline_text")
     tl_ids = [str(s.get("id")) for s in (tl.get("scenes") or []) if isinstance(s, dict)]
     if idset and tl_ids and set(tl_ids) != idset:
         miss = sorted(idset - set(tl_ids))

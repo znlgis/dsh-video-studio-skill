@@ -43,8 +43,8 @@
 
 ```bash
 python render.py --stage explain          # 哪些阶段过时了、为什么、最小重跑命令
-python render.py --stage explain --json   # 机读（给脚本/agent 用）
 python render.py --stage qa --strict-stale  # 有过时就失败（CI / 交付前）
+python scripts/stagewatch.py --work work --json   # 机读（给脚本/agent 用；render.py 没有 --json）
 ```
 
 ## 4. 和人工签核的关系

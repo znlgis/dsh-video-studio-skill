@@ -40,23 +40,46 @@ import unicodedata
 from pathlib import Path
 
 # ============================================================================
-# 基准常量（唯一出处：SKILL.md §12 本机实测；换机请重测）
+# 基准常量（v0.7.2 重新校准：换机请重测后回填，别把这里的数字当通用真理）
 # ============================================================================
 
 W, H, FPS = 1920, 1080, 30          # filmkit.W/H/FPS：本项目写死，film.json 改不了
-PIL_FPS = (40.0, 80.0)              # PIL 逐帧：中等复杂度 40–54 fps / 模板片 68–82 fps
+PIL_FPS = (40.0, 80.0)              # PIL 逐帧渲染速度：中等复杂度 40–54 fps / 模板片 68–82 fps
+PARALLEL_EFF = 0.5                  # 分块并行的**实测效率**：2 进程只快 1.5×，不是 2×（见 CALIBRATION）
 WEB_SEC_PER_FRAME = (0.080, 0.130)  # web 引擎：Edge 无头 PNG 截图 80–130 ms/帧
 WEB_STARTUP_SEC = 6.0               # 浏览器冷启动 + CDP 连接（12 s 片 28–30 s 含启动）
-X264_FPS = 141.0                    # libx264 -preset medium -crf 17 ≈ 4.7× 实时
-TTS_SEC_PER_LINE = 4.0              # edge-tts：单句 4 s 语音约 4 s 合成（联网）
-SCORE_REFS = ((60.0, 2.0, 4.0), (389.0, 4.0, 8.0))  # (片长 s, 耗时低, 耗时高)：两个实测点
+X264_FPS = 141.0                    # libx264 -preset medium -crf 17 ≈ 4.7× 实时（仅 reencode_video 用）
+TTS_SEC_PER_LINE = (2.0, 4.0)       # edge-tts：每句每 worker 的墙钟（联网，波动大）：实测 2.2 s，留到 4.0
+SCORE_REFS = ((29.0, 3.6, 6.5), (58.0, 4.5, 6.5), (389.0, 8.0, 18.0))
+#           ^ (片长 s, 耗时低, 耗时高)：前两个点是本机实测（29 s / 58 s 各 3 次），
+#             第三个点是片长外推锚点（不是本机实测），只用来保证长片不会被系统性算小
 SFX_SEC_PER_CUE = 0.20              # 单条短音效 合成+落位（24 配方单次 ≤1.5 s 是上限口径）
-SFX_MIN_SEC = 0.5
-LAYOUT_BASE, LAYOUT_PER_LINE = 0.4, 0.02   # 排轴 + srt/ass + 安全区/字形自查
-CUES_BASE, CUES_PER_LINE = 0.2, 0.02       # 提示点落盘 + 排序
+SFX_MIN_SEC = 0.8                   # 实测 18 条 cue 的模板片 sfx 墙钟 0.8 s（含 ffmpeg 写盘）
+LAYOUT_BASE, LAYOUT_PER_LINE = 0.05, 0.01  # 排轴 + srt/ass + 安全区/字形自查（实测 29 s 片 <0.15 s）
+CUES_BASE, CUES_PER_LINE = 0.05, 0.005     # 提示点落盘 + 排序（实测 29 s 片 <0.15 s）
 AUDIO_BASE, AUDIO_PER_SEC = 0.6, 0.012     # numpy 总线按采样点叠加 + 写 wav
-QA_SEC_PER_SEC = 1.0 / 30.0                # 30 s 片全量深检 ≈ 1 s（160×90 流式解码）
-QA_MIN_SEC = 0.8
+# mux 默认是 -c:v copy + 两遍 loudnorm：实测 29 s 片 1.7–1.9 s，与帧数无关、跟片长弱相关。
+MUX_BASE_SEC = 0.6                  # 起 ffmpeg 两遍 + 封装
+MUX_PER_SEC = 0.045                 # 每片长秒（两遍 loudnorm 解码音频）
+# QA：实测 29 s 片 6.2–6.8 s（含联系表 + 锐度参考帧重渲染 + 帧级深检）。原来的 1/30 把 qa 算了 6 倍小。
+QA_BASE_SEC = (1.0, 3.0)            # 固定开销：联系表 + 参考帧重渲染
+QA_SEC_PER_SEC = (0.12, 0.25)       # 随片长：帧级深检流式解码 + 响度曲线
+UNMEASURED_BAND = 0.30              # 没有实测的阶段（layout/cues/sfx/audio）给 ±30% 的区间，别假装精确
+
+# 校准出处：换成你自己的机器前，请按 SKILL.md §12 重测并回填——这些数字决定预演准不准。
+CALIBRATION = dict(
+    machine=("AMD64 Family 26 Model 36 Stepping 0（24 逻辑核）/ Windows；"
+             "SKILL.md §12 记录的作者机是 Ryzen AI 9 HX 370 / 12C24T / Radeon 890M"
+             "（是否同一台未核实，只保证这些数字是在上述 24 逻辑核机器上测的）"),
+    measured_at="2026-11-10",
+    sdk="video-studio v0.7.1 scripts（ffmpeg 自带 x264）",
+    film="29.011 s / 870 帧 / 模板片（assets/film.json + assets/scenes.py）",
+    method="render.py --stage all --jobs 2，逐 stage 取 [time] 行墙钟；同片重复 2 次",
+    observed=dict(tts=2.2, layout=0.0, cues=0.0, score=6.3, sfx=0.8, audio=0.7,
+                  frames=9.7, mux=1.9, qa=6.8, total=28.4),
+    extra="frames: 870 帧 jobs=1 14.37 s / jobs=2 9.53 s（并行效率 1.51×）;"
+          " score 58 s 片 4.5–5.0 s; qa 6.2–6.8 s",
+)
 CPS = 4.2                            # 每秒约 4.2 字（voicekit 校准 3.84–4.61 cps 的中位口径）
 DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR = 0.62, 0.92, 3.0  # v0.5 body 基准
 CORES = 12                           # HX 370：12C/24T；jobs > 12 不再线性加速
@@ -65,8 +88,8 @@ WAV_BYTES_PER_SEC = 48000 * 2 * 2    # 48 kHz 立体声 PCM16 = 192 KB/s
 VIDEO_MBPS = (1.2, 3.0)              # crf17 @1080p30 图文内容（暗底大字 0.5–1 Mbps 属正常）
 AUDIO_MBPS = 0.192                   # AAC 192 kbps
 QA_DISK_BYTES = 12 * 1024 * 1024     # 联系表 + 静帧 + deep.png
-BASELINE_NOTE = ("区间来自作者机器实测（SKILL.md §12：Ryzen AI 9 HX 370 / 12C24T / "
-                 "Radeon 890M 无 CUDA）；换机请先重测再采信")
+BASELINE_NOTE = ("区间来自 v0.7.2 本机实测（机型/样本见下方 calibration；"
+                 "SKILL.md §12 记录的作者机是 Ryzen AI 9 HX 370 / 12C24T）；换机请先重测再采信")
 
 STAGE_LABELS = {
     "tts": "旁白 edge-tts",
@@ -245,25 +268,53 @@ def score_seconds(total):
     return max(0.3, lo), max(0.5, hi)
 
 
-def frames_seconds(frames, jobs, engine, rerender):
-    """frames 阶段墙钟（只算画面生成，编码单列在 mux 行）。
+def _speedup(jobs):
+    """分块并行的**有效加速比**：不是 jobs 倍。
 
-    PIL：帧数 ÷ 渲染 fps ÷ 并行度；web：启动开销 + 帧数 × 每帧截图耗时 ÷ 并行度。
-    render.py 的分块 worker 是"边渲染边编码"，所以真实成本 ≈ 本行 + mux 行。
+    实测（870 帧模板片）：jobs=1 → 14.37 s、jobs=2 → 9.53 s，只有 1.51×。
+    原因很实在：父进程要 spawn 子进程、每段都要重新 import scenes.py / 解析主题、
+    落盘 mux 串行、磁盘写带宽争用。按 jobs 线性折算会持续低估长片（越长的片分块越多）。
+    这里用 1 + (jobs-1)*PARALLEL_EFF 的线性模型：比理论值保守，实测 2 进程刚好对上。
     """
     jobs_eff = max(1, min(int(jobs), CORES))
+    return 1.0 + (jobs_eff - 1) * PARALLEL_EFF
+
+
+def frames_seconds(frames, jobs, engine, rerender):
+    """frames 阶段墙钟（只算画面生成；不重编码时封装成本在 mux 行）。
+
+    PIL：帧数 ÷ 渲染 fps ÷ 有效加速比；web：启动开销 + 帧数 × 每帧截图耗时 ÷ 加速比。
+    render.py 的分块 worker 是边渲染边编码，所以这里的 fps 已经含了编码开销。
+    """
+    sp = _speedup(jobs)
     if engine == "web":
-        base = [WEB_STARTUP_SEC + frames * spf / jobs_eff for spf in WEB_SEC_PER_FRAME]
+        base = [WEB_STARTUP_SEC + frames * spf / sp for spf in WEB_SEC_PER_FRAME]
     else:
-        base = [frames / rfps / jobs_eff for rfps in PIL_FPS]
+        base = [frames / rfps / sp for rfps in PIL_FPS]
     base = sorted(base)
     return base[0] * rerender, base[-1] * rerender
 
 
-def encode_seconds(frames, jobs):
-    """x264 编码墙钟：141 fps（medium/crf17），分块并行时按 --jobs 摊到各进程。"""
-    jobs_eff = max(1, min(int(jobs), CORES))
-    return frames / X264_FPS / jobs_eff
+def mux_seconds_pair(frames, jobs, total, script):
+    """mux 阶段区间：默认 -c:v copy 只跟片长有关；reencode_video=true 才跟帧数有关。"""
+    reencode = bool(script.get("reencode_video", False))
+    if reencode:
+        v = frames / X264_FPS / _speedup(jobs)
+        return v * 0.8, v * 1.6
+    base = MUX_BASE_SEC + MUX_PER_SEC * max(0.0, float(total))
+    return base * 0.75, base * 1.35
+
+
+def mux_seconds(frames, jobs, total, reencode=False):
+    """mux 阶段墙钟。
+
+    默认 `-c:v copy` + 两遍 loudnorm：视频流不解码不重编码，成本 ≈ 起 ffmpeg + 按片长
+    解码音频跑两遍。实测 29 s 片 1.7–1.9 s。
+    reencode_video=true 时才要重编视频，那时才用 x264 速率并按有效加速比摊。
+    """
+    if reencode:
+        return frames / X264_FPS / _speedup(jobs)
+    return MUX_BASE_SEC + MUX_PER_SEC * max(0.0, float(total))
 
 
 def chunk_plan(frames, fps, jobs, explicit):
@@ -390,49 +441,63 @@ def build_report(script_path, script, args):
     preset = script.get("preset", "medium")
 
     # ---- 各阶段 ----
+    # 没有实测的阶段一律给区间（正负 UNMEASURED_BAND），别把经验公式输出当精确值。
+    def _band(v):
+        # 下界永远让它摸到 0：这些阶段实测常常 <0.1 s（render.py 的 [time] 行按 0.1 s 打印，
+        # 于是显示 0.0），下界写成正值会让"实测值落在区间外"这种假告警出现。
+        return min(0.0, v * (1.0 - UNMEASURED_BAND)), v * (1.0 + UNMEASURED_BAND)
     workers = int(_num(script.get("tts_workers", 4), 4) or 4)
     workers = max(1, min(workers, max(1, n)))
-    tts_lo = tts_hi = n * TTS_SEC_PER_LINE / float(workers)
-    layout = LAYOUT_BASE + LAYOUT_PER_LINE * n
-    cues = CUES_BASE + CUES_PER_LINE * n
+    # TTS 按每句每 worker 摊：实测 4 句 / 4 workers = 2.2 s（串行口径 8.8 s）。
+    tts_lo = n * TTS_SEC_PER_LINE[0] / float(workers)
+    tts_hi = n * TTS_SEC_PER_LINE[1] / float(workers)
+    layout_lo, layout_hi = _band(LAYOUT_BASE + LAYOUT_PER_LINE * n)
+    cues_lo, cues_hi = _band(CUES_BASE + CUES_PER_LINE * n)
     if score_on:
         score_lo, score_hi = score_seconds(total)
     else:
         score_lo = score_hi = 0.0
-    sfx = max(SFX_MIN_SEC, n_cues * SFX_SEC_PER_CUE) if sfx_on else 0.0
-    audio = AUDIO_BASE + total * AUDIO_PER_SEC
+    sfx_lo, sfx_hi = _band(max(SFX_MIN_SEC, n_cues * SFX_SEC_PER_CUE)) if sfx_on else (0.0, 0.0)
+    audio_lo, audio_hi = _band(AUDIO_BASE + total * AUDIO_PER_SEC)
     fr_lo, fr_hi = frames_seconds(frames, jobs_eff, engine, rerender)
-    mux = encode_seconds(frames, jobs_eff)
-    qa = max(QA_MIN_SEC, total * QA_SEC_PER_SEC)
+    mux_lo, mux_hi = mux_seconds_pair(frames, jobs_eff, total, script)
+    qa_lo = max(0.5, QA_BASE_SEC[0] + total * QA_SEC_PER_SEC[0])
+    qa_hi = max(qa_lo, QA_BASE_SEC[1] + total * QA_SEC_PER_SEC[1])
 
     stages = [
         dict(stage="tts", lo=tts_lo, hi=tts_hi, measured=True,
-             note=("%d 句 × %.1f s ÷ tts_workers=%d（串行口径 %.1f s；需联网，edge-tts 免费端点）"
-                   % (n, TTS_SEC_PER_LINE, workers, n * TTS_SEC_PER_LINE))),
-        dict(stage="layout", lo=layout, hi=layout, measured=False,
-             note="排轴 + sub.srt/ass + 安全区/字形自查（经验值，未单测）"),
-        dict(stage="cues", lo=cues, hi=cues, measured=False,
-             note="%d 条 sfx.cues 落位 + 排序（经验值，未单测）" % n_cues),
+             note=("%d 句 ÷ tts_workers=%d，每句每 worker %.1f–%.1f s（实测 2.2 s/4 句；"
+                   "需联网，edge-tts 免费端点波动大）"
+                   % (n, workers, TTS_SEC_PER_LINE[0], TTS_SEC_PER_LINE[1]))),
+        dict(stage="layout", lo=layout_lo, hi=layout_hi, measured=False,
+             note="排轴 + sub.srt/ass + 安全区/字形自查（经验模型，给 ±%d%% 区间）"
+                  % int(UNMEASURED_BAND * 100)),
+        dict(stage="cues", lo=cues_lo, hi=cues_hi, measured=False,
+             note="%d 条 sfx.cues 落位 + 排序（经验模型，给 ±%d%% 区间）"
+                  % (n_cues, int(UNMEASURED_BAND * 100))),
         dict(stage="score", lo=score_lo, hi=score_hi, measured=bool(score_on),
-             note=("按 60 s≈2–4 s / 389 s≈4–8 s 线性折算" if score_on
-                   else ("mode=%s：不跑 scorekit（%s）"
-                         % (mode or "-", "外部配乐/和弦床/关掉配乐")))),
-        dict(stage="sfx", lo=sfx, hi=sfx, measured=False,
-             note=("%d 条音效 ≈ %.1f s（上限口径：单条 ≤1.5 s；长环境声 wind/rain 另计）"
-                   % (n_cues, sfx) if sfx_on else "没有 sfx.cues：跳过（whoosh 兼容路径除外）")),
-        dict(stage="audio", lo=audio, hi=audio, measured=False,
-             note="旁白+配乐+音效三总线混音 + 写 audio.wav（经验值：%.2f s + %.3f×片长）"
+             note=("以实测点 29 s≈3.6–6.3 s / 58 s≈4.5–5.0 s 为锚（--stage all 里与其它阶段争 CPU 会更慢；389 s 只是外推锚点）"
+                   if score_on else
+                   ("mode=%s：不跑 scorekit（%s）"
+                    % (mode or "-", "外部配乐/和弦床/关掉配乐")))),
+        dict(stage="sfx", lo=sfx_lo, hi=sfx_hi, measured=False,
+             note=("%d 条音效（实测 18 条 0.8 s；单条上限口径 ≤1.5 s，长环境声 wind/rain 另计）"
+                   % n_cues if sfx_on else
+                   "没有 sfx.cues：跳过（whoosh 兼容路径除外）")),
+        dict(stage="audio", lo=audio_lo, hi=audio_hi, measured=False,
+             note="三总线混音 + 写 audio.wav（实测 29 s 片 0.7 s；模型 %.2f + %.3f×片长）"
                   % (AUDIO_BASE, AUDIO_PER_SEC)),
         dict(stage="frames", lo=fr_lo, hi=fr_hi, measured=True,
-             note=("%s：%s，--jobs %d（本机 12 核）× 返工系数 %.2g；编码成本单列在 mux 行"
+             note=("%s：%s，--jobs %d → 有效加速比 %.2f×（实测 2 进程 1.51×），"
+                   "返工系数 %.2g；不重编码时封装成本在 mux 行"
                    % (engine, "PIL 40–80 fps" if engine == "pil"
-                      else "web 80–130 ms/帧 + 启动 6 s", jobs_eff, rerender))),
-        dict(stage="mux", lo=mux, hi=mux, measured=True,
-             note=("x264 medium crf17 ≈%d fps，按 --jobs %d 摊（分块 worker 边渲染边编码）；"
-                   "render.py 的 mux 本身是 -c:v copy + 两遍 loudnorm，通常 <1 s"
-                   % (int(X264_FPS), jobs_eff))),
-        dict(stage="qa", lo=qa, hi=qa, measured=True,
-             note="30 s 片全量深检 ≈1 s，按片长线性折算 + 联系表/静帧"),
+                      else "web 80–130 ms/帧 + 启动 6 s", jobs_eff,
+                      _speedup(jobs_eff), rerender))),
+        dict(stage="mux", lo=mux_lo, hi=mux_hi, measured=True,
+             note=("-c:v copy + 两遍 loudnorm（实测 29 s 片 1.7–1.9 s，与帧数无关）；"
+                   "reencode_video=true 才走 x264 %.0f fps" % X264_FPS)),
+        dict(stage="qa", lo=qa_lo, hi=qa_hi, measured=True,
+             note=("联系表 + 锐度参考帧重渲染 + 帧级深检（实测 29 s 片 6.2–6.8 s，不是 1 s）")),
     ]
     total_lo = sum(s["lo"] for s in stages)
     total_hi = sum(s["hi"] for s in stages)
@@ -485,11 +550,16 @@ def build_report(script_path, script, args):
             "分辨率 1920x1080@%d 由 filmkit.W/H/FPS 写死，film.json 改不了" % FPS,
             "lead=%.2f / tail=%.2f / min_dur=%.1f（v0.5 body 基准；剧本写了就以剧本为准）"
             % (DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR),
-            "tts 耗时按 %d 句 × %.1f s ÷ workers；实际受网络波动影响" % (n, TTS_SEC_PER_LINE),
-            "frames 的 jobs 并行按线性折算且封顶 %d 核（超过不再线性）" % CORES,
-            "layout/cues/audio/sfx 的耗时为经验模型（无单阶段实测），量级可信、小数位不可信",
+            "tts 耗时按 %d 句 ÷ workers × %.1f–%.1f s（每句每 worker）；实际受网络波动影响"
+            % (n, TTS_SEC_PER_LINE[0], TTS_SEC_PER_LINE[1]),
+            "frames 的并行不是 jobs 倍：有效加速比 = 1 + (jobs-1)×%.2f，封顶 %d 核"
+            % (PARALLEL_EFF, CORES),
+            "mux 默认 -c:v copy，只跟片长有关；reencode_video=true 才按帧数重编",
+            "layout/cues/audio/sfx 给 ±%d%% 经验区间（无单阶段实测）" % int(UNMEASURED_BAND * 100),
+            "基准来源见 calibration 字段（机型/日期/样本）；换机请重测后回填顶部常量",
         ],
         "baseline": BASELINE_NOTE,
+        "calibration": dict(CALIBRATION),
     }
     return report
 
@@ -545,6 +615,15 @@ def print_report(rep):
           % (bn["stage"], bn["seconds_hi"], bn["share"] * 100, bn["advice"]))
     print()
     print("  基准说明：%s" % rep["baseline"])
+    cal = rep.get("calibration") or {}
+    if cal:
+        print("  校准出处（换机请重测后回填 tools/estimate.py 顶部常量）：")
+        print("    机型   %s" % cal.get("machine", "-"))
+        print("    实测   %s · 样本 %s" % (cal.get("measured_at", "-"), cal.get("film", "-")))
+        print("    方法   %s" % cal.get("method", "-"))
+        obs = cal.get("observed") or {}
+        if obs:
+            print("    实测值 " + " · ".join("%s %.1fs" % (k, v) for k, v in obs.items()))
     print("  假设：")
     for a in rep["assumptions"]:
         print("    - %s" % a)

@@ -1684,6 +1684,12 @@ def save(path, x, subtype: str = "PCM_24") -> Path:
     """写 WAV（stdlib wave，不依赖 soundfile）。subtype: PCM_16 / PCM_24 / PCM_32。"""
     p = Path(path)
     a = np.asarray(x, dtype=float)
+    if a.size and not np.all(np.isfinite(a)):
+        # NaN/Inf 经 astype(<i2/<i4) 会被静默写成 0 或未定义值（不同平台结果不同），
+        # 文件听起来是"随机哑音"而调用方毫无察觉——与 filmkit.wav_write 同口径：报错。
+        bad = int(a.size - np.count_nonzero(np.isfinite(a)))
+        raise ValueError("sfxkit.save: 采样里有 %d 个 NaN/Inf（%s）——上游合成有数值错误，"
+                         "拒绝写出损坏的 WAV" % (bad, p))
     if a.ndim == 1:
         inter = a
         n_ch = 1

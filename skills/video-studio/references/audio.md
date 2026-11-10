@@ -467,7 +467,7 @@ v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具�
 ### 13.3 验收：别靠耳朵，跑脚本
 
 ```bash
-python tools/audio_similarity.py --strict
+python <REPO>/tools/audio_similarity.py --strict   # 在包根执行
 ```
 
 A 组量"同风格换内容指纹"和"换风格"的相关性；B 组量"跨片音效是否还逐样本相同"（同时验
@@ -476,7 +476,7 @@ D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何
 
 ### 13.4 改音频代码后的自检清单
 
-1. `python tools/audio_similarity.py --strict` —— A/B/C 三组达标。
-2. `python selfcheck.py` —— 38 条全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先）。
+1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C 三组达标（在包根执行）。
+2. `python selfcheck.py` —— 43 条全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先，第 39 条盯音频边界）。
 3. `python scorekit.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

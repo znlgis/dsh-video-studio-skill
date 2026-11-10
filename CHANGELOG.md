@@ -2,6 +2,111 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.7.2 — 全项目深审：修掉 30+ 处「看着没问题、其实没在查」
+
+> 本轮没有新功能。起因是一次完整的项目复核：把 14 个 Python 模块（约 2.7 万行）、10 篇 references、
+> 插件入口与发布链全部过一遍，用**真实出片**验证每一条承诺，而不是只读代码。
+> 结论是 v0.7.1 的数字与功能基本可信（selfcheck 38/38、ci_check 12/12、模板片 PIL 路线出片 PASS），
+> 但有一类缺陷被系统性低估了：**门禁声称在查，实际一条都没判**。本版主要修这个。
+
+### 修了什么（按严重度）
+
+| # | 问题 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `--strict-stale` 完全不生效 | help 说「上游产物过时算失败」，实测退出码仍 0；CI 里把它当门禁用就等于没有门禁 | `_stage_begin` 接住 `stagewatch.report()` 的 errs 并当场失败；单 stage 路径统一走 `_finish_gates` 并按账本 fail 合成退出码 |
+| 2 | `ci_check` 的 Markdown 围栏检查**恒过** | 源码里写的是 `startswith("\\`\\`\\`")`，Python 把反斜杠当普通字符保留，永远匹配不到真的围栏 → 计数恒为 0 → 检查永远通过 | 重写为围栏状态机（闭合须同字符、不短于开口）；由「未闭合围栏」负例验证会 FAIL |
+| 3 | `ci_check` 的语法检查只查了半边 | `tools/` 下 4 个脚本从未被编译，于是 ci_check.py 自己的 `invalid escape sequence` 一路带到发布 | `_py_files()` 纳入 `tools/*.py`，并把 **SyntaxWarning 记 FAIL** |
+| 4 | `--stage style` 连跑两次必报「产物不见了」 | `STAGE_IO[style].outputs` 把 tts 阶段写的 `voice_plan.json` 算成 style 的产物 → 假 stale；开了 `--strict-stale` 就成了硬失败，而 `--stage style` 正是 SKILL.md 第 3 步、全新项目的第一条生产命令 | `voice_plan.json` 归回 `tts.outputs`；`check()` 只对「上次记录到真实指纹、现在没了」报 output-missing（legacy 永久 missing 不再误报） |
+| 5 | `--stage accept` 把 QC 报告写到另一处 | all/qa 用 `dirname(--out)`、accept 用 `dirname(work)/out`；`--out` 指到 `deliver/` 时签核更新的是一份没人会交付的文件，交付那份仍是「未签核」——正好打穿「报告是交付凭据」 | 新增 `_report_path(a)` 单点推导，accept 也走它；accept 时把同指纹的旧账本搬回内存（`_reload_ledger_from_disk`），报告不再退化成空矩阵 |
+| 6 | 门禁账本为空时报告写「**通过**」 | `gates.json` 被删/写坏/根本没跑 qa 时，交付凭据会宣称通过 | 改为「**未判定**：这不等于通过——先跑 `--stage qa`」；`gates.py --json` 也改成读磁盘账本（原来现场 new 空账本，机读输出等于撒谎） |
+| 7 | `--resume` 会复用被截断的分块 | Ctrl-C 留下的半截 mp4 只要超过 1024 字节就被当「已存在」跳过，拼接后 0.07s vs 预期 29.00s 才报错 | 分块先写 `_part_*` 再 `os.replace`；复用前用 ffprobe 头部 `nb_frames` 校验，不符则重渲 |
+| 8 | 音画同步门禁会「零超差通过」却其实没在判 | `events` 里只要有一条缺 `t` 的条目，`judged` 就被算成 1，命名约定守卫也被骗过 | 只认带有限数值 `t` 的事件并计数丢弃；新增 `src` 来源过滤——**跨时间基准的 cue 不参与配对**（web 引擎下 film.json/scenes.py/页面三路 cue 的时间基准不同），改为「跨基准未对照 N 条」显式计数 |
+| 9 | 插件入口 `index.js`：provider 抛错会让整行 reject 且零日志 | 与文件头「挂不上技能是降级，不是崩溃」直接矛盾 | `apply` 内 try/catch + 警告日志（stub provider 实测：修复前 REJECTED 且 logs 为空，修复后 RESOLVED 且有一句能照做的提示） |
+| 10 | `wav_write` / `sfxkit.save` / `scorekit.save` 把 NaN/Inf 静默写进 WAV | NaN 经 `clip` 再 `astype(int16)` 变成 0，经 `rint` 再 `astype(int32)` 变成 INT_MIN（满幅负样本）——成片里一声爆响或随机哑音，且没有任何报错 | 三个写盘入口统一拒绝非有限值并报错 |
+| 11 | 极短音频让混音直接崩 | `voice_env` / `duck` 的 `np.convolve(mode="same")` 在信号短于核时返回核长，再 `np.maximum` 广播失败；`duck_voice` 在「旁白比背景短」时同样崩 | 核长上限收敛到 `len(v)`；末尾不足一块向上取整并补零；包络短于背景时补零（旁白结束后背景原样恢复） |
+| 12 | `AudioBus.place` 传负起点崩、`music_bed` 传 `seg=0` 死循环 | 负下标切片让长度变 0 后广播崩；`seg=0` 时 `t` 不前进，6 秒片要跑 2 分钟（靠 100000 次上限才停） | 负起点按「从 0 秒开始、裁掉前面 |i0| 个采样」处理；`seg<=0` 在入口拒绝 |
+| 13 | `CueBus` 对音效参数错误静默降级 | 任何 `TypeError` 都退化成「只传 seed」，用户改了 cue 参数却听不出变化，日志一个字都没有 | 只对「配方不认识这个关键字」逐个删参重试，其它错误明确抛错 |
+| 14 | `theme_overrides` 写 hex 颜色会在渲染期崩 | schema 与文档的示例都是 `"#ff8a3d"`，而 JSON 没有元组，照着写必然踩；旧实现把字符串原样塞进主题，首次 `int("#")` 就 ValueError | `apply_theme_overrides()` 统一接受 `[r,g,b]` / `#rrggbb` / `#rgb` 并做类型校验，错误提前到 `--stage style` |
+| 15 | `--engine web` 的 DURATION 契约难以定位 | 报错只说「页面 DURATION 与 timeline 不一致」，不说 DURATION 写在哪（实际在 `assets/web/film.js`）；默认模板片 29s 而模板写死 12s，等于「拷模板 + --engine web」这条路 100% 走不通 | 报错带上入口 HTML + 同目录脚本清单 + 一条可照抄的 grep + 目标数值；模板改为**从场景表推出 DURATION**（`FK.timelineEnd()`），新增 `window.WINDOW_DURATION` 显式覆盖 |
+| 16 | `page_meta` / `export_cues` 缺 `window.DURATION` 时报 float() 收到 NoneType | 看不出是「页面契约缺字段」 | 统一 `page_number()`：缺字段/非数字/非正数各有可操作报错 |
+| 17 | `filmcheck` 的时长对账按单一语速 4.2 字/秒 | 模板片实测 5.2 字/秒的句子让估算偏短 5.2 s → 假 WARN「剧本与 timeline 差 5.23 s」；`pacing.lead` 也被当成「没写 lead」 | 改成语速区间 3.6–5.6（取 voicekit 校准与 stylekit 的 cps_band 交集）+ 按 `pacing > 顶层字段 > 默认` 的优先级读取 |
+| 18 | `voicekit calibrate --only` 拼错声线名 | 静默变成空集合 → 打出「所有音色都合成失败（多半是没网）」，把配置错误伪装成网络错误 | 先点名校验，给出可照抄的可用清单，退出码 2 |
+| 19 | `audio_similarity` 的相关系数对常量信号返回 0 | 「配乐渲染成静音」这种最严重回归反而判 PASS（0 <= 0.85）；D2「侧链让位」在侧链被删掉时也能过（guard 兜底被算作侧链效果） | 常量/静音信号返回 NaN 并在输出打印 n/a；测侧链时传 `guard_snr_db=0` 关掉兜底 |
+
+| 20 | `--strict-stale` 把文档主推的**分步跑法**整个打死 | 修好 strict 之后暴露的：`stagewatch` 的 no-manifest 判据是「本 stage 的输入齐了」就报，而分步跑时这本来就是常态 → `--stage style` 之后再 `--stage tts --strict-stale` 必然 EXIT=1 | 判据改成「**本阶段自己的产物已经在 work/ 里**、而 manifest 没有本阶段记录」（产物在 = 有人跑过却没留痕）；同时把 `qa` 的 outputs 从 `gates.json` 换成 `qa/sheet.png`（gates.json 任何交付阶段都会写，不能当证据）；`--stage stills` 自动补跑 tts/layout 也补落 manifest |
+| 21 | `engine=web` 的签核指纹漏了页面脚本 | v0.6 承诺「改了画面代码旧签核自动失效」，但 `content_hash` 只含剧本 + scenes.py + 引擎；web 引擎的画面逻辑在 `web/*.js`，改它旧签核仍然有效 | `content_hash(..., web_entry=)` 在 `engine=web` 时纳入入口页同目录的 `.js/.mjs/.html`（按名排序后逐个 sha1）；**pil 路线不参与**（实测 pil 哈希值与改前逐位一致，老项目签核不会无故失效） |
+| 22 | `theme_overrides` 不参与主题体检 | `resolve_style` 体检的是**基础主题**，而 scenes 实际用 `plan[theme]`（基础 + overrides）→ 用 overrides 把 ink/bg 调成低对比度，体检照样 PASS，渲完才发现字幕看不清 | 改写为体检最终主题（实测：基础主题 lint 为空，最终主题报「ink 与背景对比度 1.09 < 7.0」） |
+| 23 | `--engine web` 静默合并两套时间基准的 cue | `scenes.py` 的 `cues()` 按 PIL 时间轴生成，页面动画按页面时间轴；合并后音效可能响在错误的幕上 | 不静默：在 `st_cues` 里显式 WARN 并给出两条改法（走 PIL 路线，或把 cue 写进页面/film.json 并删掉钩子）。合并行为不变（它有文档依据） |
+| 24 | `webengine` 的 ffmpeg stderr 管道死锁 | `stderr=PIPE` 却只在 `wait()` 之后才读，而 `stdin.write()` 是同步阻塞：编码器刷超 64 KB 就互等，整个渲染永久挂死 | stderr 落 `TemporaryFile()`（无缓冲上限），失败时读回错误文本 |
+| 25 | `webengine snap --every` 传非正值会死循环 | `--every -1` 在开完浏览器后点数组无限追加（实测 40 s 不返回）；`--every 0` 被当成没写 | 必须为正数、`--times` 解析失败给中文错误，均退出码 2 |
+| 26 | `qa_frames` 在 30 fps 成片上白跑一次全文件 `ffmpeg -i` | 兜底条件是 `fps == FPS_FALLBACK`，而 30 正是本项目最常见值 | 加 `fps_parsed` 标志，只在 ffprobe 没给全信息时回退（实测 `_probe` 子进程调用 2 → 1） |
+| 27 | `qa_frames --expect-duration nan` 静默通过 | `abs(duration - nan) > 0.5` 恒为 False，传了预期时长但校验静默失效 | 非有限数字 → WARN「本次不做预期时长校验」 |
+| 28 | `loudnorm` 拿 `-inf` 的测量值去编码 | 全静音/极短音频时 ffmpeg 给 `input_i=-inf`，塞进 `measured_*` 会被拒（`Value -inf ... out of range`），mux 直接失败 | 量不到有限测量值就返回 None（mux 打 WARN 跳过标准化，qa 的响度门禁照旧兜底） |
+| 29 | 旁白录得太轻时，旁白优先/SNR 兜底**整体静默失效** | 活跃区为空 → `voice_snr` 返 NaN → 背景一点不压，日志也不说 | 检测到「有声音但到不了活跃区」时 WARN 并给出峰值 dBFS 与门限 |
+| 30 | `estimate.py` 系统性偏乐观 15–20% | 29 s 片实测总 28.4 s，估算只给 17.5–24.8 s；分阶段错得更明显（qa 估 0.97 vs 实测 6.2–6.8，把 qa 算小 6 倍；并行按 jobs 线性折算，实测 2 进程只有 1.51×） | 用实测回填全部基准常量，新增 `PARALLEL_EFF` / `MUX_BASE_SEC` / `QA_BASE_SEC` / `CALIBRATION`（机型·日期·样本·逐 stage 实测值，人读输出与 `--json` 都带），无实测阶段给 ±30% 区间 |
+| 31 | `score` 阶段对**任何** TypeError 都换签名重试 | scorekit 内部真报 TypeError 时，用户会看到「不接受任何一种已知签名」，照着这个方向白找；真实原因（内部参数为 None）被吞掉 | 只对 `unexpected keyword argument` 走签名兼容链；其它 TypeError 立刻报「内部报错」并带上本次签名 |
+| 32 | `--stage all` 从不往 manifest 记 `style` | `_nm = "style" if stage == "style" else None`，而 `_stage_end(None)` 是空操作 → 跑完 all 之后 manifest 里**没有** style 这一行（实测两个独立目录都是 `tts,layout,cues,score,sfx,audio,frames,mux,qa`）；于是之后任何一次 `--stage style` 都会被判「产物在但没有记录」 | all 模式也记 style 的 manifest 行 |
+| 33 | 分步跑 + `--strict-stale` 的两处误杀 | ① `--stage frames` 之后跑 `--stage mux --strict-stale` 必然 EXIT=1（mux 发现自己的输入 silent.mp4 变了，但这正是**本轮要重算的输入**）→「重跑上游再跑下游」这个标准动作在 strict 下永远走不通；② #32 带来的假 no-manifest | ① 把判定拆成三档：**本轮计划内**的输入变化打 `[待重算]`（不判红，前缀也换掉以免 CI 里 `grep '[stale]'` 误报）；**不在计划内、且产出它的上游阶段自己过硬问题**（递归一层、防环）仍硬报，并说明是哪个上游过时；其余保持原 `input-changed`。② 见 #32 |
+
+### 顺手修掉的小项
+
+- `scenes.py` 的 `_bg` 缓存键与 `--jobs` 子进程主题元组往返：补了「JSON 快照后重解风格」的注释与兜底。
+- `voice_env` 的块数向上取整：极短音频的最后一段不再被丢掉。
+- CI 注释里写错的 `29 条` 改正；`references/quality-gates.md` 的 `PASS 29` 改正；`references/web-engine.md` 的「24 项 + 一次真实浏览器」措辞歧义改正。
+- `README.md` 的版本徽章 `0.6.0 > 0.7.2`；补 v0.7.0 / v0.7.1 版本史；补 `Node.js >= 20` 环境前提（与 `package.json engines` 对齐）。
+- `docs/styles/demo-results.json`：README 的三行 demo 表按「v0.5 提交信息 + demo-results.json」两处独立证据校正为 88BPM/G、84BPM/F，并在表前注明**这是 v0.5 历史快照、片源脚本未随仓库分发、不可直接复现**（BPM/调性由内容指纹落桶，换一版正文就可能换桶）。
+- `SKILL.md` 的 `<SKILL_DIR>/../../../tools/estimate.py` 是死路径（往上三级跑出包外），改为 `<REPO>/tools/estimate.py` 并新增 `<REPO>` 定义：`tools/` 与 `schemas/` 在包根、不在技能目录，quickstart 拷出来的工作目录也没有它们。
+- `SKILL.md §13 升级须知` 补上 v0.5 → v0.7.2 的迁移动作（原来只写到 v0.4）。
+- 文档里写了一个不存在的参数 `render.py --stage explain --json`（实测 unrecognized arguments），机读路径改为 `stagewatch.py --work work --json`。
+- `package.json files` 补 `tools/selftest_noscipy.py`（CI 在用，用户复现「无 scipy 兜底」也需要它）。
+
+### 自检：38 → 43 条
+
+新增 4 条，每条都做过**可证伪性验证**（把对应修复回退 → 断言必须 FAIL）：
+
+| # | 断言 | 回退后是否 FAIL |
+|---|---|---|
+| 39 | 音频边界：极短旁白不崩 / NaN·Inf 拒绝写盘 / 负起点与 seg=0 有守卫 | 是（移除 NaN 守卫 → FAIL） |
+| 40 | QC 报告落点只有一个来源（--out 的目录） | 是（重新引入第二处拼接 → FAIL） |
+| 41 | 空门禁账本不许写成「通过」 | 是（把 `if not items` 改回 false 分支 → FAIL） |
+| 42 | 单阶段产物归属：不许把别的 stage 写的文件算成自己的（假 stale） | 是（恢复旧 STAGE_IO → FAIL） |
+| 43 | `theme_overrides` 必须参与主题体检（否则能用 overrides 造出低对比度成片） | 是（改回只体检基础主题 → FAIL） |
+
+另外把 `run()` 的 SKIP 判定从「精确等于 skip」改成「以 skip 开头」——
+带理由的降级（例如 `skip（缺 render.py）`）以前会被记成 **PASS**，而这正是本版最想消灭的「skipped 冒充通过」。
+
+### 实测（本机 Windows 11 / Python 3.12 / ffmpeg 9.0.2）
+
+- `selfcheck`：**PASS 43 / FAIL 0 / SKIP 0**，7–11 s（跑 5 次，7.0–10.6 s）。
+- `ci_check`：**PASS 12 / FAIL 0**。
+- `sfxkit --selftest` 16/16；`scorekit --selftest` 21/21；`qa_frames --selftest` 22/22；`webengine --selftest` 24/24（含真实无头浏览器与跨会话字节一致）。
+- 模板片 PIL 路线：`--stage all` EXIT=0，29.00 s / 1920x1080 / 30 fps / -16.5 LUFS / 真峰 -1.4 dBTP，门禁 pass 7 / fail 0 / skipped 1（skipped 是人工签核）。
+- 中文路径 + 中文成片名（`中文工作区/成品/片子.mp4`）：EXIT=0，报告落在同一个交付目录里。
+- `--jobs 2` 分块并行：2 段 29.00 s 成片；删掉一段后 `--resume` 只补那一段。
+- `--engine web`：`WINDOW_DURATION` 覆盖到 29.011 后能出片（72 s 渲染）。
+- `tools/audio_similarity.py --strict`：A/B/C/D 四组全 PASS（D 组 SNR 12.9 dB、侧链让位 6.0 dB）。
+
+### 已知限制（本版没做，写下来别装看不见）
+
+- `--engine web` 与仓库自带的 `scenes.py` 混用：`scenes.py` 的 `cues()` 按 PIL 时间轴发 cue，而页面按自己的时间轴发事件。
+  本版不再把这种跨基准配对算成「同步超差」（会显式报「跨基准未对照 N 条」），但**默认模板片仍不能直接用 --engine web 出片**——
+  `assets/web/film.js` 是 12 秒 3 幕的独立演示页，出长片必须自己重写场景。这条是设计边界，不是 bug，但之前文档没写清楚。
+- 跨平台换行：仓库没有 `.gitattributes`，`core.autocrlf` 在不同机器上不一样，而 `gates.content_hash()` 与
+  `stagewatch._fp()` 都按字节算 SHA-1 → 同一份剧本在 LF/CRLF 两种 checkout 上内容指纹不同（旧签核会「内容已变」、`--stage explain` 会假 stale）。
+  修法很简单（`* text=auto eol=lf` + `*.png binary`），但它会让**所有已存在的内容指纹一次性变化**，必须单独提交并告知用户重签，所以不在本版混进来。
+- `estimate.py` 的耗时模型仍是经验公式：核心常量来自 29.011 s 模板片 + 58 s 变体、`--jobs 1/2`、PIL 路线；  web 引擎与 `--jobs 8–12` 的并行效率仍是外推（`PARALLEL_EFF` 用线性模型），389 s 只有外推锚点。`--json` 里带 `calibration` 字段说明基准来源，换机请重测后回填。- `stagewatch` 对 >8 MB 的文件走 `size+mtime(秒)` 快路径：同一秒内、同尺寸的外部修改会漏检（模块 docstring 早已写明这个取舍，`audio.wav` / `silent.mp4` 恰在这个区间）。- `manifest.json` 没有 stage 级「完成」标记：跑到一半被 kill 与从未跑过在时间轴上无法区分（靠 `output-missing` 与 `_part_` 半成品前缀兜底）。- 被**外部工具**截断的分块，头部 `nb_frames` 仍写着完整值，只有 `-count_frames` 能查出来（实测 390 帧的块要 3.5 s，长片几十块会让每次 `--resume` 多几分钟）；这类残块仍靠拼接后时长校验兜底。- `gates.content_hash` 的 web 资产指纹只看入口页**同目录**的 `.js/.mjs/.html`，不解析 HTML 里的 `<script src>`、不递归子目录。- `qa_frames` 的 `loudness_curve` / `sample_frames` 会把整段音频/整片帧读进内存（`sample_frames` 的 docstring 已警告 389 s ≈ 670 MB，并给了流式替代路径）。- 单跑 `--stage style` 也会写 `work/gates.json`（它在交付阶段清单里），共享同一个 `--work` 的协作场景要留意。- `--stage explain` 是只读查询，不写账本——所以 `--strict-stale --stage explain` 只改退出码，不在 QC 报告留痕。- `filmcheck` 没有 `--work` 参数：`--work` 指到非常规位置时会静默跳过时长对账（不报错）。
+- `--stage all` 时 10 个 stage 全在「本轮计划」里，所以 all 内部「本阶段输入变了」一律是 `[待重算]` 提示（这正是 all 的语义：它本来就会把每一步重算一遍）。想看硬 stale 请用单 stage 跑或 `--stage explain`。
+- `stagewatch.py` 单独跑时拿不到「本轮计划」，`pending` 默认为空 —— `python stagewatch.py --json` 会把 all 模式下的「待重算」如实报成 `input-changed`（`kind` 不同、不判红）。CI 若直接消费该 JSON，要留意这个差异。
+
+### 升级须知（v0.7.1 → v0.7.2）
+
+1. **QC 报告的位置变了**：`QC-REPORT.md` 现在只落在 `--out` 的目录下（默认还是 `out/`，行为不变；`--out deliver/film.mp4` 时落在 `deliver/QC-REPORT.md`）。以前 accept 会额外往 work 的兄弟目录 `out/` 写一份，那一份不再产生。
+2. **`--strict-stale` 现在真的会让命令失败**（退出码 1）。如果你在脚本里带着它跑、且习惯忽略退出码，会开始看到中断。这是修正，不是回归；要放行请显式加 `--allow-stale`（会记进 QC 报告）。
+3. **`--engine web` 需要对齐页面时长**：模板页改成从场景表推导 DURATION，要出不同于场景表总长的片子，请在 `index.html` 里写 `window.WINDOW_DURATION = 秒数`。
+4. **`theme_overrides` 的颜色可以写 hex 了**（`"#ff8a3d"`），也可以继续写 `[255,138,61]`；类型不对会在 `--stage style` 阶段就报错，而不是渲染到一半崩。
+5. 自检条数 38 → **43**；如果你有脚本 grep 自检输出的「PASS 38」，需要跟着改。
+6. **`--strict-gates` 在单 stage 上也生效了**：以前只有 `all`/`qa` 这类收尾路径会按账本判失败，现在任何 stage 收尾都统一判定。所以 `--stage layout --strict-gates` 如果账本里有 skipped 条目，会返回非 0（这是「同一套语义」的必然结果，如果你依赖旧行为需要显式去掉这个参数）。
+7. 分步跑（`--stage style` → `tts` → `layout` …）现在可以安全地带 `--strict-stale`：旧版会把「输入齐了」误判成「交接了别人的 work 目录」。
 ## 0.7.1 — 旁白优先：让观众听清字，BGM 与音效退回"可选层"
 
 > 用户的要求很直接：「视频以旁白为主，BGM 和其它音效可有可无，至少不能影响旁白的清晰度」。

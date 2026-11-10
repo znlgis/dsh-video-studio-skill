@@ -34,6 +34,10 @@ sys.path.insert(0, str(SCRIPTS))
 # 契约 §5 的阈值（改契约时两边一起改）
 THRESH_A_SAME_STYLE_MAX = 0.85      # 同风格、只换内容指纹的相关性上限
 THRESH_A_CROSS_STYLE_MAX = 0.52     # 换风格的相关性上限（改造前 0.534）
+# 实测余量提示（v0.7.2）：本机稳定测到 0.514（连跑 3 次逐位相同），离阈值只剩 0.006。
+# 这个生成链是确定性的，所以换平台/换 numpy 若把 0.514 推到 0.52 以上，
+# 更可能是「风格差异化真的缩水了」而不是浮点噪声 —— 请先查 scorekit 的变奏参数，
+# 别第一反应去抬阈值（抬到 0.53 就离改造前 0.534 只剩 0.004，等于这条门禁白设）。
 THRESH_C_DUCK_MIN = 3.5             # duck 默认深度下限（dB）
 THRESH_D_SNR_MIN = 12.0             # 人声段 旁白/背景 响度差下限（dB）
 
@@ -46,6 +50,20 @@ def _ok(name, cond, detail):
         FAILS.append("%s: %s" % (name, detail))
 
 
+def _fmt_db(v):
+    """dB 值格式化：NaN（无可判定区间）打印成 'n/a' 而不是让 %f 抛 TypeError。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "n/a"
+    return "n/a" if v != v else ("%.1f" % v)
+
+
+def _rms(x):
+    a = np.asarray(x, dtype=np.float64)
+    return float(np.sqrt(np.mean(np.square(a)))) if a.size else 0.0
+
+
 def _corr(x, y):
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -55,8 +73,14 @@ def _corr(x, y):
         y = y.mean(axis=1)
     n = min(len(x), len(y))
     x, y = x[:n], y[:n]
-    d = float(np.std(x) * np.std(y))
-    return float(np.mean((x - x.mean()) * (y - y.mean())) / (d + 1e-12))
+    if n == 0:
+        return float("nan")
+    sx, sy = float(np.std(x)), float(np.std(y))
+    if sx <= 1e-12 or sy <= 1e-12:
+        # 常量/全静音信号：相关系数没有定义。旧实现返回 0，于是"配乐渲染成静音"这种
+        # 最严重的回归会让 A1/A2 反而判 PASS（0 <= 0.85）。
+        return float("nan")
+    return float(np.mean((x - x.mean()) * (y - y.mean())) / (sx * sy))
 
 
 def _centroid_hz(x, sr=48000):
@@ -95,11 +119,14 @@ def _cue_track(content_fp=None, style=None, key=None):
                            content_fp=content_fp, key=key)
 
 
-def _voice_priority_snr(sr=48000):
+def _voice_priority_snr(sr=48000, guard_snr_db=12.0):
     """量"人声比背景响多少"：用真实 scorekit 配乐 + 类人声，按 st_audio 的默认参数混音。
 
     返回 (人声活跃区 SNR dB, 间隙背景 RMS, 人声处背景额外让位 dB)。
     口径与 `filmkit.voice_snr` 一致：只统计人声活跃区（含间隙会稀释问题）。
+
+    guard_snr_db 默认 12（= st_audio 默认，量"最终交付"的 SNR）；测"侧链本身让位多少"
+    时传 0 关掉兜底——否则兜底的整体补压会被算成侧链效果，D2 在侧链被删掉时也能过。
     """
     import filmkit as K
     import numpy as np
@@ -115,7 +142,8 @@ def _voice_priority_snr(sr=48000):
                                 mood="steady", seed=7, fingerprint="d-group")
     music = np.asarray(music, dtype=np.float32)
     out = K.mix_film(voice.astype(np.float32), music, None, total=6.0, fade=0.0,
-                     music_gain_db=-12.0, voice_duck_db=6.0, verbose=False)
+                     music_gain_db=-12.0, voice_duck_db=6.0,
+                     guard_snr_db=float(guard_snr_db), verbose=False)
     v2 = np.stack([voice, voice], axis=1)
     bg = out - v2
     snr = K.voice_snr(voice.astype(np.float32), bg)
@@ -154,12 +182,18 @@ def main(argv=None):
     a4 = _music(args.dur, "tech-deep", "content-a")   # 同指纹复渲染，验证确定性
     same_style = _corr(a1, a2)
     cross_style = _corr(a1, a3)
+    rms_a1 = _rms(a1)
+    print("  配乐非静音（RMS > -60 dBFS）    : %s  （rms=%.4f，静音时相关系数无定义）"
+          % (rms_a1 > 0.001, rms_a1))
     print("  同风格·同bpm·同调，只换内容指纹 : corr = %.3f  （目标 <= %.2f）"
           % (same_style, THRESH_A_SAME_STYLE_MAX))
     print("  换风格（tech-deep -> magazine） : corr = %.3f  （目标 <= %.2f）"
           % (cross_style, THRESH_A_CROSS_STYLE_MAX))
     print("  同指纹两次渲染逐样本相同        : %s" % bool(np.array_equal(a1, a4)))
     if args.strict:
+        # A0 是前置条件：若配乐渲染成静音/常量，A1/A2 的相关系数没有定义（NaN），
+        # 必须显式判 FAIL，而不是让 NaN 比较悄悄变成 False 后只剩一句 corr=nan。
+        _ok("A0 配乐非静音", rms_a1 > 0.001, "rms=%.4f" % rms_a1)
         _ok("A1 同风格换指纹可区分", same_style <= THRESH_A_SAME_STYLE_MAX,
             "corr=%.3f" % same_style)
         _ok("A2 换风格更不像", cross_style <= THRESH_A_CROSS_STYLE_MAX,
@@ -205,14 +239,19 @@ def main(argv=None):
     print("=" * 72)
     print("D. 旁白优先：人声与背景的响度差（v0.7.1）")
     print("=" * 72)
-    snr_db, base_db, duck_db_eff = _voice_priority_snr()
-    print("  人声段 旁白/背景 响度差       : %.1f dB  （目标 >= %.1f）"
-          % (snr_db, THRESH_D_SNR_MIN))
-    print("  人声处背景额外让位             : %.1f dB  （目标 >= 4）" % duck_db_eff)
+    snr_db, base_db, _duck_with_guard = _voice_priority_snr()
+    # 侧链让位单独量一次（guard_snr_db=0）：兜底的整体补压也是"背景变低"，
+    # 混在一起算会把 D2 变成"guard 生效"的证据，侧链被删掉时 D2 照样 PASS。
+    _snr_no_guard, _gap_no_guard, duck_db_eff = _voice_priority_snr(guard_snr_db=0.0)
+    print("  人声段 旁白/背景 响度差       : %s dB  （目标 >= %.1f，含 guard 兜底）"
+          % (_fmt_db(snr_db), THRESH_D_SNR_MIN))
+    print("  人声处背景额外让位             : %s dB  （目标 >= 4，仅侧链，guard 关）"
+          % _fmt_db(duck_db_eff))
     print("  间隙里背景电平                 : %.3f（应为恢复后的基线）" % base_db)
     if args.strict:
-        _ok("D1 旁白听得清", snr_db >= THRESH_D_SNR_MIN, "SNR=%.1f dB" % snr_db)
-        _ok("D2 旁白侧链生效", duck_db_eff >= 4.0, "让位 %.1f dB" % duck_db_eff)
+        _ok("D1 旁白听得清", snr_db is not None and snr_db == snr_db
+            and snr_db >= THRESH_D_SNR_MIN, "SNR=%s dB" % _fmt_db(snr_db))
+        _ok("D2 旁白侧链生效", duck_db_eff >= 4.0, "让位 %s dB" % _fmt_db(duck_db_eff))
 
     if args.out:
         out = Path(args.out)

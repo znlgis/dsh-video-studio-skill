@@ -54,13 +54,41 @@ def _sha1_file(path):
         return "missing"
 
 
-def content_hash(script=None, scenes_path="", script_path="", engine="pil"):
-    """本次渲染的"内容身份"：剧本 + 场景代码 + 引擎。
+WEB_ASSET_EXT = (".js", ".mjs", ".html")
+# web 引擎的画面逻辑在页面脚本里，不在 scenes.py 里。这几个后缀按文件名排序后逐个取
+# sha1，再合并成一个指纹；不含 .css（样式改动不影响"画面语义"，也确实常见于调色试错）。
+
+
+def web_asset_fingerprint(entry):
+    """入口页面同目录下 .js/.mjs/.html 的内容指纹（按文件名排序后拼接）。
+
+    返回 (combined, files)：combined 是 16 位 hex（目录读不了返回 "missing"）；
+    files 是参与计算的 [文件名]，只用于报告/排错，不进指纹（避免绝对路径进 hash）。
+    """
+    if not entry:
+        return "missing", []
+    d = os.path.dirname(os.path.abspath(str(entry)))
+    try:
+        names = sorted(n for n in os.listdir(d) if n.lower().endswith(WEB_ASSET_EXT))
+    except OSError:
+        return "missing", []
+    if not names:
+        return "missing", []
+    rows = []
+    for n in names:
+        rows.append("%s:%s" % (n, _sha1_file(os.path.join(d, n))))
+    return _sha1_text("\n".join(rows)), names
+
+
+def content_hash(script=None, scenes_path="", script_path="", engine="pil", web_entry=""):
+    """本次渲染的"内容身份"：剧本 + 场景代码 + 引擎（web 时再加页面脚本）。
 
     只取与"这一版画面/声音"相关的量：
       * 剧本：去掉渲染期注入的 _path/_dir/_style 等私有键后规范化 json；
       * scenes.py：文件内容（画面逻辑变了，旧签核就得失效）；
-      * engine：pil 与 web 是两条渲染路径，产物不可互换。
+      * engine：pil 与 web 是两条渲染路径，产物不可互换；
+      * web_entry：engine=web 时，入口页同目录的 .js/.mjs/.html 一起算。
+        **pil 路线不参与**——否则老 PIL 项目每次升级都会被判"内容已变"，签核无故失效。
     """
     body = {}
     if isinstance(script, dict):
@@ -68,19 +96,24 @@ def content_hash(script=None, scenes_path="", script_path="", engine="pil"):
             if str(k).startswith("_"):
                 continue
             body[k] = v
+    eng = str(engine or "pil")
     payload = {
         "script": _sha1_text(json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)),
         "script_file": _sha1_file(script_path) if script_path else "",
         "scenes": _sha1_file(scenes_path) if scenes_path else "",
-        "engine": str(engine or "pil"),
+        "engine": eng,
     }
+    if eng == "web":
+        assets, _names = web_asset_fingerprint(web_entry)
+        payload["web_assets"] = assets
     return _sha1_text(json.dumps(payload, sort_keys=True))
 
 
 class GateLedger:
     """一次运行内的门禁账本（多 stage 共用；--stage all 时是同一个对象）。"""
 
-    def __init__(self, work, script=None, scenes_path="", script_path="", engine="pil"):
+    def __init__(self, work, script=None, scenes_path="", script_path="", engine="pil",
+                 web_entry=""):
         self.work = str(work or "work")
         self.items = []
         self.t0 = time.time()
@@ -88,7 +121,12 @@ class GateLedger:
         self.scenes_path = str(scenes_path or "")
         self.script_path = str(script_path or "")
         self.engine = str(engine or "pil")
-        self.content_hash = content_hash(script, self.scenes_path, self.script_path, self.engine)
+        self.web_entry = str(web_entry or "")
+        self.web_assets = []
+        self.content_hash = content_hash(script, self.scenes_path, self.script_path,
+                                         self.engine, web_entry=self.web_entry)
+        if self.engine == "web":
+            _fp, self.web_assets = web_asset_fingerprint(self.web_entry)
         self.bypassed = []          # --no-gate 绕过的记录（必须留痕）
 
     # ---- 记账 ----
@@ -142,9 +180,13 @@ class GateLedger:
 
     # ---- 落盘 ----
     def to_dict(self):
-        return dict(schema=SCHEMA, at=self.t0, contentHash=self.content_hash,
-                    engine=self.engine, counts=self.counts(),
-                    items=list(self.items), bypassed=list(self.bypassed))
+        d = dict(schema=SCHEMA, at=self.t0, contentHash=self.content_hash,
+                 engine=self.engine, counts=self.counts(),
+                 items=list(self.items), bypassed=list(self.bypassed))
+        if self.engine == "web":
+            # 审计用：让用户/CI 能看出这个指纹到底盖了哪些页面脚本（不进 hash，绝对路径不外泄）
+            d["webAssets"] = list(self.web_assets)
+        return d
 
     def write_json(self):
         """work/gates.json —— 给程序读（QC-REPORT.md 只是它的渲染层）。"""
@@ -334,7 +376,8 @@ def render_report(work, out=None):
                     (v.get("detail") or "-").replace("|", "\\|")))
     if stale:
         L.append("")
-        L.append("> 内容已变的签核：%s（改了剧本 / scenes.py / 引擎，旧签核自动失效，需重新签）"
+        L.append("> 内容已变的签核：%s（改了剧本 / scenes.py / 引擎 / web 页面脚本，"
+                 "旧签核自动失效，需重新签）"
                  % "、".join("`%s`" % x for x in stale))
     L.append("")
     L.append("## 三、耗时台账（`work/cost.jsonl` 实测，非估算）")
@@ -366,7 +409,17 @@ def render_report(work, out=None):
         nxt = "四"
     L.append("## %s、结论（照抄，别自己发挥）" % nxt)
     L.append("")
-    if counts.get(FAIL):
+    if not items:
+        # 没有门禁记录 ≠ 全部通过。以前这里落到 else 分支打印"**通过**"，
+        # 于是 gates.json 被删 / 写坏 / 根本没跑 qa 时，QC-REPORT.md 会是一份
+        # 宣称通过的交付凭据——正是本模块开头要防的"看起来干净、其实没在查"。
+        if not os.path.exists(gj):
+            why = "没有 %s（本次没有跑过任何 stage，或 work/ 目录已丢）" % gj
+        else:
+            why = "%s 读不出来 / 里面 0 条门禁（JSON 损坏或并发写坏）" % gj
+        L.append("- **未判定**：%s。**这不等于通过**——先跑 --stage qa（或 --stage all）"
+                 "产出真实门禁再交付。" % why)
+    elif counts.get(FAIL):
         L.append("- **未通过**：fail %d 项，按上表逐条修，别宣称完成。" % counts.get(FAIL))
     elif counts.get(SKIP):
         L.append("- **有条件通过**：skipped %d 项（明确没执行），交付时必须逐项说明原因。"
@@ -439,7 +492,17 @@ if __name__ == "__main__":
         p = write_report(a.work, a.out or None)
         print("[QC 报告]", p)
         if a.json:
-            print(json.dumps(GateLedger(a.work).to_dict(), ensure_ascii=False, indent=1))
+            # 读磁盘上的账本，别现场 new 一个空的：GateLedger(work) 不传剧本时
+            # contentHash 是按空剧本算的，打出来的 JSON 跟 work/gates.json 对不上、
+            # items 永远是 [] —— 机读输出等于撒谎。
+            gp = os.path.join(str(a.work), "gates.json")
+            try:
+                with open(gp, encoding="utf-8") as fh:
+                    print(json.dumps(json.load(fh), ensure_ascii=False, indent=1))
+            except (OSError, json.JSONDecodeError) as err:
+                print(json.dumps(dict(ok=False, work=str(a.work),
+                                      error="没有可读的 %s：%s" % (gp, err)),
+                                 ensure_ascii=False, indent=1))
         sys.exit(0)
     except (ValueError, OSError) as e:
         print("[ERROR] %s" % e, file=sys.stderr)

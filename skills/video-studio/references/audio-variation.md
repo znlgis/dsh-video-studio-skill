@@ -102,12 +102,12 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
   [段落边界 - 2.2s, 边界] 区间内的 whoosh/riser/reverse_swell 需要自动 -3 dB（在 filmkit 里做，
   或 st_sfx 后处理；由 lead 决定实现位置，**B 路不要碰**）。
 
-## 5. 验收阈值（改完必须重跑 `python tools/audio_similarity.py`）
+## 5. 验收阈值（改完必须重跑 `python <REPO>/tools/audio_similarity.py`）
 
 | 指标 | 改前 | 目标 | 落地实测（2026-11-09） |
 |---|---|---|---|
 | A 同风格换指纹 corr | 0.966 | **≤ 0.85**（仍要像同一风格，但不能像同一首） | **0.645** |
-| A 换风格 corr | 0.534 | ≤ 0.52（不能变得更像） | **0.511** |
+| A 换风格 corr | 0.534 | ≤ 0.52（不能变得更像） | **0.514**（v0.7.2 复测，余量 0.006；连跑 3 次逐位相同。余量薄是有意的：抬到 0.53 就离改造前的 0.534 只剩 0.004，这条门禁就没意义了） |
 | B 同 cue 序列跨片逐样本相同 | True | **False**（不同内容指纹必须不同） | False（同 fp 仍逐样本相同） |
 | B legacy（不传 style/fp） | True | **必须仍为 True**（向后兼容） | True |
 | C duck 默认 | 2.5–4.5 dB | 3.5–5.5 dB | 4.0（mono 3.0 / cinema 5.5） |
@@ -124,10 +124,14 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 本轮不做；`--strict` 用固定的 content-a / content-b 做验收，两者落在不同档。
 
 另有硬性回归（任何一条红都不算完成）：
-1. `python skills/video-studio/scripts/selfcheck.py` 全 PASS（现在 38 条）。
+
+> 下面 1–4 的路径都按**仓库根**写（`python skills/video-studio/scripts/…`）；如果你已经 `cd` 进技能目录，
+> 去掉 `skills/video-studio/` 前缀即可。`<REPO>` = 仓库根 / 装好后的包根。
+
+1. `python skills/video-studio/scripts/selfcheck.py` 全 PASS（现在 43 条）。
 2. `python skills/video-studio/scripts/scorekit.py --selftest` 全 PASS。
 3. `python skills/video-studio/scripts/sfxkit.py --selftest` 全 PASS。
-4. `python tools/ci_check.py` 全 PASS。
+4. `python <REPO>/tools/ci_check.py` 全 PASS（在包根执行）。
 5. legacy 逐样本不变：selfcheck 第 20/26/33 条不得改动其断言。
 
 ## 6. 协作规则

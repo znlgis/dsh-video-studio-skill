@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.7.2-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -28,6 +28,14 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 顺手修掉一个**已发布版本里的真 bug**：`--jobs >1` 并行渲染因主题色元组被 JSON 变成 list 而直接崩溃
 > ——也就是 README 下面教的"长片分块并行"此前根本跑不通。
 > 详见 [CHANGELOG.md](CHANGELOG.md)、SKILL.md §7.0 与 references/change-impact.md。
+> **v0.7.0（声音也不再一片一样）**：内容指纹从 seed 推进到**结构层**——和弦替换、进行档位、动机偏移、
+> 鼓型 ghost 都随内容变化；音效 seed 改内容派生并跟随配乐调性（`in_key`）；段落边界前 2.2 s 的
+> whoosh/riser 自动 -3 dB，避免与配乐过门撞车；duck 按风格加深到 3.0–5.5 dB。legacy 路径逐样本不变。
+> **v0.7.1（旁白优先）**：配乐基线从 -1.5 降到 **-12 dB**，有人声处再按包络压配乐 6 dB / 音效 3 dB，
+> 混音后按台词活跃区实测旁白/背景差，**不足 12 dB 自动补压背景**（`guard_snr_db`，最多 30 dB）。
+> 实测（真实素材）：旧混音 -4.2 dB → 新混音 12.0 dB，`audio_similarity --strict` D 组 12.9 dB；
+> selfcheck 34 → 38 条，其中第 35–38 条专盯这条链路。
+> 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §5.6 / §5.7、references/audio-variation.md。
 
 ## 安装
 
@@ -60,9 +68,16 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 <p align="center"><img src="docs/demo-pil-sheet.png" width="100%" alt="默认模板片联系表：开场 / 正文卡片 / 正文卡片 / 收尾"></p>
 
 上面四帧是用仓库自带的 `assets/film.json` + `assets/scenes.py` 从零跑一遍 `python render.py` 的
-`work/qa/sheet.png`，未经任何修图。配套实测（同一台机器）：
+`work/qa/sheet.png`，未经任何修图。配套实测（**作者机器** Windows 11 / OSGeo4W Python 3.12，
+v0.6 时期口径；TTS 实测时长与 AAC 编码会让这些数字在小范围内浮动，换机请按 SKILL.md §14 重测）：
 **时长 30.10 s / 1920×1080 / 30 fps / h264+aac 48 kHz / -16.0 LUFS / 真峰 -1.2 dBTP / 黑帧 0 /
 帧级深检：闪烁 0、空窗 0、画面静止 0**（音画同步在 PIL 路线上需要写 `visual_at` 才会真的查，见 SKILL.md §7）。
+
+怎么复现：按 [SKILL.md §1](skills/video-studio/SKILL.md) 的五步上手，把自带模板拷到**空目录**里跑一遍即可
+（`cp assets/film.json assets/scenes.py` + 拷 `scripts/*.py` → `python render.py`）。数字每次都会差一点：
+TTS 实测时长、AAC 编码都会让真峰/响度/锐度浮动，**别 chasing 小数点**。本机（另一台）复测同模板得到的是
+29.00 s / -16.5 LUFS / -1.4 dBTP / 锐度比 1.01（2026-11-10 另一台 Windows 机器复测）——
+**不同机器、不同 TTS 结果，两组都对，别混着引用**。
 
 ## 效果：同一个模板，八种气质（v0.5）
 
@@ -70,13 +85,16 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 
 <p align="center"><img src="docs/styles/sheet-8-styles.png" width="100%" alt="8 套风格对比：科技深蓝 / 杂志暖白 / 手绘纸感 / 活力撞色 / 极简黑白 / 电影青橙 / 暖灰薄荷 / 深黑鎏金"></p>
 
-三份**不同题材**的短片（全流程真跑：TTS → 排轴 → 配乐 → 音效 → 混音 → 逐帧 → 编码 → 质检）：
+三份**不同题材**的短片（全流程真跑：TTS → 排轴 → 配乐 → 音效 → 混音 → 逐帧 → 编码 → 质检；数据见
+`docs/styles/demo-results.json`，是 v0.5 时期的实测快照，片源脚本未随仓库分发，**不可直接复现**；
+**别把这张表当成"现在跑出来就是这样"**——BPM/调性由内容指纹从风格梯度里选（v0.7 起指纹还参与配乐结构），
+同一题材换一版正文就可能落到别的 BPM/调性，当前风格解析结果请以 `--stage style` 的打印为准）：
 
 | 题材 | 自动选中的风格 | 配乐 | 旁白声线 | 质检 |
 |---|---|---|---|---|
 | AI 大模型的三年 | tech-deep 科技深蓝 | 小调 116BPM / Em | 青年开场 → 男声正文 → 女声引用 | PASS（17.3s，-16.0 LUFS） |
-| 手工木作的一天 | paper 手绘纸感 | 大调 84BPM / C | 女声 + 软糯女声正文 | PASS（19.9s） |
-| 深夜学习指南 | lo-fi 暖灰薄荷 | 大调 84BPM / G | 温柔女声 + 女声开场 | PASS（20.1s） |
+| 手工木作的一天 | paper 手绘纸感 | 大调 88BPM / G | 女声 + 软糯女声正文 | PASS（19.9s） |
+| 深夜学习指南 | lo-fi 暖灰薄荷 | 大调 84BPM / F | 温柔女声 + 女声开场 | PASS（20.1s） |
 
 <p align="center"><img src="docs/styles/sheet-ai.png" width="32%" alt="AI 题材"><img src="docs/styles/sheet-craft.png" width="32%" alt="手作题材"><img src="docs/styles/sheet-night.png" width="32%" alt="深夜题材"></p>
 
@@ -96,8 +114,9 @@ cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
 cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 38 条环境/回归断言（20 秒，不联网）
-python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块
+python selfcheck.py                                     # 43 条环境/回归断言（20 秒内，不联网）
+python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块（仓库/包里的工具，
+                                                         #     不在 skills/video-studio/ 内，quickstart 拷出来的目录没有它）
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 cat out/QC-REPORT.md                                    # v0.6：机器可读交付结论（pass/fail/skipped）
@@ -122,10 +141,11 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 
 | 想要 | 怎么做 |
 |---|---|
-| 让 PIL 路线的音画同步门禁真的生效 | cue 加 `"visual_at": 绝对秒`；CI 里再加 `QA_REQUIRE_SYNC=1` 把"没查"变成失败 |
+| 让 PIL 路线的音画同步门禁真的生效 | cue 加 `"visual_at": 绝对秒`；再把 `QA_REQUIRE_SYNC=1` 加进你自己的交付流水线（本仓库的 workflow 没设它） |
 | 浏览器渲染要跨会话字节级可复现 | `--deterministic`（或 `WEBENGINE_DETERMINISTIC=1`），代价约 +22%/帧 |
 
-`<SKILL_DIR>` 是 `skill` 工具加载时回报的 resourceBase 目录（`.../skills/video-studio/`）。
+`<SKILL_DIR>` 是 `skill` 工具加载时回报的 resourceBase 目录（`.../skills/video-studio/`）；
+`<REPO>` 是包根（仓库根，或装好后 profile 里的 `node_modules/@dsh-gis/dsh-video-studio-skill/`），即 `<SKILL_DIR>` 往上两级——`tools/`、`schemas/` 都在 `<REPO>` 下，`cp` 到 `myfilm/` 后那里**没有** `tools/`。
 
 分阶段（v0.2 起**每个 stage 只做自己的事**）：`--stage style | tts | layout | cues | score | sfx | audio | frames | mux | qa | stills | accept | explain`。
 
@@ -164,30 +184,33 @@ cordis.patch.yml             组合包 patch（insert: video-studio）
 icon.svg / locale/*.json     插件页展示元数据
 skills/video-studio/
   SKILL.md                   主线：上手 / 八阶段 / 引擎选型 / 画质 / 声音 / 提示点 / 停留窗口 / 质检 / 故障速查
-  references/                pipeline · scene-authoring · audio · sfx-design · web-engine · frame-qa
-                             quality-gates · change-impact · style-packs · pitfalls
+  references/                pipeline · scene-authoring · audio · audio-variation · sfx-design · web-engine
+                             frame-qa · quality-gates · change-impact · style-packs · pitfalls
   scripts/filmkit.py         生产内核（字体/排版/字幕/音频总线/CueBus/TTS/时间轴/编码/质检）
   scripts/gates.py           v0.6 门禁账本 / QC 报告渲染 / 人工签核（绑内容指纹）
   scripts/stagewatch.py      v0.6 阶段新鲜度（work/manifest.json + --stage explain）
   scripts/filmcheck.py       v0.6 film.json 契约校验（未知键/枚举/跨字段）
   scripts/render.py          编排器（13 个 stage、pil|web 双引擎、分块并行、断点续跑、母版预览、门禁账本）
-  scripts/selfcheck.py       回归自检（38 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（43 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
   scripts/qa_frames.py       帧级深检（单帧闪烁 / 画面空窗 / 画面静止 / 音画同步 / 亮度响度曲线）
   requirements.txt           Python 依赖（必需 / 强烈建议 / 可选三档，带注释）
-  assets/film.json           剧本模板（含 hold / bpm / music / sfx.cues）
+  assets/film.json           剧本模板（含 bpm / music / sfx.cues / 逐句 hold；顶层 hold 可选，缺省用风格 pacing）
   assets/scenes.py           场景模板（开场 / 正文卡片 / 收尾 + cues() 钩子）
   assets/web/                浏览器页面模板（原生 Canvas2D 确定性时间轴）
 tools/ci_check.py            仓库级体检（12 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读）
+tools/audio_similarity.py    音频差异/相似度验收（--strict 阈值判定，改音频代码后必跑）
+tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scipy 后跑 sfxkit/scorekit 自检）
 schemas/film.schema.json     film.json 的契约（draft-07 子集）
 .github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu）
 ```
 
 ## 环境前提
 
+**插件运行**：Node.js ≥ 20（`package.json` 的 `engines`；这是 DSH 加载插件用的运行时，不必另装）。
 **必需**：ffmpeg + Python 的 numpy / Pillow / edge-tts。
 **可选**：cv2（编码锐度比）、scipy（音效滤波加速，缺了走 FFT 卷积）、
 playwright + Chromium/Edge（只在 `--engine web` 时需要）。
@@ -219,9 +242,11 @@ peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 D
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 12 项：py 语法 / node --check / JSON / 技能清单 / 依赖白名单 /
-                                #         npm pack 打包卫生 / 文档路径引用 / Python 3.9 语法 /
-                                #         Markdown 围栏平衡 / CI workflow 语法 / 单文件体积 /
+python tools/ci_check.py -v     # 12 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
+                                #         JSON + 版本号一致性（package.json vs README 徽章）/ 技能清单 /
+                                #         依赖白名单 / npm pack 打包卫生 / 文档路径 + 正文相对链接 /
+                                #         Python 3.9 语法 / Markdown 围栏（状态机）/ CI workflow
+                                #         （裸冒号 + run 里的 python 脚本是否存在）/ 单文件体积 /
                                 #         film.json 契约（调 filmcheck.py，规则只留一份）
 ```
 

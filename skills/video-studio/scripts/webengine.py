@@ -32,6 +32,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -186,6 +187,31 @@ def _format_contract(contract: dict) -> str:
                "有" if contract.get("hasFK") else "无"))
 
 
+async def page_number(page, key: str, *, default=None) -> float:
+    """读页面上的数值契约（window.DURATION / window.FPS），缺了或不是正数就给可操作报错。
+
+    v0.5 以前直接 float(await page.evaluate("window.DURATION"))：页面忘了导出 DURATION
+    时得到的是 None，报错只剩一句 "float() argument must be ... 'NoneType'"，看不出
+    是页面契约缺字段（实测 page_meta / export_cues 都会这样）。
+    default 传 None 表示必填（DURATION）；传数字表示缺省值（FPS 历史口径是 30）。
+    """
+    raw = await page.evaluate("k => window[k]", key)
+    if raw is None:
+        if default is not None:
+            return float(default)
+        raise RuntimeError(
+            "页面没有导出 window.%s（页面契约见 references/web-engine.md §3）。"
+            "index.html 里在 film.js 之前写 window.WINDOW_DURATION = 秒数，"
+            "或让模板按场景表自动推导（assets/web/film.js 的 resolveDuration）。" % key)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError("页面 window.%s 不是数字：%r（必须是数字）" % (key, raw))
+    if not math.isfinite(val) or val <= 0:
+        raise RuntimeError("页面 window.%s 非法：%r（必须是正数）" % (key, raw))
+    return val
+
+
 async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None,
                     ready_timeout=300_000):
     """打开页面并等到 window.ready === true，返回 (browser, page, cdp)。
@@ -279,8 +305,8 @@ async def _page_meta_async(html_path, deterministic=None):
     async with _playwright()() as pw:
         browser, page, _cdp = await open_page(pw, url, deterministic=deterministic)
         try:
-            duration = float(await page.evaluate("window.DURATION"))
-            fps = float(await page.evaluate("window.FPS || 30"))
+            duration = await page_number(page, "DURATION")
+            fps = await page_number(page, "FPS", default=FPS)
             return duration, fps
         finally:
             try:
@@ -315,7 +341,7 @@ async def _snap_async(html_path, times, out: Path, tag: str, deterministic=None)
     async with _playwright()() as pw:
         browser, page, cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
-            fps = float(await page.evaluate("window.FPS || 30"))
+            fps = await page_number(page, "FPS", default=FPS)
             for t in times:
                 png = await _grab(page, cdp, int(round(t * fps)))
                 path = out / ("%st%07.2f.png" % (tag, t))
@@ -353,6 +379,13 @@ def _norm_cue_list(raw, src: str) -> list:
 
 
 def _norm_events(raw) -> list:
+    """规整页面导出的视觉事件；统一打 src="web" 标记。
+
+    为什么打标记：render.py 在 engine=web 时会把 film.json / scenes.py 的 cue 与页面 cue
+    **三路合并**（三路都是合法的登记方式），但 scenes.py 的 cue 是按 PIL 时间轴算的，
+    与页面动画时间基准不同。qa_frames 的 sync_check 靠 src 判断"能不能配"，
+    否则会拿 29s PIL 时间轴上的 ui_blip 去配 12s 页面上的 ui_blip，报出假 FAIL。
+    """
     out = []
     for item in raw or []:
         if not isinstance(item, dict):
@@ -362,6 +395,7 @@ def _norm_events(raw) -> list:
             continue
         ev["t"] = round(float(ev["t"]), 3)
         ev.setdefault("kind", "misc")
+        ev.setdefault("src", "web")
         out.append(ev)
     out.sort(key=lambda e: e["t"])
     return out
@@ -378,8 +412,8 @@ async def _export_cues_async(html_path, deterministic=None) -> dict:
     async with _playwright()() as pw:
         browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
-            duration = float(await page.evaluate("window.DURATION"))
-            fps = float(await page.evaluate("window.FPS || 30"))
+            duration = await page_number(page, "DURATION")
+            fps = await page_number(page, "FPS", default=FPS)
             cues = await page.evaluate("window.getCues ? window.getCues() : []")
             events = await page.evaluate("window.getEvents ? window.getEvents() : []")
         finally:
@@ -532,17 +566,26 @@ async def _write_chunk(br: _Browser, f0: int, f1: int, dst: Path, fps: float,
     part = dst.with_name(dst.name[: -len(".mp4")] + PART_SUFFIX)
     if part.exists():
         part.unlink()
-    proc = subprocess.Popen(
-        _encoder_cmd(part, fps, crf, preset),
-        stdin=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # stderr 落临时文件，不用 PIPE：编码器一旦刷出超过管道缓冲（Windows 64 KB）的 stderr，
+    # 没人读就会写阻塞；而我们这边 proc.stdin.write 是**同步**阻塞调用（不交出事件循环），
+    # 两边互等就是死锁 —— asyncio.wait_for 也救不了它。临时文件没有缓冲上限，也不会堵。
+    errf = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(
+            _encoder_cmd(part, fps, crf, preset),
+            stdin=subprocess.PIPE,
+            stderr=errf,
+        )
+    except BaseException:
+        errf.close()
+        raise
     try:
         for f in range(f0, f1):
             proc.stdin.write(await br.frame(f))
         proc.stdin.close()
         rc = proc.wait(timeout=300)
-        err = (proc.stderr.read() or b"").decode("utf-8", "replace")
+        errf.seek(0)
+        err = errf.read().decode("utf-8", "replace")
     except BaseException:
         try:
             proc.kill()
@@ -560,7 +603,7 @@ async def _write_chunk(br: _Browser, f0: int, f1: int, dst: Path, fps: float,
         raise
     finally:
         try:
-            proc.stderr.close()
+            errf.close()
         except Exception:
             pass
     if rc != 0:
@@ -702,7 +745,7 @@ async def _qa_text_async(html_path, t0, t1, step, deterministic=None) -> dict:
         browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
         try:
             if t1 is None:
-                t1 = float(await page.evaluate("window.DURATION"))
+                t1 = await page_number(page, "DURATION")
             result = await page.evaluate(
                 "([a, b, c]) => window.qaText(a, b, c)", [float(t0), float(t1), float(step)]
             )
@@ -1262,7 +1305,18 @@ def main(argv=None) -> int:
         return 2
 
     if args.cmd == "snap":
-        times = _parse_times(args.times)
+        try:
+            times = _parse_times(args.times)
+        except ValueError:
+            print("[错误] --times 里有不是数字的项：%r（要逗号分隔的秒数，如 3,9.5,13）"
+                  % (args.times,), flush=True)
+            return 2
+        if args.every is not None and float(args.every) <= 0:
+            # 以前 --every 0 被当成"没写"、--every -1 则是死循环：先 page_meta 开一次浏览器，
+            # 之后 while k <= end 永远成立，times 一路追加到内存爆掉（实测 40 s 都出不来）。
+            print("[错误] --every 必须是正数秒（当前 %r）；不想等间隔采样就别传 --every" % (args.every,),
+                  flush=True)
+            return 2
         if args.every:
             end = args.t_to if args.t_to is not None else page_meta(args.html)[0]
             k = float(args.t_from)

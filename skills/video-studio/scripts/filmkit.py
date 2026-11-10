@@ -591,6 +591,12 @@ def wav_write(path, samples, sr=SR, channels=None):
     v0.3.0：支持立体声（配乐/音效要声像）。老调用 wav_write(p, mono) 行为不变。
     """
     a = np.asarray(samples, dtype=np.float32)
+    # 非有限值必须报错：旧实现 np.clip 保留 NaN/Inf，astype(int16) 把 NaN 静默写成 0、
+    # 把 Inf 写成 undefined，wav 里出现"随机哑音"且函数还返回 nan 峰值（下游只看得到 no）。
+    if a.size and not np.all(np.isfinite(a)):
+        bad = int(a.size - np.count_nonzero(np.isfinite(a)))
+        raise ValueError("wav_write: 采样里有 %d 个 NaN/Inf（%s）——上游混音/合成有数值错误，"
+                         "拒绝写出损坏的 WAV" % (bad, path))
     if a.ndim == 2:
         n_ch = a.shape[1]
         if channels is None:
@@ -722,6 +728,12 @@ class AudioBus:
         if i0 >= len(self.bus):
             return self
         s = np.asarray(src, dtype=np.float32)
+        if i0 < 0:
+            # 负起点 = 从 0 秒开始、裁掉前面 |i0| 个采样（与 sfxkit._place 同口径）。
+            # 旧实现把负 i0 直接当负下标切片，n 变成 0 后广播崩（place(src, -0.25) 必炸）。
+            if i0 <= -len(s):
+                return self
+            s, i0 = s[-i0:], 0
         if pan_pos is not None and self.channels == 2 and s.ndim == 1:
             theta = (float(np.clip(pan_pos, -1.0, 1.0)) + 1.0) * np.pi / 4.0
             s = np.stack([s * np.cos(theta), s * np.sin(theta)], axis=1)
@@ -749,6 +761,11 @@ class AudioBus:
             return self
         t = float(start)
         idx = 0
+        if not (float(seg) > 0.0):
+            # seg=0 时 t 不前进 -> while 变成死循环（100000 次上限只是"慢死"，
+            # 6 秒片实测 >2 分钟）。schema 只约束 seg>=0，必须在入口拒绝。
+            raise ValueError("music_bed: seg 必须 > 0，收到 %r（v0.2 和弦床的段长，默认 4.0）"
+                             % (seg,))
         while t < self.total:
             freqs = chords[idx % len(chords)]
             dur = min(seg + xfade, max(0.25, self.total - t + xfade))
@@ -939,6 +956,9 @@ class CueBus:
 
         依赖 scripts/sfxkit.py（v0.3.0 新增）。缺 sfxkit 时直接报错，不静默出哑片。
         未知提示点类型：告警一次并跳过（不 crash 整片混音）。
+        提示点参数非法（配方不认识的关键字 / 取值连枚举校验都过不了，TypeError 或
+        ValueError）：该条跳过并汇总 [WARN]，其余正常落位——不静默改渲染默认音色，
+        也不因一条 cue 写错丢整条音效轨。
 
         v0.7 音频差异化（见 references/audio-variation.md）：
           - style / content_fp 同时给时，每条 cue 的 seed 由
@@ -959,6 +979,7 @@ class CueBus:
         n = int(round(dur * sr)) + int(sr * 0.5)
         bus = np.zeros((n, 2), dtype=np.float32)
         unknown, placed = set(), 0
+        bad_cues: list = []          # 参数非法/内部报错的 cue：跳过并汇总 WARN，不拖死整条音效轨
         keyed = style is not None and content_fp is not None
         if keyed and verbose:
             print("   音效 seed: 内容派生（style=%s / fp=%s）" % (style, str(content_fp)[:8]))
@@ -980,14 +1001,24 @@ class CueBus:
                 params["key"] = key
             try:
                 x = SX.render(kind, seed=seed, **params)
-            except TypeError:
-                # 兼容严格签名的配方（不认识 key 等新参数）：去掉扩展参数重试
-                strict = {k: v for k, v in params.items() if k != "key"}
-                try:
-                    x = SX.render(kind, seed=seed, **strict)
-                except TypeError:
-                    # 兼容严格签名的配方：退化成只传 seed
-                    x = SX.render(kind, seed=seed)
+            except (TypeError, ValueError) as err:
+                # 只对"配方不认识这个关键字"逐个删参重试（v0.4 严格签名配方的兼容）；
+                # 参数值非法（cue 里 pitch=None 之类）或配方内部 TypeError 不是签名问题，
+                # 必须报告——旧实现一路退化成"只传 seed"，把坏参数静默渲染成默认音色
+                # （用户改了 cue 参数却听不出变化，日志里一个字都没有）。
+                extra = dict(params)
+                while True:
+                    hit = re.search(r"unexpected keyword argument '([^']+)'", str(err))
+                    if not hit or hit.group(1) not in extra:
+                        bad_cues.append((kind, float(c["t"]), err))
+                        x = None
+                        break
+                    extra.pop(hit.group(1))
+                    try:
+                        x = SX.render(kind, seed=seed, **extra)
+                        break
+                    except (TypeError, ValueError) as err2:
+                        err = err2
             if x is None or len(x) == 0:
                 continue
             x = np.asarray(x, dtype=np.float32)
@@ -1006,6 +1037,13 @@ class CueBus:
             placed += 1
         if unknown and verbose:
             print("   [WARN] 未知提示点类型（已跳过）: %s" % ", ".join(sorted(unknown)))
+        if bad_cues and verbose:
+            # 与"未知 type 跳过"同一条隔离策略：一条 cue 的参数写错不该让整条音效轨消失
+            # （st_sfx 会把 build_audio 的异常当成"音效合成失败"整轨丢弃）。但也不能静默：
+            # 逐条打印 cue 类型/时刻/原因，用户改完参数能立刻看到。
+            print("   [WARN] %d 条提示点参数非法（已跳过，其余正常落位）：" % len(bad_cues))
+            for kind_b, t_b, err_b in bad_cues[:6]:
+                print("     %-14s t=%.3fs  -> %s" % (kind_b, t_b, str(err_b)[:110]))
         if verbose:
             print("   音效轨：%d 个提示点落位 / %d 个登记（%.2fs）"
                   % (placed, len(self.items), dur))
@@ -1030,7 +1068,10 @@ def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
     if n == 0:
         return np.zeros(0, dtype=np.float32)
     block = max(1, int(sr * float(block_s)))
-    nb = max(1, n // block)
+    nb = n // block
+    if nb == 0:                                # 极短旁白（< 10 ms）：整段当一块并补零
+        nb = 1                                 # （旧实现 reshape(1, block) 直接崩）
+        x = np.concatenate([x, np.zeros(block - n, dtype=np.float32)])
     seg = x[: nb * block].reshape(nb, block)
     rms = np.sqrt(np.mean(seg * seg, axis=1) + 1e-12)
     db = 20.0 * np.log10(rms + 1e-12)
@@ -1038,7 +1079,9 @@ def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
     e = np.clip((db - lo) / (float(thresh_db) - lo), 0.0, 1.0)
 
     def _smooth(v, tau_s):
-        k = max(1, int(sr * tau_s / block))
+        # 极短旁白时块数可能比核还少：np.convolve(mode="same") 返回 max(len(v), k) 长度，
+        # 两个长度不同的平滑结果再做 np.maximum 会广播失败（v0.7.1 起 voice_env 崩在这里）。
+        k = min(max(1, int(sr * tau_s / block)), len(v))
         w = np.ones(k, dtype=np.float32) / k
         return np.convolve(v, w, mode="same")
 
@@ -1061,7 +1104,12 @@ def duck_voice(track, voice, depth_db=6.0, sr=SR, thresh_db=-42.0, floor_db=-60.
     if n == 0 or depth_db <= 0:
         return b2
     e = voice_env(voice, sr=sr, thresh_db=thresh_db, floor_db=floor_db)[:n]
-    if e.size == 0 or float(np.max(e)) <= 1e-6:
+    if e.size == 0:
+        return b2
+    if e.size < n:
+        # 旁白比背景短（单独调用时可能遇到）：旁白结束之后没有侧链源，背景应原样恢复。
+        e = np.concatenate([e, np.zeros(n - e.size, dtype=np.float32)])
+    if float(np.max(e)) <= 1e-6:
         return b2
     gains = 10.0 ** (-float(depth_db) * e / 20.0)
     return (b2 * gains[:, None]).astype(np.float32)
@@ -1123,13 +1171,18 @@ def duck(music, sfx, depth_db=4.0, attack=0.03, release=0.35, sr=SR):
     if env.size == 0 or float(env.max()) <= 1e-9:
         return m2
     block = max(1, int(sr * 0.01))
-    nb = max(1, n // block)
+    nb = n // block
+    if nb == 0:                                 # 极短音效（< 10 ms）：整段当一块并补零
+        nb = 1
+        env = np.concatenate([env, np.zeros(block - n, dtype=np.float32)])
     e = env[: nb * block].reshape(nb, block).max(axis=1)
     e = e / (float(np.percentile(e, 99.5)) + 1e-9)
     e = np.clip(e, 0.0, 1.0)
     # 单向平滑：起音快、释放慢（对包络做两次不同时间常数的指数平滑，仍保持向量化）
     def _smooth(x, tau_s):
-        k = max(1, int(sr * tau_s / block))
+        # 与 voice_env 同一处理：短片段（< release 0.35 s）时核不能比信号长，
+        # 否则 np.convolve(mode="same") 返回核长、np.maximum 广播失败（短片混音直接崩）。
+        k = min(max(1, int(sr * tau_s / block)), len(x))
         w = np.ones(k, dtype=np.float32) / k
         return np.convolve(x, w, mode="same")
     e = np.maximum(_smooth(e, attack), _smooth(e, release) * 0.7)
@@ -1163,7 +1216,12 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
         a = np.asarray(x, dtype=np.float32)
         if a.ndim == 1:
             return np.stack([a, a], axis=1)
-        return a if a.shape[1] >= 2 else np.concatenate([a, a], axis=1)
+        if a.shape[1] == 1:
+            return np.concatenate([a, a], axis=1)
+        # 多于 2 声道（例如把 5.1 的 music.wav 塞进 work/）：只取前两声道。
+        # 旧实现原样返回 (n,3+)，back += mm 直接广播崩（mix_film 是公共 API，
+        # 而 wav_read 不限制声道数，用户完全可能踩到）。口径与 AudioBus._fit 一致。
+        return a[:, :2] if a.shape[1] > 2 else a
 
     n = None
     v = None if voice is None else _to_stereo(voice)
@@ -1179,12 +1237,17 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
         return np.zeros((0, 2), dtype=np.float32)
 
     # v0.7.1 旁白优先：先算背景（配乐 + 音效各自让位），再用 SNR 兜底确认"人声压得住"。
+    # 侧链与 SNR 都用"实际交付的人声"（乘过 voice_gain）：voice_gain=0.5 时旧实现用未缩放
+    # 人声算 SNR，日志写"人声/背景=12 dB 达标"、交付出去只有 6 dB（兜底承诺失效）。
     venv_kw = dict(sr=sr, thresh_db=float(voice_thresh_db), floor_db=float(voice_floor_db))
+    vg = None
+    if v is not None:
+        vg = v[:n] * float(voice_gain)
     back = np.zeros((n, 2), dtype=np.float32)
     if s is not None:
         ss = s[:n] * (10.0 ** (float(sfx_gain_db) / 20.0))
-        if v is not None and float(voice_duck_sfx_db) > 0:
-            ss = duck_voice(ss, v[:n], depth_db=float(voice_duck_sfx_db), **venv_kw)
+        if vg is not None and float(voice_duck_sfx_db) > 0:
+            ss = duck_voice(ss, vg, depth_db=float(voice_duck_sfx_db), **venv_kw)
         back += ss
     if m is not None:
         mm = m[:n] * (10.0 ** (float(music_gain_db) / 20.0))
@@ -1192,12 +1255,12 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
             mm = duck(mm, s[:n], depth_db=duck_db, sr=sr)
         else:
             mm = _to_stereo(mm)
-        if v is not None and float(voice_duck_db) > 0:
-            mm = duck_voice(mm, v[:n], depth_db=float(voice_duck_db), **venv_kw)
+        if vg is not None and float(voice_duck_db) > 0:
+            mm = duck_voice(mm, vg, depth_db=float(voice_duck_db), **venv_kw)
         back += mm
     # SNR 兜底：实测人声活跃区的人声/背景比；不够就整体再压背景（不碰人声）。
-    if v is not None and back.any() and float(guard_snr_db) > 0:
-        trim_db, snr_db = guard_snr(v[:n], back, target_db=float(guard_snr_db),
+    if vg is not None and back.any() and float(guard_snr_db) > 0:
+        trim_db, snr_db = guard_snr(vg, back, target_db=float(guard_snr_db),
                                     cap_db=float(guard_cap_db), **venv_kw)
         if trim_db > 0.0:
             back *= 10.0 ** (-trim_db / 20.0)
@@ -1212,6 +1275,15 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
                         note += "（补压很大：建议调低 music.gain_db）"
                 print("   旁白优先: 人声/背景 = %.1f dB（目标 %.1f）%s"
                       % (snr_db, float(guard_snr_db), note))
+            else:
+                # snr_db 是 NaN = 活跃区为空：旁白电平低于 voice_thresh_db 时，旁白优先
+                # 与 SNR 兜底会**整体静默失效**（背景一点不压）。纯静音片是有意的，
+                # 但"目的是说话却录得很轻"必须在日志里喊出来，否则等于没有门禁。
+                vpk = float(np.max(np.abs(vg))) if vg.size else 0.0
+                if vpk > 1e-4:                                   # 有声音但到不了活跃区
+                    print("   [WARN] 旁白电平过低（峰值 %.1f dBFS，低于活跃度门限 %.0f dB）——"
+                          "旁白优先/SNR 兜底本次无法判定；检查 voice_gain / TTS 音量"
+                          % (20.0 * math.log10(vpk), float(voice_thresh_db)))
     out = back
     if v is not None:
         out = out + v[:n] * float(voice_gain)
@@ -1789,8 +1861,8 @@ def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
     af = loudnorm_two_pass(audio, target_i=target_i, target_tp=target_tp) if loudnorm else None
     if loudnorm and not af:
         # 不静默降级：量不到就喊出来（qa 的响度门禁还在，但这里先说清楚）
-        print("   [WARN] loudnorm 两遍测量失败（ffmpeg 输出里没解析到 JSON），本次不做响度标准化",
-              flush=True)
+        print("   [WARN] loudnorm 两遍测量失败（拿不到可用测量值：全静音/极短音频会给出 -inf），"
+              "本次不做响度标准化", flush=True)
 
     vd = media_dur(video)
     ad = media_dur(audio)
@@ -1827,6 +1899,17 @@ def loudnorm_two_pass(src, target_i=-16.0, target_tp=-1.5, target_lra=11.0):
     try:
         j = json.loads(m.group(0))
     except Exception:
+        return None
+    # 全静音 / 极短音频时 ffmpeg 会报 input_i=-inf、target_offset=inf：这些值塞进
+    # measured_* 会被 ffmpeg 拒绝（"Value -inf for parameter 'measured_I' out of range"），
+    # mux 直接失败（旧实现只判"解析到 JSON"，于是拿着 -inf 的滤镜串去编码）。
+    # 量不到可用测量值就返回 None：mux 会打 WARN 跳过响度标准化，qa 的响度门禁照旧兜底。
+    need = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+    try:
+        bad = [k for k in need if not math.isfinite(float(j.get(k, 0.0)))]
+    except (TypeError, ValueError):
+        return None
+    if bad:
         return None
     return ("loudnorm=I=%.1f:TP=%.1f:LRA=%.1f:measured_I=%s:measured_TP=%s:"
             "measured_LRA=%s:measured_thresh=%s:offset=%s:print_format=summary"

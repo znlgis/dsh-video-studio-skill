@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 
 # ============================================================================
@@ -75,6 +76,92 @@ def _rgb(seq):
     if len(t) != 3 or any(v < 0 or v > 255 for v in t):
         raise ValueError("颜色必须是 0..255 的 RGB 三元组，收到 %r" % (seq,))
     return t
+
+
+_HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")
+
+
+def _color_of(v, key):
+    """把 theme_overrides 里的颜色值统一成 (r,g,b)：支持 [r,g,b] 和 "#rrggbb" / "#rgb"。
+
+    为什么必须支持 hex：schemas/film.schema.json 与 references/style-packs.md 的示例
+    就是 {"accent": "#ff8a3d"}，而 JSON 没有元组，照着文档写 hex 是必然的。
+    v0.5 旧实现把字符串原样塞进主题，scenes.py 第一次 int("#") 就崩在渲染期
+    （实测：ink="#ffffff" -> ValueError: invalid literal for int() with base 10: '#'）。
+    """
+    if isinstance(v, str):
+        m = _HEX_RE.match(v.strip())
+        if not m:
+            raise ValueError("theme_overrides.%s 的颜色写法不认识：%r（用 [r,g,b] 或 \"#rrggbb\"）"
+                             % (key, v))
+        h = m.group(1)
+        if len(h) == 3:
+            h = "".join(ch * 2 for ch in h)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        return _rgb(v)
+    raise ValueError("theme_overrides.%s 必须是颜色（[r,g,b] 或 \"#rrggbb\"），收到 %r"
+                     % (key, v))
+
+
+# 主题里"颜色字段"的白名单（值是 0..255 的 RGB 元组）。不靠"长度 3 的元组"猜：
+# keywords 也是元组（长度 10），将来若加一个正好 3 项的关键词元组就会被误当颜色。
+_THEME_COLOR_KEYS = frozenset(("bg", "bg2", "surface", "ink", "muted", "dim",
+                               "accent", "accent2", "good", "bad", "rule", "vignette_tint"))
+
+
+def apply_theme_overrides(theme, overrides):
+    """把 film.json 的 visual.theme_overrides 合并进主题**并做类型校验**。
+
+    契约（schemas/film.schema.json：只接受主题里已存在的键；references/style-packs.md §3）：
+      - 未知键忽略：以后主题加字段时老剧本不因为它不认识就炸；
+      - 颜色键（值本来是三色元组的那些）接受 [r,g,b] / "#rrggbb" / "#rgb"，统一成元组；
+      - 数值键接受数字或数字字符串；字符串键必须是字符串；
+      - 嵌套结构（card / scale / qa …）不支持覆盖，静默忽略（与 v0.5 一致，避免破坏老配置）；
+        真要改嵌套字段请改风格包。
+    校验只在"值类型不对、旧版会在渲染期崩"的场合抛 ValueError（提前到 --stage style）。
+    返回新的 theme dict（不改入参）。
+    """
+    out = dict(theme or {})
+    for k, v in (overrides or {}).items():
+        if k not in out:
+            continue
+        base = out[k]
+        if k in _THEME_COLOR_KEYS:
+            out[k] = _color_of(v, k)
+            continue
+        if isinstance(base, bool):
+            if not isinstance(v, bool):
+                raise ValueError("theme_overrides.%s 必须是布尔，收到 %r" % (k, v))
+            out[k] = bool(v)
+            continue
+        if isinstance(base, (int, float)):
+            if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+                raise ValueError("theme_overrides.%s 必须是数字，收到 %r" % (k, v))
+            try:
+                num = float(v)
+            except (TypeError, ValueError):
+                raise ValueError("theme_overrides.%s 必须是数字，收到 %r" % (k, v))
+            out[k] = int(round(num)) if isinstance(base, int) else float(num)
+            continue
+        if isinstance(base, dict):
+            # 嵌套结构（card / scale / qa）不支持覆盖。这里保持 v0.5 的**静默忽略**：
+            # 老配置里如果写了这种覆盖，旧版只是没生效、并不会崩；升级后突然报错是破坏性变更。
+            # 想改嵌套字段请改风格包（STYLES/THEMES），见 references/style-packs.md §7。
+            continue
+        if isinstance(base, str):
+            if not isinstance(v, str):
+                raise ValueError("theme_overrides.%s 必须是字符串，收到 %r" % (k, v))
+            if k == "layout" and v not in LAYOUTS:
+                raise ValueError("theme_overrides.layout 未知版式 %r；可用：%s"
+                                 % (v, " / ".join(LAYOUT_IDS)))
+            if k == "hud" and v not in ("chip-left", "corner-line", "none"):
+                raise ValueError("theme_overrides.hud 未知取值 %r；可用：chip-left / corner-line / none"
+                                 % (v,))
+            out[k] = v
+            continue
+        # 其它类型（None 等）：保持原值，不折腾
+    return out
 
 
 def _theme(style_id, label, keywords, palette, material, typ, layout, motion, hud, qa):
@@ -726,12 +813,9 @@ def resolve_script_style(script):
     else:
         chap_layout = {ch: layouts[i % len(layouts)] for i, ch in enumerate(chapters)}
 
-    theme = dict(THEMES[pack["theme"]])
-    for k, v in (vis.get("theme_overrides") or {}).items():
-        if k in theme and isinstance(v, (int, float, str)):
-            theme[k] = v
-        elif k in theme and isinstance(v, (list, tuple)) and len(v) == 3:
-            theme[k] = _rgb(v)
+    # theme_overrides 走带校验的合并（颜色支持 "#rrggbb"，非法值在这里就报错，
+    # 不要等到 scenes.py 渲到第 300 帧才 int("#") 崩——见 apply_theme_overrides）
+    theme = apply_theme_overrides(THEMES[pack["theme"]], vis.get("theme_overrides"))
 
     return {
         "version": 1,
@@ -900,6 +984,10 @@ def main(argv=None):
     except Exception:                                   # noqa: BLE001
         pass
     if a.show:
+        # 未知 id 以前是 KeyError traceback，现在给可用清单 + exit 2（与 render.py 的口径一致）
+        if a.show not in STYLES:
+            print("[未知风格] %r；可用：%s" % (a.show, " / ".join(ALL_STYLE_IDS)), file=sys.stderr)
+            return 2
         if a.json:
             import json
             print(json.dumps({"style": STYLES[a.show],

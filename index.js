@@ -31,11 +31,12 @@ export const inject = ["skills"];
 /**
  * 注册 bundled 技能根。
  *
- * 三件事任何一件不成立都只打日志、不抛错——插件本身没有"必须成功"的业务，
+ * 四件事任何一件不成立都只打日志、不抛错——插件本身没有"必须成功"的业务，
  * 挂不上技能是降级，不是崩溃：
  *   1. 找不到包内 SKILL.md（打包漏了文件 / 被裁剪）
  *   2. 运行时没有 ctx.skills（profile 没装技能注册表）
  *   3. 可选 peer 没装（只装了本插件）
+ *   4. provider 自己抛错（版本不匹配 / 目录无权限 / 注册表已占用）
  *
  * @param ctx - 携带 skills 服务的 Cordis 上下文。
  */
@@ -63,12 +64,24 @@ export async function apply(ctx) {
     return;
   }
 
-  applyFilesystemProvider(ctx, {
-    providerName: "video-studio",
-    includeDefaultRoots: false,
-    bundledSkillDir,
-    watch: false,
-  });
+  // 第 4 件可能失败的事：provider 自己抛错（版本不匹配、目录无权限、注册表已占用……）。
+  // 这里必须兜住：插件行的加载失败会让整行从 profile 里消失，而"挂不上技能"本来只是个降级。
+  // （v0.7.1 之前没兜：provider 一抛错 apply 就 reject，而且一行日志都没有——stub 实测复现过。）
+  try {
+    applyFilesystemProvider(ctx, {
+      providerName: "video-studio",
+      includeDefaultRoots: false,
+      bundledSkillDir,
+      watch: false,
+    });
+  } catch (error) {
+    warn(
+      ctx,
+      `挂载 bundled 技能根失败（本次只是空行，不影响 profile 里其它插件）：` +
+        `${error?.code ?? error?.message ?? error}` +
+        `；检查 ${PROVIDER_PKG} 的版本是否满足 peer 范围，以及 ${bundledSkillDir} 是否可读`
+    );
+  }
 }
 
 /**

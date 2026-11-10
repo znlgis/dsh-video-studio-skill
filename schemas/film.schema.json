@@ -49,7 +49,41 @@
         "string",
         "object"
       ],
-      "description": "字符串 = edge-tts voice id（如 zh-CN-YunxiNeural，legacy 单声线路径）；对象 = v0.5 声线策略（map 按 kind 映射 persona、auto、jitter、max_distinct、rate_range、cps_band），此时忽略 rate/pitch 的单值覆盖语义"
+      "description": "字符串 = edge-tts voice id（如 zh-CN-YunxiNeural，legacy 单声线路径）；对象 = v0.5 声线策略（map 按 kind 映射 persona、auto、jitter、max_distinct、rate_range、cps_band），此时忽略 rate/pitch 的单值覆盖语义",
+      "properties": {
+        "map": {
+          "type": "object",
+          "description": "按 kind 映射 persona：{\"hook\": \"young_male\", \"body\": \"narrator_male\", \"quote\": \"narrator_female\", \"outro\": \"narrator_male\"}（键取 lines[].kind 的 6 个值；值取 voicekit.PERSONA_IDS）"
+        },
+        "default": {
+          "type": "string",
+          "description": "没有映射时用的 persona 名（voicekit.PERSONA_IDS 之一）"
+        },
+        "auto": {
+          "type": "boolean",
+          "description": "是否按内容自动挑 persona（默认 true；false = 只用 map/default）"
+        },
+        "jitter": {
+          "type": "number",
+          "minimum": 0,
+          "description": "逐句 rate/pitch/lead/tail 的确定性抖动幅度（默认 0.35；legacy 默认 0）"
+        },
+        "max_distinct": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "全片最多用几个不同 persona（默认 3；相邻句不换人是防广播剧的关键）"
+        },
+        "rate_range": {
+          "type": "array",
+          "description": "语速夹取区间（百分数，例如 [-15, 12]）",
+          "items": { "type": "number" }
+        },
+        "cps_band": {
+          "type": "array",
+          "description": "可接受的每秒字数区间（默认 [3.6, 5.6]）",
+          "items": { "type": "number" }
+        }
+      }
     },
     "rate": {
       "type": "string",
@@ -180,7 +214,7 @@
           "tail": {
             "type": "number",
             "minimum": 0,
-            "description": "句后留白秒数（一般通过 tail_map / voice_plan 控制，这里少见）"
+            "description": "注意：**当前不生效**（保留字段）。filmkit.build_timeline 只读 tail_map，逐句句后留白请写顶层 tail_map，或交给 voicekit 的 voice_plan（st_layout 会把它的逐句 tail 并进 tail_map）。filmcheck 对写了 lines[].tail 的剧本会报 WARN 提醒。"
           },
           "persona": {
             "type": "string",
@@ -464,6 +498,11 @@
         "gain_db": {
           "type": "number",
           "description": "音效总线增益 dB（默认 0）"
+        },
+        "base_db": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "按配方名覆盖基础电平 dB：{\"whoosh\": -6}。render.py 的 st_sfx 原样透传给 filmkit.CueBus.build_audio(base_db=...)，只对键名命中的配方生效（未知配方名不报错、也不生效）"
         },
         "mix_gain_db": {
           "type": "number",
