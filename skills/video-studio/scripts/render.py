@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -224,6 +225,53 @@ def load_script(p) -> dict:
     return s
 
 
+def _to_gif(mp4, gif, fps=12, width=640):
+    """mp4 -> GIF（两遍调色板，避免"一屏噪点"的默认调色板）。
+
+    GIF 只用来"快速看一眼大概长什么样"（发给别人、贴到文档里），
+    不是交付物：它没有声音、色彩也被量化。真正的交付仍是 mp4。
+    """
+    pal = gif + ".palette.png"
+    _run_ff = K._run if hasattr(K, "_run") else None
+    vf1 = "fps=%d,scale=%d:-1:flags=lanczos,palettegen=stats_mode=diff" % (fps, width)
+    vf2 = "fps=%d,scale=%d:-1:flags=lanczos,paletteuse=dither=bayer:bayer_scale=3" % (fps, width)
+    for args in ([K.FFMPEG, "-y", "-v", "error", "-i", str(mp4), "-vf", vf1, pal],
+                 [K.FFMPEG, "-y", "-v", "error", "-i", str(mp4), "-i", pal,
+                  "-lavfi", vf2, "-loop", "0", str(gif)]):
+        p = subprocess.run(args, capture_output=True)
+        if p.returncode != 0:
+            raise RuntimeError("GIF 生成失败: " + p.stderr.decode("utf-8", "replace")[:400])
+    try:
+        os.remove(pal)
+    except OSError:
+        pass
+    return gif
+
+
+def _atomic_json_retry(path, obj, tries=3, sleep_s=0.1):
+    """原子写 JSON + 有限退避（v0.8）。
+
+    Windows 上文件被杀毒/预览进程短暂占用时，一次写入失败会让**整片**跑挂。
+    只对"可重试的写状态"退避，不对内容生成盲目重试（那会掩盖真错误）。
+    """
+    last = None
+    for i in range(max(1, int(tries))):
+        try:
+            d = os.path.dirname(os.path.abspath(str(path)))
+            if d:
+                os.makedirs(d, exist_ok=True)
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(obj, fh, ensure_ascii=False, indent=1)
+            os.replace(tmp, str(path))
+            return True
+        except OSError as e:                                # noqa: BLE001
+            last = e
+            time.sleep(sleep_s * (i + 1))
+    print("   [WARN] 写 %s 失败（重试 %d 次）：%s" % (path, tries, last))
+    return False
+
+
 def _need(cond, msg):
     if not cond:
         raise SystemExit("[前置产物缺失] " + msg)
@@ -338,6 +386,7 @@ def st_tts(script, work, force=False):
                       ensure_ascii=False, indent=1)
     if force:
         shutil.rmtree(os.path.join(work, "tts"), ignore_errors=True)
+    want_words = bool(script.get("words", True))
     done = K.tts_batch(lines, work,
                        voice=script.get("voice", "zh-CN-YunxiNeural"),
                        rate=script.get("rate", "+0%"),
@@ -348,12 +397,48 @@ def st_tts(script, work, force=False):
                        [{"voice": r["voice"], "rate": r["rate"], "pitch": r["pitch"],
                          "volume": r.get("volume", "+0%"),
                          "persona": r.get("persona"), "tone": r.get("tone")} for r in vp],
-                       trim_db=float(script.get("trim_db", -42.0)))
+                       trim_db=float(script.get("trim_db", -42.0)),
+                       words=want_words,
+                       backend=str((script.get("tts") or {}).get("backend") or "edge"))
     json.dump(done, open(os.path.join(work, "tts.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     total = sum(float(x["dur"]) for x in done)
     print("   语音总时长 %.2fs / %d 句" % (total, len(done)))
+    _write_words(work, done, want_words)
     return done
+
+
+def _write_words(work, done, want_words):
+    """把逐句词级时间戳汇总成 work/words.json（v0.8）。
+
+    结构：{schema, enabled, lines:{<id>:{dur, n, covered, tail, mono, words:[...]}}, stats}
+    门禁与字幕都从这里读，不再各自去翻 *.mp3.json（单一事实来源）。
+    """
+    if not want_words:
+        print("   词级时间戳: 未启用（film.json 里 words=false）")
+        return None
+    lines = {}
+    n_words = 0
+    n_bad = []
+    for row in done or []:
+        ws = row.get("words") or []
+        summ = K.words_summary(ws, row.get("dur"))
+        lines[str(row["id"])] = dict(dur=round(float(row.get("dur") or 0.0), 4),
+                                     words=ws, **{k: v for k, v in summ.items() if k != "n"},
+                                     n=summ["n"])
+        n_words += len(ws)
+        if not ws:
+            n_bad.append(row["id"])
+    payload = dict(schema=1, enabled=True, lines=lines,
+                   stats=dict(lines=len(lines), words=n_words, empty=n_bad))
+    p = os.path.join(work, "words.json")
+    json.dump(payload, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    if n_bad:
+        print("   [WARN] %d 句拿不到词级事件（%s）；这些句的词级门禁会记 skipped"
+              % (len(n_bad), "、".join(n_bad[:6])))
+    else:
+        print("   词级时间戳: %d 句 / %d 词 -> %s" % (len(lines), n_words, p))
+    return payload
 
 
 # ---------------------------------------------------------------- 排版
@@ -378,6 +463,7 @@ def st_layout(script, work, lines=None):
         for lid, v in tail_extra.items():
             if lid in tail_map:
                 tail_map[lid] = float(v)
+    vp = K.video_plan(script)          # 画幅/帧率：非法配置在这里就报错，不拖到渲帧
     tl = K.build_timeline(lines,
                           lead=script.get("lead", pace["lead"]),
                           tail=script.get("tail", pace["tail"]),
@@ -385,9 +471,24 @@ def st_layout(script, work, lines=None):
                           tail_map=tail_map or script.get("tail_map"),
                           lead_map=lead_map,
                           hold=script.get("hold", pace["hold"]),
-                          max_dur=script.get("max_dur"))
+                          max_dur=script.get("max_dur"),
+                          fps=vp["fps"])
+    tl["video"] = vp
+    print("   画幅: %d×%d @ %d fps（内部构图 %d×%d%s）"
+          % (vp["out_w"], vp["out_h"], vp["fps"], vp["w"], vp["h"],
+             "，编码时 lanczos 缩放" if vp["scale"] else ""))
     tl["title"] = script["title"]
     tl["voice"] = script.get("voice", "zh-CN-YunxiNeural")
+    # v0.8：词级时间戳（句子时长仍是权威；词只用于字幕断行/锚点/门禁）
+    tl["words"] = bool(script.get("words", True))
+    wp = os.path.join(work, "words.json")
+    if tl["words"] and os.path.exists(wp):
+        try:
+            wj = json.load(open(wp, encoding="utf-8"))
+            tl["word_stats"] = wj.get("stats")
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] words.json 读不了，词级能力本次不可用：%s" % e)
+            tl["words"] = False
     tl["crf"] = script.get("crf", 18)
     tl["preset"] = script.get("preset", "medium")
     tl["style"] = {"style": plan["style"], "theme_id": plan["theme_id"],
@@ -514,7 +615,19 @@ def _st_cues_web(script, work):
     """调用 webengine.export_cues 导出页面提示点（engine=web 时）。"""
     we = _opt_module("webengine", "浏览器逐帧渲染需要 webengine.py；只用 PIL 路线可以不改 engine")
     entry = _web_entry(script)
-    data = we.export_cues(entry)
+    tl = {}
+    try:
+        tp = os.path.join(str(work), "timeline.json")
+        if os.path.exists(tp):
+            tl = json.load(open(tp, encoding="utf-8"))
+    except Exception:                                       # noqa: BLE001
+        tl = {}
+    style = _web_style_payload(we, script, tl)
+    vp = (tl.get("video") or {})
+    data = we.export_cues(entry, style=style,
+                          width=int(vp.get("out_w") or K.W),
+                          height=int(vp.get("out_h") or K.H),
+                          fps=int(tl.get("fps") or K.FPS))
     return data or {}
 
 
@@ -847,12 +960,64 @@ def st_audio(tl, work, script):
     return out
 
 
+# ---------------------------------------------------------------- 预检闸门
+def _run_preflight(script, work, engine, tl=None, skip=False):
+    """渲染前资源闸门（v0.8）：缺字形 / 坏音频 / 缺字体，在渲第一帧之前就 fail。
+
+    为什么值得单独立一道闸：这类问题以前都是"片渲完、QA 才报"——870 帧白跑，
+    而且 reports 里只有一句"缺字形"，说不清是哪个字段哪句台词。
+    三档语义：没装 preflight.py -> skipped（写明原因）；有 error -> fail；
+    只有 warning -> pass（warning 仍进账本，不静默）。
+    """
+    lg = _gate()
+    pf = _try_module("preflight")
+    if skip:
+        if lg is not None:
+            lg.bypass("渲染前资源预检（--no-preflight）", "本条不算通过，只记录")
+        print("   [preflight] --no-preflight：跳过资源预检（QC 报告里会留痕）")
+        return True
+    if pf is None:
+        if lg is not None:
+            lg.skip("G0", "渲染前资源预检", "没有 preflight.py（老版本工作目录，拷一份进来才能查）")
+        print("   [preflight] 没有 preflight.py，跳过资源预检（会记 skipped）")
+        return True
+    try:
+        res = pf.check(script, work=work, engine=engine, timeline=tl)
+    except Exception as e:                                  # noqa: BLE001
+        if lg is not None:
+            lg.fail("G0", "渲染前资源预检", "预检本身报错：%s" % e)
+        print("   [FAIL][preflight] 预检自身出错：", e)
+        return False
+    for w in (res.get("warnings") or [])[:6]:
+        print("   [WARN][preflight] %s" % (w.get("msg") if isinstance(w, dict) else w))
+    errs = res.get("errors") or []
+    st = (res.get("checks") or {})
+    detail = " ".join("%s=%s" % (k, v.get("status")) for k, v in st.items()) or "-"
+    if errs:
+        if lg is not None:
+            lg.fail("G0", "渲染前资源预检", "%d 处问题：%s" % (
+                len(errs), "；".join((e.get("msg") if isinstance(e, dict) else str(e))
+                                     for e in errs[:3])))
+        print("   [FAIL][preflight] %d 处问题（下面是前几条）：" % len(errs))
+        for e in errs[:8]:
+            msg = e.get("msg") if isinstance(e, dict) else str(e)
+            where = (e.get("where") if isinstance(e, dict) else "") or ""
+            print("     - %s%s" % ((where + "：") if where else "", msg))
+        return False
+    if lg is not None:
+        lg.ok("G0", "渲染前资源预检", detail)
+    print("   [preflight] %s" % detail)
+    return True
+
+
 # ---------------------------------------------------------------- 渲染
 def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True):
     """渲染 [f0, f1) 帧区间到 out_path。纯函数：同一帧号永远画出同一张图。"""
     scenes = tl["scenes"]
     total = tl["total"]
-    sink = K.FrameSink(out_path, crf=crf, preset=preset)
+    _vp = K.video_plan(script)
+    sink = K.FrameSink(out_path, fps=float(tl["fps"]), crf=crf, preset=preset,
+                       out_w=_vp["out_w"], out_h=_vp["out_h"])
     idx = 0
     t_start = time.time()
     last_rep = 0
@@ -868,8 +1033,9 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
         th = _theme_for(script) if _THEME_CACHE.get("k") != id(script) else _THEME_CACHE.get("th")
         if id(script) != _THEME_CACHE.get("k"):
             _THEME_CACHE.update(k=id(script), th=th)
-        frame = K.draw_subtitle(frame, K.sub_at(scenes, t, script.get("sub_max_hold")),
-                                theme=th)
+        _hold = script.get("sub_max_hold")
+        frame = K.draw_subtitle(frame, K.sub_at(scenes, t, _hold), theme=th,
+                                words=K.sub_words_at(scenes, t, _hold))
         fade = 1.0
         if t < 0.5:
             fade *= K.ease_out(t / 0.5)
@@ -1071,19 +1237,55 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
     return silent
 
 
+def _web_style_payload(we, script, tl=None):
+    """把风格包解析成 webengine 能吃的 __STYLE__ 载荷（v0.8）。
+
+    style=None（legacy 项目 / 解析失败）时返回 None —— webengine 收到 None 连
+    add_init_script 都不调，页面行为与 v0.7 逐字节一致（这是兼容性硬要求）。
+    """
+    try:
+        style_plan = resolve_style(script, verbose=False)
+    except Exception as e:                                  # noqa: BLE001
+        print("   [WARN] web 风格包解析失败，页面用内置配色：%s" % e)
+        return None
+    if not style_plan or style_plan.get("legacy"):
+        return None
+    vp = (tl or {}).get("video") or {}
+    try:
+        return we.normalize_style(style_plan,
+                                  width=int(vp.get("out_w") or K.W),
+                                  height=int(vp.get("out_h") or K.H),
+                                  fps=int((tl or {}).get("fps") or K.FPS))
+    except Exception as e:                                  # noqa: BLE001
+        # 载荷不合法要**说出来**：静默回落会让"换了风格但页面没变"变成一个谜。
+        print("   [WARN] web 风格载荷不可用（%s），页面用内置配色" % e)
+        return None
+
+
 def _st_frames_web(tl, work, script, jobs=1, resume=True):
     """浏览器逐帧渲染：交给 webengine.render_full（分块并行 + 断点续跑 + 缺口检测）。
 
     页面的 window.DURATION / window.FPS 是切块与校验的唯一真值来源：
     和 timeline.json 对不上就直接报错（十有八九是改了剧本没重新 layout）。
+    v0.8：把风格包与画幅/帧率一起注入页面（window.__STYLE__），页面不再是深蓝橙写死。
     """
     we = _opt_module("webengine",
                      "浏览器渲染需要 webengine.py（本技能 scripts/ 里自带；还需要 pip install playwright）")
     entry = _web_entry(script)
     silent = os.path.join(work, "silent.mp4")
     web = script.get("web") or {}
+    style = _web_style_payload(we, script, tl)
+    vp = tl.get("video") or {}
+    canvas_w = int(vp.get("out_w") or K.W)
+    canvas_h = int(vp.get("out_h") or K.H)
+    if style is not None:
+        print("   风格注入: %s（%dx%d @ %s fps）"
+              % (style.get("style") or style.get("theme_id") or "custom",
+                 canvas_w, canvas_h, tl.get("fps")))
 
-    page_dur, page_fps = we.page_meta(entry)
+    page_dur, page_fps = we.page_meta(entry, style=style,
+                                      width=canvas_w, height=canvas_h,
+                                      fps=int(tl["fps"]))
     if abs(float(page_fps) - float(tl["fps"])) > 1e-6:
         raise RuntimeError(
             "页面 FPS=%s 与 timeline fps=%s 不一致。浏览器逐帧渲染的帧号就是 f/FPS，"
@@ -1103,7 +1305,9 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
                          chunk_s=float(web.get("chunk_s", 30.0)),
                          resume=bool(resume),
                          crf=int(script.get("crf", 17)),
-                         preset=str(script.get("preset", "slow")))
+                         preset=str(script.get("preset", "slow")),
+                         style=style, width=canvas_w, height=canvas_h,
+                         fps=int(tl["fps"]))
     got = K.media_dur(str(out) if out else silent)
     want = float(tl["frames"]) / float(tl["fps"])
     if abs(got - want) > 0.5:
@@ -1134,7 +1338,12 @@ def _qa_gates(lg, rep, deep, tl, work):
     v = next((s for s in streams if s.get("codec_type") == "video"), {})
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = pr.get("format") or {}
-    W, H, FPS = K.W, K.H, K.FPS
+    # v0.8：容器门禁比对的是**交付规格**（timeline 里记的 video 块），不是引擎内部常量。
+    # 老 timeline（升级前生成的）没有 video 字段 -> 回落到 1920x1080，行为不变。
+    _vp = tl.get("video") or {}
+    W = int(_vp.get("out_w") or K.W)
+    H = int(_vp.get("out_h") or K.H)
+    FPS = float(_vp.get("fps") or tl.get("fps") or K.FPS)
 
     # ---- G4 容器：分辨率 / 帧率 / 音轨 / 时长 ----
     try:
@@ -1194,6 +1403,9 @@ def _qa_gates(lg, rep, deep, tl, work):
     else:
         lg.ok("G8", "首尾之外无长黑帧", "0 段")
 
+    # ---- G10 词级时间戳（v0.8）：覆盖率 / 单调 / 末词偏差 ----
+    _word_gate(lg, tl, work)
+
     # ---- G9 帧级深检（闪烁 / 空窗 / 音画同步）----
     if deep is None:
         lg.skip("G9", "帧级深检（闪烁/空窗/同步）", "没有 qa_frames.py 或深检失败")
@@ -1213,7 +1425,213 @@ def _qa_gates(lg, rep, deep, tl, work):
             (lg.ok if ok9 else lg.fail)("G9", "帧级深检（闪烁/空窗/同步超差）", detail9)
 
 
-def st_qa(film, tl, work, scenes_mod=None, script=None):
+WORD_TAIL_MAX = 0.40          # 末词终点到句尾静音的上限（实测模板 0.07–0.12 s）
+WORD_START_MAX = 0.20         # 句首到首词的上限（裁剪把开头静音切掉后通常 ≤ 0.05 s）
+WORD_COVER_MIN = 0.45         # 词时长之和 / 句实测时长：中文有词间空隙，0.45 是"明显少了"的线
+
+
+def _word_gate(lg, tl, work):
+    """词级时间戳门禁（v0.8）。
+
+    为什么值得单独一道闸：词级数据是"字幕按词折行 / cue 词锚点"的依据，
+    但它来自一个**逆向接口**（edge-tts）。服务端一改，最可能的表现是"仍返回音频、
+    但词事件为空或整体偏移"——不查就永远发现不了，而画面上只表现为字幕断行变丑。
+    三档语义：没有启用 / 没有 words.json -> skipped（写明原因），不许冒充 pass。
+    """
+    wp = os.path.join(str(work), "words.json")
+    if not tl.get("words"):
+        lg.skip("G10", "词级时间戳（字幕断行/词锚点依据）",
+                "本片未启用（film.json words=false 或 words.json 缺失）")
+        return
+    if not os.path.exists(wp):
+        lg.skip("G10", "词级时间戳（字幕断行/词锚点依据）", "没有 words.json（跑 --stage tts 生成）")
+        return
+    try:
+        wj = json.load(open(wp, encoding="utf-8"))
+    except Exception as e:                                  # noqa: BLE001
+        lg.fail("G10", "词级时间戳（字幕断行/词锚点依据）", "words.json 读不了：%s" % e)
+        return
+    lines = wj.get("lines") or {}
+    empty = [lid for lid, r in lines.items() if not r.get("n")]
+    n_words = sum(int(r.get("n") or 0) for r in lines.values())
+    if not lines or n_words == 0:
+        lg.skip("G10", "词级时间戳（字幕断行/词锚点依据）",
+                "词事件为空（edge-tts 只回了音频；本次降级为等分/整句字幕）")
+        return
+    bad = []
+    if empty:
+        bad.append("%d 句没有词事件（%s）" % (len(empty), "、".join(empty[:4])))
+    mono_bad = [lid for lid, r in lines.items() if not r.get("mono", True)]
+    if mono_bad:
+        bad.append("词偏移非单调：%s" % "、".join(mono_bad[:4]))
+    tail_bad = [(lid, float(r.get("tail") or 0.0)) for lid, r in lines.items()
+                if r.get("n") and float(r.get("tail") or 0.0) > WORD_TAIL_MAX]
+    if tail_bad:
+        bad.append("末词终点离句尾过远（>%.2fs）：%s"
+                   % (WORD_TAIL_MAX, "、".join("%s %.2fs" % x for x in tail_bad[:3])))
+    start_bad = [(lid, float(r.get("start") or 0.0)) for lid, r in lines.items()
+                 if r.get("n") and float(r.get("start") or 0.0) > WORD_START_MAX]
+    if start_bad:
+        bad.append("首词起点离句首太远（>%.2fs）：%s"
+                   % (WORD_START_MAX, "、".join("%s %.2fs" % x for x in start_bad[:3])))
+    cover_bad = []
+    for lid, r in lines.items():
+        dur = float(r.get("dur") or 0.0)
+        if not r.get("n") or dur <= 0:
+            continue
+        cov = float(r.get("covered") or 0.0) / dur
+        if cov < WORD_COVER_MIN:
+            cover_bad.append((lid, cov))
+    if cover_bad:
+        bad.append("词覆盖率过低（<%.0f%%）：%s"
+                   % (WORD_COVER_MIN * 100,
+                      "、".join("%s %.0f%%" % (l, c * 100) for l, c in cover_bad[:3])))
+    tail_max = max([float(r.get("tail") or 0.0) for r in lines.values()] or [0.0])
+    detail = "%d 句 / %d 词 · 末词偏差最大 %.2fs" % (len(lines), n_words, tail_max)
+    if bad:
+        lg.fail("G10", "词级时间戳（字幕断行/词锚点依据）", detail + "；" + "；".join(bad))
+    else:
+        lg.ok("G10", "词级时间戳（字幕断行/词锚点依据）", detail)
+
+
+# ⚠ 阈值**只有一套**：权威定义在 qavmaf.py（VMAF_PASS=92 / VMAF_WARN=96，SSIM 仅诊断）。
+# 这里刻意不设第二套常量——本仓库的规矩是"同一事实只能有一个权威值"（CHANGELOG v0.4 D 节）。
+# 真实标定（qavmaf 作者实测，参考帧含字幕与片头片尾淡入淡出）：
+#   模板片 crf17 VMAF 97.24(pass) / crf30 95.74(pass+warning) / 二次编码坏片 29.45(fail)
+# 想按片收紧或放宽就写 film.json 的 qa.vmaf.pass / qa.vmaf.warn，会透传给 qavmaf。
+def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
+    """全片 VMAF/SSIM 门禁（v0.8）：参考帧由场景函数实时渲染，与成片逐帧比较。
+
+    为什么值得全片跑（用户明确要求"全片 + 阻断"）：锐度比只在 4 个时刻采样，
+    能发现"整体发虚"，但发现不了"某 30 秒里字幕糊了 / 某段梯度出现色带"。
+    VMAF 是唯一能覆盖整条时间轴的客观指标。
+
+    三档语义：
+      * 没有 qavmaf.py / 没有 scenes.py（web 引擎）/ 显式 mode=off -> skipped，写明原因；
+      * 分数低于 pass 阈值 -> fail（阻断交付）；
+      * 介于 pass 与 warn 之间 -> pass + warning（能出片，但建议降 CRF）。
+    """
+    qv = _try_module("qavmaf")
+    if mode == "off":
+        lg.skip("G11", "全片 VMAF / SSIM 画质", "本次显式关闭（--vmaf off 或 qa.vmaf.mode=off）")
+        return None
+    if qv is None:
+        lg.skip("G11", "全片 VMAF / SSIM 画质", "没有 qavmaf.py（拷一份进来才能做全片画质门禁）")
+        return None
+    if scenes_mod is None:
+        lg.skip("G11", "全片 VMAF / SSIM 画质",
+                "web 引擎/缺 scenes.py：没有可重渲的参考帧（VMAF 参考帧必须来自场景函数）")
+        return None
+    cfg = ((script or {}).get("qa") or {}).get("vmaf") if isinstance((script or {}).get("qa"), dict) else {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    m = str(mode or cfg.get("mode") or "full")
+    kw = {}
+    for key, ckey in (("vmaf_pass", "pass"), ("vmaf_warn", "warn"),
+                      ("ssim_pass", "ssim_pass"), ("ssim_warn", "ssim_warn")):
+        if cfg.get(ckey) is not None:
+            kw[key] = float(cfg[ckey])
+    if cfg.get("ssim") and isinstance(cfg["ssim"], dict):
+        for key, ckey in (("ssim_pass", "pass"), ("ssim_warn", "warn")):
+            if cfg["ssim"].get(ckey) is not None:
+                kw[key] = float(cfg["ssim"][ckey])
+    print("   [vmaf] 模式=%s（参考帧=场景函数实时渲染，不是成片抽帧）" % m)
+    try:
+        res = qv.report(film, tl, scenes_mod, script, mode=m,
+                        out_json=os.path.join(str(work), "qa", "vmaf.json"), **kw)
+    except Exception as e:                                  # noqa: BLE001
+        lg.fail("G11", "全片 VMAF / SSIM 画质", "门禁自身失败：%s" % e)
+        print("   [FAIL][vmaf]", e)
+        return None
+    gate = (res or {}).get("gate") or {}
+    v = (res or {}).get("vmaf") or {}
+    s = (res or {}).get("ssim") or {}
+    bits = []
+    if v.get("score") is not None:
+        bits.append("VMAF %.2f" % float(v["score"]))
+    if s.get("score") is not None:
+        bits.append("SSIM %.4f" % float(s["score"]))
+    bits.append("%s 帧" % ((res or {}).get("frames_compared") or 0))
+    detail = " · ".join(bits)
+    if (res or {}).get("elapsed_s") is not None:
+        detail += " · 用时 %.1fs" % float(res["elapsed_s"])
+    st = str(gate.get("status") or "skipped")
+    for w in (res or {}).get("warnings") or []:
+        print("   [WARN][vmaf] %s" % w)
+    for e in (res or {}).get("errors") or []:
+        print("   [FAIL][vmaf] %s" % e)
+    if st == "fail":
+        lg.fail("G11", "全片 VMAF / SSIM 画质", detail + "；" + str(gate.get("detail") or ""))
+    elif st == "skipped":
+        lg.skip("G11", "全片 VMAF / SSIM 画质", str(gate.get("detail") or "本次没跑"))
+    else:
+        lg.ok("G11", "全片 VMAF / SSIM 画质", detail)
+    print("   [vmaf] %s %s" % (st, detail))
+    return res
+
+
+# v0.8 实测标定（同一部模板片，29 s，faster-whisper small / CPU int8）：
+#   干净成片：字符召回 0.828（专有名词 "DeepSeek 4.1 Flash" 被听成 DIXX/DeepSeek 变体，
+#            4 段全对上、缺句 0）—— 这不是流水线坏了，是 ASR 对中英混排专名的正常误差。
+#   所以默认线取 0.85 / 0.72：**低于 0.72 才说明"整句丢了/音轨跟剧本不是一套"**，
+#   0.72–0.85 之间给 warning（仍然出片，但提示可能串了缓存）。
+# 想更严就按片覆盖 film.json 的 qa.asr.recall_pass / recall_warn。
+QA_ASR_RECALL_PASS = 0.85
+QA_ASR_RECALL_WARN = 0.72
+
+
+def _qa_asr_gate(lg, film, work, script, tl=None, cfg=None):
+    """ASR 回读门禁（v0.8）：把成片音轨转回文字，和剧本逐句对账。
+
+    为什么值得：容器/响度/帧级质检都默认"音轨里念的就是剧本那几句"。TTS 缓存串了、
+    换声线漏句、混音压没了、音轨是旧的——这些从波形和容器上都看不出来，只有转回
+    文字对账才能发现。代价是每片多 4–6 s（small 模型，CPU），可关。
+    """
+    qa = cfg if isinstance(cfg, dict) else {}
+    a = qa.get("asr") if isinstance(qa.get("asr"), dict) else {}
+    if a.get("enabled") is False:
+        lg.skip("G12", "ASR 回读（原稿 vs 成片旁白）",
+                "本次显式关闭（qa.asr.enabled=false）")
+        return None
+    qa_mod = _try_module("qaasr")
+    if qa_mod is None:
+        lg.skip("G12", "ASR 回读（原稿 vs 成片旁白）", "没有 qaasr.py（拷一份进来才能做回读）")
+        return None
+    kw = dict(recall_pass=QA_ASR_RECALL_PASS, recall_warn=QA_ASR_RECALL_WARN)
+    if a.get("recall_pass") is not None:
+        kw["recall_pass"] = float(a["recall_pass"])
+    if a.get("recall_warn") is not None:
+        kw["recall_warn"] = float(a["recall_warn"])
+    if a.get("model"):
+        kw["model_size"] = str(a["model"])
+    print("   [asr] 回读成片音轨（模型 %s，CPU）" % (kw.get("model_size") or "small"))
+    try:
+        res = qa_mod.report(film, tl, script,
+                            out_json=os.path.join(str(work), "qa", "asr.json"), **kw)
+    except Exception as e:                                  # noqa: BLE001
+        lg.fail("G12", "ASR 回读（原稿 vs 成片旁白）", "门禁自身失败：%s" % e)
+        print("   [FAIL][asr]", e)
+        return None
+    gate = (res or {}).get("gate") or {}
+    detail = "字符召回 %.3f（%s）" % (float((res or {}).get("recall") or 0.0),
+                                  (res or {}).get("engine") or "-")
+    if (res or {}).get("elapsed_s") is not None:
+        detail += " · %.1fs" % float(res["elapsed_s"])
+    for w in (res or {}).get("warnings") or []:
+        print("   [WARN][asr] %s" % w)
+    for e in (res or {}).get("errors") or []:
+        print("   [FAIL][asr] %s" % e)
+    st = str(gate.get("status") or "skipped")
+    if st == "fail":
+        lg.fail("G12", "ASR 回读（原稿 vs 成片旁白）", detail + "；" + str(gate.get("detail") or ""))
+    elif st == "skipped":
+        lg.skip("G12", "ASR 回读（原稿 vs 成片旁白）", str(gate.get("detail") or "本次没跑"))
+    else:
+        lg.ok("G12", "ASR 回读（原稿 vs 成片旁白）", detail)
+    print("   [asr] %s %s" % (st, detail))
+    return res
+
+
+def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
     print("== QA")
     th = _theme_for(script) if script is not None else None
     shots, refs = [], []             # refs: [(frac 下标, PIL 原图)]
@@ -1238,8 +1656,9 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
             try:
                 fr = scenes_mod.draw_frame(s, sec - s["start"], s["dur"], sec, ref_script,
                                            int(round(sec * tl["fps"])))
-                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, ref_script.get("sub_max_hold")),
-                                     theme=th)
+                _hold = ref_script.get("sub_max_hold")
+                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, _hold), theme=th,
+                                     words=K.sub_words_at(tl["scenes"], sec, _hold))
                 refs.append((k, fr))
             except Exception as e:      # noqa: BLE001
                 print("   [WARN] 参考帧渲染失败:", e)
@@ -1253,9 +1672,13 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
         print("   锐度参考帧: 场景函数重渲染 t=%.2fs（第 %d 张）" % (ref_sec, k_ref + 1))
     elif scenes_mod is None:
         print("   [WARN] 没有场景函数参考帧（web 引擎或 scenes.py 缺失），锐度比门禁本次跳过")
+    _vq = tl.get("video") or {}
     rep = K.qa_report(film, expect_frames=tl["frames"], ref_img=ref_img,
                       ref_sec=ref_sec, expected_subtitles=len(tl["scenes"]),
-                      notes=os.path.join(work, "sub.srt"), theme=th)
+                      notes=os.path.join(work, "sub.srt"), theme=th,
+                      expect_w=int(_vq.get("out_w") or K.W),
+                      expect_h=int(_vq.get("out_h") or K.H),
+                      expect_fps=float(_vq.get("fps") or tl.get("fps") or K.FPS))
     pr = rep["probe"]
     f = pr.get("format", {})
     print("   时长 %.2fs  大小 %.1f MB  码率 %.2f Mbps" % (
@@ -1303,6 +1726,10 @@ def st_qa(film, tl, work, scenes_mod=None, script=None):
     lg = _gate()
     if lg is not None:
         _qa_gates(lg, rep, deep, tl, work)
+        # 全片 VMAF/SSIM 放在最后跑：它最贵（约 1.2× 实时），前面有 fail 时可省下这十分钟。
+        _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=vmaf_mode)
+        # ASR 回读最便宜（模板片 6 s），放最后跑：前面已经 fail 的片没必要再花这 6 秒。
+        _qa_asr_gate(lg, film, work, script, tl, cfg=((script or {}).get("qa") or {}))
     return errors
 
 
@@ -1364,8 +1791,10 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
         if tuple(fr.size) != (K.W, K.H):
             raise RuntimeError("场景 %s 在 t=%.2fs 返回 %dx%d，期望 %dx%d（stills 与 FrameSink 一样严格）"
                                % (sid, tg, fr.size[0], fr.size[1], K.W, K.H))
-        fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, script.get("sub_max_hold")),
-                             theme=_theme_for(script))
+        _hold = script.get("sub_max_hold")
+        fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, _hold),
+                             theme=_theme_for(script),
+                             words=K.sub_words_at(tl["scenes"], tg, _hold))
         p = os.path.join(outdir, "%s_%05.1f.png" % (sid, float(lt)))
         fr.save(p)
         made.append(p)
@@ -1464,6 +1893,15 @@ def _finish_gates(a, persist=True):
         print("   账本:", gj)
     if rep:
         print("   报告:", rep, " <- 交付时把这个文件一起给出")
+        try:
+            _run_dir, _err = GT.archive_run(a.work, lg, report_path=rep,
+                                            artifacts=[str(a.out) if getattr(a, "out", "") else ""])
+            if _run_dir:
+                print("   归档:", _run_dir, "(work/runs/%s/)" % lg.run_id)
+            elif _err:
+                print("   [WARN] 归档失败:", _err)
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] 归档失败:", e)
     if c[GT.SKIP]:
         print("   注意：有 %d 项本次**没有执行**（skipped != 通过）" % c[GT.SKIP])
     if errs:
@@ -1472,6 +1910,146 @@ def _finish_gates(a, persist=True):
             print("     -", e)
         return 1
     return 0
+
+
+# ---------------------------------------------------------------- 批量
+BATCH_MAX_FILMS = 100
+BATCH_MAX_BYTES = 1 << 20            # 1 MiB：清单文件本身不该是个大 JSON
+
+
+def _load_batch(path):
+    """读批量清单 -> [job]。支持两种写法（都接受）：
+
+        ["a/film.json", "b/film.json"]                       # 简写：只给剧本
+        {"films": [{"script": "a/film.json", "work": "a/work",
+                    "scenes": "a/scenes.py", "out": "out/a.mp4"}]}
+
+    限制来自 MoneyPrinterTurbo 的工程经验（B 线调研）：批量最容易死在"第 7 条跑一半
+    才发现清单写错"，所以数量/体积先卡死，并且在**开跑之前**全部预检一遍。
+    """
+    p = str(path)
+    if not os.path.exists(p):
+        raise SystemExit("[batch] 清单不存在：%s" % p)
+    if os.path.getsize(p) > BATCH_MAX_BYTES:
+        raise SystemExit("[batch] 清单 %.1f KB 超过 %d KB 上限：拆成几份跑"
+                         % (os.path.getsize(p) / 1024.0, BATCH_MAX_BYTES // 1024))
+    try:
+        data = json.load(open(p, encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise SystemExit("[batch] 清单不是合法 JSON：%s" % e) from e
+    rows = data.get("films") if isinstance(data, dict) else data
+    if not isinstance(rows, list) or not rows:
+        raise SystemExit("[batch] 清单必须是数组，或 {\"films\": [...]} 且非空")
+    if len(rows) > BATCH_MAX_FILMS:
+        raise SystemExit("[batch] %d 条超过 %d 条上限：拆成几份跑"
+                         % (len(rows), BATCH_MAX_FILMS))
+    base = os.path.dirname(os.path.abspath(p))
+    jobs = []
+    for i, row in enumerate(rows):
+        if isinstance(row, str):
+            row = {"script": row}
+        if not isinstance(row, dict) or not row.get("script"):
+            raise SystemExit("[batch] 第 %d 条缺少 script 字段：%r" % (i + 1, row))
+
+        def _abs(v, default=""):
+            if not v:
+                return default
+            v = str(v)
+            return v if os.path.isabs(v) else os.path.normpath(os.path.join(base, v))
+
+        script = _abs(row["script"])
+        stem = os.path.splitext(os.path.basename(script))[0]
+        jobs.append(dict(
+            script=script,
+            scenes=_abs(row.get("scenes"), os.path.join(os.path.dirname(script), "scenes.py")),
+            work=_abs(row.get("work"), os.path.join(base, "work_" + stem)),
+            out=_abs(row.get("out"), os.path.join(base, "out", stem + ".mp4")),
+            label=str(row.get("label") or stem),
+        ))
+    return jobs
+
+
+def run_batch(a):
+    """批量渲染：先全量预检 -> 逐条隔离执行 -> JSON 汇总 + 退出码。
+
+    失败隔离是这套流程的全部价值：一条剧本写错，不该让另外 9 条都不出片。
+    但也**不静默**：预检阶段就失败的条目会在开跑前一次性报全，跑的过程中失败的
+    条目会带着退出码与日志尾进汇总。
+    """
+    jobs = _load_batch(a.batch)
+    print("== Batch（%d 条）" % len(jobs))
+    here = os.path.dirname(os.path.abspath(__file__))
+    fc = os.path.join(here, "filmcheck.py")
+    checks = []
+    bad = 0
+    for j in jobs:
+        row = dict(label=j["label"], script=j["script"], ok=False, errors=[], warnings=[])
+        if not os.path.exists(j["script"]):
+            row["errors"].append("剧本不存在：%s" % j["script"])
+        elif os.path.exists(fc):
+            p = subprocess.run([sys.executable, fc, j["script"], "--json"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            try:
+                d = json.loads((p.stdout or "").strip() or "{}")
+            except json.JSONDecodeError:
+                d = {}
+            row["ok"] = bool(d.get("ok", p.returncode == 0))
+            row["errors"] = [e.get("msg") if isinstance(e, dict) else str(e)
+                             for e in (d.get("errors") or [])][:8]
+            row["warnings"] = len(d.get("warnings") or [])
+        else:
+            row["ok"] = True                     # 没装校验器：不阻断，但汇总里会说
+            row["warnings"] = -1
+        if not row["ok"]:
+            bad += 1
+        checks.append(row)
+    for r in checks:
+        print("   %s %-12s %s" % ("OK  " if r["ok"] else "FAIL", r["label"],
+                                  "；".join(r["errors"][:3]) if r["errors"] else ""))
+    if bad:
+        rep_p = os.path.join(os.path.dirname(os.path.abspath(jobs[0]["work"])), "batch-report.json")
+        json.dump(dict(phase="preflight", films=checks), open(rep_p, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        raise SystemExit("[batch] 预检有 %d 条不通过，**一条都没跑**（清单/剧本先修好）：%s\n"
+                         "  明细：%s" % (bad, "、".join(r["label"] for r in checks if not r["ok"]),
+                                        rep_p))
+    print("   预检全部通过，开始逐条渲染（单条失败不阻断其余）")
+
+    results = []
+    for j in jobs:
+        print("\n---- [batch] %s ----" % j["label"])
+        cmd = [sys.executable, os.path.join(here, "render.py"),
+               "--script", j["script"], "--scenes", j["scenes"],
+               "--work", j["work"], "--out", j["out"], "--stage", "all"]
+        cmd += ["--engine", a.engine] if a.engine else []
+        cmd += ["--cost"] if a.cost else []
+        cmd += ["--strict-gates"] if a.strict_gates else []
+        t0 = time.time()
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        wall = time.time() - t0
+        tail = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()[-6:]
+        results.append(dict(label=j["label"], script=j["script"], out=j["out"],
+                            work=j["work"], exit=p.returncode, ok=(p.returncode == 0),
+                            wall_s=round(wall, 1), tail=tail))
+        print("   %s 用时 %.1fs  -> %s" % ("OK" if p.returncode == 0 else "FAIL", wall, j["out"]))
+        if p.returncode != 0:
+            for ln in tail:
+                print("     | " + ln)
+
+    okn = sum(1 for r in results if r["ok"])
+    rep_p = os.path.join(os.path.dirname(os.path.abspath(jobs[0]["work"])), "batch-report.json")
+    os.makedirs(os.path.dirname(rep_p), exist_ok=True)
+    json.dump(dict(phase="render", films=checks, results=results,
+                   summary=dict(total=len(results), ok=okn, failed=len(results) - okn)),
+              open(rep_p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print("\n== Batch 汇总：%d/%d 成功，%d 失败" % (okn, len(results), len(results) - okn))
+    print("   台账：%s" % rep_p)
+    for r in results:
+        if not r["ok"]:
+            print("   FAIL %-12s exit=%s" % (r["label"], r["exit"]))
+    return 0 if okn == len(results) else 1
 
 
 # ---------------------------------------------------------------- main
@@ -1506,7 +2084,23 @@ def main():
                     help="跳过人工签核检查（会在 QC 报告里留痕，不算通过）")
     ap.add_argument("--cost", action="store_true",
                     help="每个 stage 往 work/cost.jsonl 记一行实测耗时")
+    # ---- v0.8 ----
+    ap.add_argument("--batch", default="",
+                    help="批量清单（JSON 数组或 {\"films\":[...]}，≤100 条）："
+                         "先全量预检，再逐条渲染，单条失败不阻断其余")
+    ap.add_argument("--vmaf", default="", choices=("", "full", "sample", "off"),
+                    help="qa 阶段的全片 VMAF/SSIM 模式（缺省读 film.json 的 qa.vmaf.mode）")
+    ap.add_argument("--no-preflight", action="store_true",
+                    help="跳过渲染前资源预检（会在 QC 报告里留痕，不算通过）")
+    ap.add_argument("--preview", default="",
+                    help="只渲前 N 秒做预览片（出 out/preview/*.mp4 + .gif），不写交付报告")
+    ap.add_argument("--run-id", default="",
+                    help="本次运行的标签（写进 QC 报告，便于对照多版本）")
     a = ap.parse_args()
+
+    if a.batch:
+        _setup_stdio()
+        return run_batch(a)
 
     # work/ 本来就不存在 = 这一跑自己产出全部中间物，别把"我还没跑到"当成"产物过时"。
     work_pre_exists = os.path.isdir(a.work)
@@ -1534,7 +2128,7 @@ def main():
             web_entry = ""                   # 页面还没建：交给后面的 stage 报错，账本先照建
     _LEDGER = GT.GateLedger(a.work, script, scenes_path=a.scenes,
                             script_path=a.script, engine=engine,
-                            web_entry=web_entry)
+                            web_entry=web_entry, run_id=a.run_id)
     if a.no_gate:
         _LEDGER.bypass("人工签核检查（--no-gate）", "本条不算通过，只记录")
         print("[gate] --no-gate：跳过人工签核检查（会在 QC 报告里留痕）")
@@ -1671,6 +2265,56 @@ def main():
         return mod
 
     stage = a.stage
+
+    # ---- preview：前 N 秒试片（v0.8）----
+    if a.preview:
+        try:
+            secs = float(a.preview)
+        except ValueError:
+            raise SystemExit("[preview] 需要秒数，例如 --preview 15")
+        if secs <= 0:
+            raise SystemExit("[preview] 秒数必须 > 0")
+        tl = ensure_tl()
+        mod = load_scenes()
+        pdir = os.path.dirname(os.path.abspath(a.out))
+        os.makedirs(pdir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(a.out))[0]
+        out_mp4 = os.path.join(pdir, "preview", stem + "_preview.mp4")
+        os.makedirs(os.path.dirname(out_mp4), exist_ok=True)
+        n = min(int(round(secs * float(tl["fps"]))), int(tl["frames"]))
+        print("== Preview（前 %.1fs / %d 帧）" % (n / float(tl["fps"]), n))
+        sc2 = dict(script)
+        sc2["_total"] = tl["total"]
+        sc2.setdefault("_style", resolve_style(script))
+        _render_range(tl, mod, sc2, 0, n, out_mp4, int(script.get("crf", 18)),
+                      str(script.get("preset", "medium")), progress=False)
+        # 有 audio.wav 就带上声音（没有也能看画面；不阻断）。
+        # 注意：**必须先把音轨截到预览时长**——K.mux 会校验音视频时长差 < 0.05s，
+        # 直接拿全长 audio.wav 去配 8 秒画面必然被判"音视频时长不一致"（v0.8 开发期实测）。
+        audio = os.path.join(a.work, "audio.wav")
+        if os.path.exists(audio):
+            tmp = out_mp4 + ".mux.mp4"
+            try:
+                pcm, _sr = K.wav_read(audio)
+                need = int(round(n / float(tl["fps"]) * float(_sr)))
+                if need > 0:
+                    pcm = pcm[:need]
+                p_audio = os.path.join(a.work, "preview_audio.wav")
+                K.wav_write(p_audio, pcm)
+                audio = p_audio
+                K.mux(out_mp4, audio, tmp, loudnorm=False)
+                os.replace(tmp, out_mp4)
+            except Exception as e:                          # noqa: BLE001
+                print("   [WARN] 预览片混音失败（保留无声版）：%s" % e)
+        gif = os.path.splitext(out_mp4)[0] + ".gif"
+        try:
+            _to_gif(out_mp4, gif, fps=min(10, int(tl["fps"])), width=480)
+        except Exception as e:                              # noqa: BLE001
+            print("   [WARN] GIF 生成失败（mp4 仍然可用）：%s" % e)
+        print("   预览片:", out_mp4)
+        if os.path.exists(gif):
+            print("   GIF  :", gif)
+        return 0
 
     # ---- explain：只报"哪些阶段过时了"，不跑任何 stage ----
     if stage == "explain":
@@ -1835,7 +2479,7 @@ def main():
         _need(os.path.exists(a.out), "没有成片 %s，先跑 --stage mux" % a.out)
         mod = load_scenes(strict=False) if engine == "pil" else None
         _t0 = _stage_begin("qa")
-        errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script)
+        errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script, vmaf_mode=a.vmaf)
         _stage_end("qa", _t0)
         _check_signoff("qa")
         rc = _finish_gates(a)
@@ -1851,6 +2495,10 @@ def main():
             # audio.wav 已经在前面阶段生成——否则 --stage frames 在空 work 目录会白渲全片再挂掉。
             if stage == "all":
                 _need(os.path.exists(audio), "混音阶段异常：audio.wav 未生成")
+            if not _run_preflight(script, a.work, engine, tl=tl,
+                                  skip=bool(a.no_preflight)):
+                print("\n[渲染前预检未过] 按上面逐条修；确认要硬跑加 --no-preflight（会留痕）")
+                return 1
             if engine == "pil":
                 mod = load_scenes()
             _t0 = _stage_begin("frames")
@@ -1875,7 +2523,8 @@ def main():
                 return 0 if not _LEDGER.fails() else 1
             if stage == "all":
                 _t0 = _stage_begin("qa")
-                errs = st_qa(film, tl, a.work, scenes_mod=mod, script=script)
+                errs = st_qa(film, tl, a.work, scenes_mod=mod, script=script,
+                             vmaf_mode=a.vmaf)
                 _stage_end("qa", _t0)
                 rc = _finish_gates(a)
                 if errs or rc:

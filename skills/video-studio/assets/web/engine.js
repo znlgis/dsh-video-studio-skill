@@ -1,7 +1,11 @@
-/* engine.js — Canvas2D 逐帧确定性动画内核（v0.3.0）
+/* engine.js — Canvas2D 逐帧确定性动画内核（v0.8.0）
  *
  * 改编自 ai-history-film（MIT）video/web/js/engine.js 的「逐帧 seek + 场景 + cue」思路，
  * 但去掉 GSAP 与 three.js，改成原生 Canvas2D + 自写缓动，不 vendor 任何三方 JS。
+ *
+ * v0.8.0 新增：风格注入（window.__STYLE__）。webengine.open_page(style=...) 在页面加载前用
+ * add_init_script 写入它，本文件据此设置画布 w/h、帧率、字体栈与底色；**没有 __STYLE__ 时
+ * 所有取值退回 v0.7 常量，像素与旧版逐字节一致**（style=None 的兼容性硬要求）。
  *
  * 核心约定：
  * - 每帧从零重画：画面只由「帧号 f」决定，同一帧号永远画同一张图（逐帧渲染可复现）。
@@ -13,13 +17,53 @@
 (function (global) {
   'use strict';
 
+  /* ---------------- v0.8.0：风格包（window.__STYLE__） ----------------
+   * 由 webengine 注入（页面自己直接打开时没有）。不注入 = 全部退回下面这行常量。
+   * 只读 payload，不在页面里做任何派生计算；同 payload 永远渲染出同一张图。 */
+  var ST = (global.__STYLE__ && typeof global.__STYLE__ === 'object') ? global.__STYLE__ : null;
+  var ST_THEME = (ST && ST.theme && typeof ST.theme === 'object') ? ST.theme : null;
+  var ST_CANVAS = (ST && ST.canvas && typeof ST.canvas === 'object') ? ST.canvas : null;
+
   var W = 1920, H = 1080, FPS = 30, BG = '#0b0e14';
   var DEFAULT_DURATION = 12.0;   // 页面没给时长时的兜底；film.js 用它区分"显式时长"与"兜底值"
   var FAMILY = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
   var TAU = Math.PI * 2;
 
+  function _num(v, fb) { var n = Number(v); return (v != null && isFinite(n)) ? n : fb; }
+  function _txt(v, fb) { return (typeof v === 'string' && v.length > 0) ? v : fb; }
+
   var canvas = document.getElementById('stage');
   if (!canvas) throw new Error('engine.js: 页面缺少 <canvas id="stage">');
+
+  /* 画布尺寸：只在注入 style 时改（webengine 侧已校验 16:9 横屏偶数，这里再兜一层）。
+   * 没注入时 canvas 属性 / 内联样式一个字都不动 —— 旧行为不变。 */
+  if (ST_CANVAS) {
+    var _w = Math.round(_num(ST_CANVAS.w, W)), _h = Math.round(_num(ST_CANVAS.h, H));
+    if (_w > 0 && _h > 0 && Math.abs(_w / _h - 16 / 9) > 1e-3) {
+      throw new Error('engine.js: __STYLE__.canvas 必须是 16:9 横屏，收到 ' + _w + 'x' + _h);
+    }
+    if (_w > 0 && _h > 0) {
+      W = _w; H = _h;
+      canvas.width = W;
+      canvas.height = H;
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+      document.documentElement.style.width = W + 'px';
+      document.documentElement.style.height = H + 'px';
+      if (document.body) {
+        document.body.style.width = W + 'px';
+        document.body.style.height = H + 'px';
+      }
+    }
+    /* 帧率：只有调用方显式给了 fps 才改。帧率是 timeline 契约，不是画风 ——
+     * 不能因为注入了 style 就悄悄把页面帧率换掉（那样分块帧号会整体错位）。 */
+    var _fps = _num(ST_CANVAS.fps, null);
+    if (_fps != null && _fps > 0) FPS = Math.round(_fps);
+  }
+
+  if (ST_THEME) BG = _txt(ST_THEME.bg, BG);
+  if (ST && ST.typography) FAMILY = _txt(ST.typography.font_stack, FAMILY);
+
   var ctx = canvas.getContext('2d', { alpha: false, desynchronized: false });
 
   /* ---------------------------------------------------------------- 数学 / 缓动 */
@@ -482,6 +526,7 @@
   /* ---------------------------------------------------------------- 导出 */
   var FK = {
     W: W, H: H, FPS: FPS, BG: BG, TAU: TAU, FAMILY: FAMILY,
+    style: ST,                      // 注入的 __STYLE__（没有就是 null）；qa / selftest 可据此断言
     defaultDuration: DEFAULT_DURATION,
     canvas: canvas, ctx: ctx,
     clamp: clamp, lerp: lerp, seg: seg, E: E, hash: hash, rng: rng,

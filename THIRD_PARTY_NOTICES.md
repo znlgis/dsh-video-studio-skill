@@ -30,6 +30,7 @@
 | opencv-python（cv2） | 编码锐度比（Laplacian 方差） | Apache-2.0 | 可选（缺了跳过锐度门禁） |
 | scipy | sfxkit 的时间域滤波加速 | BSD-3-Clause | 可选（缺了走 FFT 卷积兜底） |
 | playwright | web 引擎驱动 Chromium/Edge | Apache-2.0 | 可选（只在 `--engine web` 时需要） |
+| faster-whisper | ASR 回读门禁（G12）把成片音轨转回文字 | MIT（模型权重另有许可，随模型分发） | 可选（缺了降级到 ffmpeg whisper 滤镜 / skipped） |
 | Chromium / Microsoft Edge | web 引擎的渲染内核 | BSD-3-Clause / 微软条款 | 可选 |
 
 **字体**：PIL 引擎使用系统自带中文字体（Windows 的 `msyh.ttc`/`msyhbd.ttc` 等），

@@ -42,9 +42,13 @@ cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
 cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,stagewatch.py} .
 # 可选（v0.3）：要程序化音效/配乐就一并拷；要走浏览器渲染再拷 webengine.py + assets/web/
 cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
+#    v0.8.0 起渲染前预检 / 全片 VMAF / ASR 回读是三个**可选模块**：
+#    拷了才有对应门禁（G0 / G11 / G12）；不拷就记 skipped 并写明原因，不会让渲染失败。
+#    但"skipped != 通过"——交付前请确认这三项是被你**主动**跳过的。
+cp <SKILL_DIR>/scripts/{preflight.py,qavmaf.py,qaasr.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：43 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：51 条回归护栏，20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
@@ -67,9 +71,22 @@ python render.py --script film.json --scenes scenes.py --work work --stage still
 # 注意：estimate.py 是**仓库/包里的工具**（<REPO>/tools/），不在 skills/video-studio/ 里，
 #      quickstart 拷出来的 myfilm/ 也不会有它；想用就按包根路径调用，或从包/仓库里复制过来。
 python <REPO>/tools/estimate.py --script film.json --jobs 4
+#    【v0.8 必看】estimate 已经算进新增的三道门禁，预演时间不再只是渲染时间：
+#    29 s 模板片从 v0.7 的 total 28.4 s 变成 58.8–108.2 s（vmaf 单阶段 31–50 s 是瓶颈）。
+#    要压回原来的量级就 --vmaf off（或 --vmaf sample），并接受 G11 记 skipped。
 
 # 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
+#    【v0.8 会变慢，别以为卡死】一条 29.011 s / 870 帧的模板片实测：
+#      · 全链 --stage all：47.3 s（v0.7 约 28 s），其中 frames 12.5 s、qa 23.9 s
+#      · 渲前资源预检（G0）        < 1 s（查字形/字体/已有 TTS 音频是否可解析）
+#      · 全片 VMAF+SSIM（G11）      14.2 s（参考帧要按场景函数重渲一遍 870 帧）
+#      · ASR 回读（G12）            8.7 s（faster-whisper small / CPU；没装就 skipped）
+#    —— **qa 已经超过渲染本身**（23.9 s vs 12.5 s）。同一台机器负载不同能差近 2×，
+#       别把单次秒数当承诺；12 分钟片按 0.4× 实时外推 VMAF ≈ 5 分钟。
+#    想先快速看画面：--preview 15（只渲前 15 秒出 mp4+gif，不写交付账本）；
+#    想省掉 VMAF：--vmaf off 或 film.json 的 "qa": {"vmaf": {"mode": "off"}}（记 skipped）。
+#    web 引擎没有可重渲的参考帧，G11 恒 skipped——这不是漏查，是路线限制。
 
 # 6) 亲眼看质检抽出的帧
 #    work/qa/sheet.png      联系表（全片调性）
@@ -431,11 +448,62 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 2. 出现了**要理解的结构**（网络层次、坐标轴、流程图）→ 留到能扫一眼看完。
 3. 两个镜头之间**没有内容连续性**（黑一下、空一拍）→ 让下一幕提前开始，而不是加长黑场。
 
+## 6.1 词级时间轴与词锚点（v0.8.0）
+
+> **一句话**：句时长仍然是权威；词级时间戳是**附加值**，只用来「字幕按词折行 / cue 打到某个词上 /
+> 门禁判它有没有变」——它不参与排轴，也**绝不**用词时长之和去推算句子时长。
+
+**开与关**：`film.json` 顶层 `"words": true|false`，默认 **true**。
+`--stage tts` 会额外收 edge-tts 的 `WordBoundary` 事件，落盘 `work/words.json`：
+
+```jsonc
+{ "schema": 1, "enabled": true,
+  "lines": { "l03": { "dur": 7.18, "n": 13, "covered": 5.2, "tail": 0.09,
+                      "gaps": [0.18, 0.21, ...], "mono": true,
+                      "words": [{"text":"画质","start":0.04,"end":0.32}, ...] } },
+  "stats": { "lines": 4, "words": 64, "empty": [] } }
+```
+
+**它怎么来的（实现口径，改代码前先看）**：
+- 必须显式 `edge_tts.Communicate(..., boundary="WordBoundary").stream()` 同时收音频与词事件。
+  用 `save()` 会把词事件丢掉；不传 `boundary` 时默认是 `SentenceBoundary`，**一条词事件都收不到**
+  （实测 edge-tts 7.3.1 / zh-CN：默认设置下词事件数 = 0）。
+- 音频先写 `<句>.mp3.part` 再 `os.replace`。旧写法直接 `open(..., "wb")`，一次断网就把**已缓存的好音频
+  截成 0 字节**；现在失败只丢这次的新音频，旧缓存还在。
+- 词事件 offset 是相对**原始 mp3** 的 100 ns 单位；`trim_silence=True` 时时间轴用的是裁剪后的语音，
+  所以 `words_normalize(offset_shift=裁掉的句首秒数)` 会把词表整体平移。**不平移，词会整体提前 0.1–1 s**
+  （实测模板句 shift = 0.10 s 量级）。
+- 词表有独立缓存键 `tts_words_key`，没并进 `tts_key_v2`：老音频照旧复用，只在"这次显式要词级"时补采一次。
+- 词事件收不到**不是失败**：meta 里记 `words_ok=false`、`words_events=0`，打印 WARN 并复用已有音频；
+  G10 会记 `skipped`（"词事件为空"），不许冒充 pass。
+
+**下游怎么用**：
+
+| 能力 | 用法 | 退化行为 |
+|---|---|---|
+| 字幕按词折行 | `fit_sub_lines(..., words=)` / `draw_subtitle(..., words=)` | 词表对不上原文或折出来超过 2 行 -> **回退字符折行**（老项目排版不变） |
+| cue 词锚点 | `"at": "l03:w2"` / `"at": "l03:w2+0.1"`（**从 1 数**，w1 = 第一个词） | 该句没有那么多词 -> 退化为 `l03+偏移` 并打 WARN；场景 id 也不存在才报错 |
+| 门禁判据 | G10 读 `work/words.json`（唯一事实来源，不再各自翻 `*.mp3.json`） | 没开/没数据 -> skipped |
+
+**三个坑（都在真实跑里踩过）**：
+
+1. **词间有空隙**：实测 edge-tts 相邻词之间有 0.1–0.3 s 不在任何事件里。所以"词时长求和"永远小于句长，
+   G10 的覆盖率阈值才定在 45%（低于它才是"明显少了"），别拿 `sum(dur) == dur` 当判据。
+2. **句尾静音不在词事件里**：约 0.5 s，靠**整句实测时长**兜底。G10 只检查"末词终点离句尾不超过 0.40 s"
+   （模板片实测 0.07–0.12 s），超过它通常意味着词事件本身错位了。
+3. **词锚点会静默退化**：`l03:w99` 不会炸，只会 WARN 后退回句偏移。**改台词后先看 stdout 有没有这条 WARN**——
+   否则你会以为自己精确打到了某个词。同样的，`words=false` 或词事件为空时，字幕不会报错，只是退回整句断行。
+
+**老项目第一次升级**：默认 `words=true` 会让每句**重新联网合成一次**（老缓存里没有 `words_key`）。
+一次全片 TTS 的网络成本，换词级能力；不想付就把 `"words": false` 写进 `film.json`，行为回到 v0.7。
+
+细则（词级契约、时长权威性、裁剪平移公式、词锚点退化路径）见 [references/word-timeline.md](references/word-timeline.md)。
+
 ## 7. 质检门禁（error 必过 / warning 别当看不见）
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（43 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（51 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -460,6 +528,11 @@ cat out/QC-REPORT.md                          # gate matrix + 实测值 + 签核
 python render.py ... --stage qa --strict-gates   # 交付前：skipped 也算失败
 python render.py ... --stage accept --gate stills --note "看过联系表"   # 人工签核
 ```
+
+**报告头部有「运行编号」与「输入指纹」两行**（v0.8）：前者是 `--run-id`（不给就按时间戳生成），
+后者是 script / scenes / words / filmkit 四个内容的指纹。同一部片跑了好几版之后，
+"上一版的门禁结论到底是什么"就靠 `work/runs/<runId>/` 里的快照回答（只归档小文件，
+视频/音频/分块就地保留）。
 
 **四道人工签核闸**（`style` 风格与声线 / `stills` 母版静帧 / `facts` 上屏数字 / `release` 成片验收）：
 
@@ -489,6 +562,23 @@ python scripts/stagewatch.py --work work --json
 下次该 stage 开始前重算上游输入与自己的产物指纹。**默认只告警**（`--strict-stale` 升级为失败，
 `--allow-stale` 显式放行并留痕）。改一句要重跑什么，见 [references/change-impact.md](references/change-impact.md)。
 
+**v0.8 的四道新门禁**（账本 id：`G0` / `G10` / `G11` / `G12`，报告里按记的顺序排在 `G4` 前后）：
+
+| 门禁 | 查什么 | 三档语义（`pass` / `fail` / `skipped`） |
+|---|---|---|
+| `G0` 渲染前资源预检 | 剧本结构、全部上屏文本逐字过字形检测（按字段选字重）、`work/tts/*.mp3` 能否被 ffprobe 解析、字体候选能否加载、web 入口页是否存在 | 有 error -> `fail`；只有 warning -> `pass`（warning 仍进账本）；没拷 `preflight.py` -> `skipped` |
+| `G10` 词级时间戳 | `work/words.json` 的覆盖率/单调性/末词与首词偏差 | 判据不过 -> `fail`；`words=false`、没有 `words.json`、词事件为空 -> `skipped`（写明原因） |
+| `G11` 全片 VMAF/SSIM | 参考帧由**场景函数实时重渲**，经 rawvideo 喂 ffmpeg 与成片逐帧比（不是从成片抽帧——那样恒等于 100） | VMAF < **92** -> `fail`；[92, 96) -> `pass` + warning；缺 `qavmaf.py` / web 引擎 / `--vmaf off` / 没 libvmaf -> `skipped`。阈值只有一份，定义在 `qavmaf.VMAF_PASS / VMAF_WARN` |
+| `G12` ASR 回读 | 成片音轨转文字，按 timeline 每段窗口算**字符级多重集召回**（中文没有词边界，字符级才成立；多重集是因为"是"这种字要计次数） | 召回 < 0.72 -> `fail`；[0.72, 0.85) -> `pass` + warning；两个引擎都不可用 / 没装 `qaasr.py` / 显式关闭 -> `skipped` |
+
+**为什么 G11 值得全片跑**：锐度比只在 4 个时刻采样，能发现"整体发虚"，发现不了"某 30 秒里字幕糊了"。
+VMAF 是唯一覆盖整条时间轴的客观感知指标。代价是**每片多渲一遍参考帧**（29 s 片实测 14.2 s 全跑完；
+> 机器被其它任务占满时同一份代码测到过 28.8 s，同机不同负载差近 2×，只认"这一跑"的数字）。
+**为什么 G12 值得跑**：容器/响度/帧级质检全都默认"音轨里念的就是剧本那几句"——缓存串了、漏句、被压没了，
+从波形和容器上都看不出来。代价约 6 s/片（small 模型，CPU）。
+
+三个门禁的实测数据、阈值来源与关闭方式见 [references/v08-quality.md](references/v08-quality.md)。
+
 **质检分三层**，一层比一层更接近"观众真的看到了什么"：
 
 | 层 | 查什么 | 工具 | 抓得住什么 |
@@ -509,7 +599,7 @@ python scripts/stagewatch.py --work work --json
 
 | 判据 | 阈值 | 失败怎么办 |
 |---|---|---|
-| 分辨率/帧率 | 严格等于设定值 | 检查 FrameSink 参数；`strict=True` 会直接报错而不是静默缩放 |
+| 分辨率/帧率 | 严格等于**交付规格**（v0.8：`timeline.video` 的 out_w/out_h/fps；缺省回落 1080p/30） | 检查 `FrameSink` 参数与 `film.json` 的 `video` 块是否一致；`strict=True` 会直接报错而不是静默缩放 |
 | 音轨缺失 | 必须有音轨 | mux 参数漏了 `-i audio.wav` |
 | 时长 | 与 `frames/FPS` 差 < 0.5 s | 断点续渲漏帧；分块模式检查缺口检测 |
 | **真峰** | **> -1.0 dBTP**（-1.0 ~ -1.4 之间只 warn） | 混流前目标设 -1.5（AAC 会把真峰抬高 ~0.9 dB） |
@@ -519,6 +609,10 @@ python scripts/stagewatch.py --work work --json
 | **音画同步（v0.3）** | 判到超差（`dt > 60 ms`）即 error；**但默认可能根本没在查**（见下方两小节） | 要给 cue 写 `visual_at`，或设 `QA_REQUIRE_SYNC=1` 把"没查"也变成 error |
 | **字幕条数** | **= 剧本句数** | 少一条就是静默丢字幕，查 `sub_window` 与 `write_srt` |
 | **时长（时间层复核）** | 与预期差 > 0.5 s | `qa_frames` 会独立再查一次时长 |
+| **渲染前资源预检（v0.8，G0）** | 有任何 error（缺字形/坏 TTS 音频/字体全不可加载/web 入口页不存在） | 按报错里的「字符 + 字段 + 句 id」改：换说法、改用矢量画、`--force-tts` 重合成。**这一步在渲第一帧之前**，改起来最便宜；`--no-preflight` 可跳过（会在 QC 报告留痕，不算通过） |
+| **词级时间戳（v0.8，G10）** | 词覆盖率 < 45%、词偏移非单调、末词终点离句尾 > 0.40 s、首词起点离句首 > 0.20 s、或有句子一条词事件都收不到 | 多为 edge-tts 服务端行为变了或该句被裁坏了：先看 `work/words.json` 的 `stats.empty`，再 `--force-tts` 重采；长期不可靠就把 `"words": false`（退回整句字幕，G10 记 skipped） |
+| **全片 VMAF/SSIM（v0.8，G11）** | VMAF 均值 **< 92** fail；**[92, 96)** 只记 warning（能出片，提示复核/别降档）；SSIM（0.95/0.98）是诊断项不单独阻断 | 先看是不是 CRF/preset 调高了或走了二次编码；阈值只有一份（`qavmaf.py` 的 `VMAF_PASS/WARN`），按片覆盖写 `"qa": {"vmaf": {"pass": 92, "warn": 96}}`；`--vmaf off` 可关（记 skipped）。web 引擎恒 skipped（没有可重渲的参考帧） |
+| **ASR 回读（v0.8，G12）** | 字符召回 **< 0.72** fail；**[0.72, 0.85)** pass + warning；**≥ 0.85** 干净 | 抓的是"音轨念的不是剧本"：TTS 缓存串了、换声线漏句、混音压没了。低于 0.72 先 `--force-tts` + 检查 `work/tts.json`；`"qa": {"asr": {"enabled": false}}` 可关（记 skipped） |
 
 #### warning 档（不阻断，但别当看不见）
 
@@ -607,6 +701,84 @@ v0.4 给了两条真正能用的路：
 两条都没做时，`deep.json` 里 `sync` 恒为 `[]`，同时会有一条 warning 明说"同步对照跳过"。
 **看到 `sync: []` 先确认是"真的同步"还是"根本没查"**——`warnings` 里有没有那句话就是判据。
 
+## 7.5 v0.8 交付生产线：画幅 / 批量 / 预览 / 运行版本化
+
+### 7.5.1 画幅与帧率（只做 16:9 横屏）
+
+```jsonc
+"video": { "width": 1280, "height": 720, "fps": 24 }   // 不写 = 1920x1080@30（v0.7 行为）
+```
+
+| 规则 | 实际行为 |
+|---|---|
+| 内部构图 | **恒为 1920x1080**；输出更小时在编码阶段用 ffmpeg `scale`（lanczos）下采样（`FrameSink(out_w=, out_h=)`） |
+| 允许的输出尺寸 | 1920x1080 / 1280x720 / 960x540；2560x1440 在"允许列表"里但**会被上采样规则拒掉**（见下） |
+| 允许的 fps | 24 / 25 / 30 / 50 / 60 |
+| 竖屏 | **直接报错**。安全区、版式几何、HUD、字幕折行全部按 16:9 的像素坐标写死，竖屏是另一套版式 |
+| 非 16:9 | **直接报错**（换宽高比要重做版式几何与字幕安全区，不是把宽高换一下） |
+| 上采样 | **直接报错**。输出大于 1920x1080 = 把 1080p 包装成"更高分辨率"（假 4K）；要真高清得改内部构图 |
+| 非法 fps | **直接报错**（报错里列出可用值） |
+
+链路：`filmkit.video_plan(script)` 在 `layout` 阶段就解析并校验（错了不拖到渲帧），
+结果写进 `timeline.json` 的 `video` 块；`G4` 容器门禁改成**按交付规格**比对（不是恒看 1920x1080）；
+`encode_quality` 的参考帧会先缩到交付分辨率再比锐度。
+
+> **跨分辨率别比锐度比**：同一片 1080p 交付实测 1.009、720p 交付实测 1.206——数值不可横向比较
+> （参考帧也被缩到交付分辨率，笔画占画面的比例变了）。它只用来判"这一版有没有比上一版糊"，别拿它当"720p 更清晰"。
+>
+> 720p 交付已实测通过全部门禁：`G4 = 1280x720@24`、`G11 = VMAF 97.10 / SSIM 0.9925`（696 帧，7.2 s）。
+> `filmkit.qa_report` 为此新增 `expect_w/expect_h/expect_fps`——容器门禁比的是**交付规格**，
+> 不是死比 1920x1080；改规格时记得让 `timeline.video` 与之一致（qavmaf 会核对两者是否同源）。
+
+### 7.5.2 批量生产（`--batch`）
+
+```jsonc
+// films.json —— 两种写法都接受
+["a/film.json", "b/film.json"]
+{"films": [{"script": "a/film.json", "scenes": "a/scenes.py",
+            "work": "a/work", "out": "out/a.mp4", "label": "A"}]}
+```
+
+```bash
+python render.py --batch films.json
+```
+
+| 行为 | 细节 |
+|---|---|
+| 上限 | **100 条 / 1 MiB**（清单本身不该是个大 JSON）；超了直接报错让你拆份 |
+| 开跑前 | **全量 `filmcheck` 预检**：任一条不通过就**一条都不跑**，把明细一次性报全（`batch-report.json` 里 `phase="preflight"`） |
+| 执行 | 逐条起**子进程**渲染（每条都是完整的 `--stage all`），**单条失败不阻断其余** |
+| 收尾 | `batch-report.json`（`phase="render"`，含每条 `exit` / `wall_s` / 日志尾）+ 退出码：全成功 `0`，**部分失败 `1`** |
+| 预检失败的退出码 | 也是 `1`（`SystemExit` 带文字，Python 的默认行为）；区别看 `batch-report.json` 的 `phase` |
+
+实测（本机，2 条 29 s 模板片，v0.8 早期一轮）：**67.2 s / 60.1 s**，各 `pass 11 · fail 0 · skipped 1`。
+注意每条都要付 G11 的参考帧成本——批量不是"摊销"，是线性叠加。**而且瓶颈已经转到 qa**：
+单条全链实测 47.3 s 里 `qa` 占 23.9 s（见 §1 的时间表），批量时这个比例会原样复制。
+
+### 7.5.3 预览片（`--preview N`）
+
+```bash
+python render.py ... --preview 15        # 只渲前 15 秒
+```
+
+- 产物：`out/preview/<片名>_preview.mp4` + 同名 `.gif`（480 px / 10 fps，两遍调色板生成）。
+- 音轨：有 `work/audio.wav` 就**先截到预览时长再混入**。直接拿全长音轨去配短片，`mux` 会判
+  "音视频时长差 ≥ 0.05 s" 而失败（v0.8 开发期实测踩过）；没有音轨就出无声版，不阻断。
+- **不落交付账本**：它是给人快速看效果的，不是交付证据；正式结论仍以 `--stage qa` 的报告为准。
+
+### 7.5.4 运行版本化（`--run-id` + `work/runs/`）
+
+```bash
+python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMDD-HHMMSS
+```
+
+- `work/gates.json` 增 `runId` 与 `inputs`（**script / scenes / words / filmkit** 四个内容指纹）。
+  为什么要逐项指纹：`contentHash` 只说"变了没"，说不出"变了哪个"；批量出片最常见的事故就是
+  "这一条用的还是上一版的词级时间戳"。
+- 每次收尾（`gates.archive_run`）把**账本快照 + QC-REPORT.md + run.json** 复制到
+  `work/runs/<runId>/`。只归档小文件；视频/音频/分块体积大，就地保留。
+- `out/QC-REPORT.md` 头部多两行「运行编号」「输入指纹」，交付时一眼能对上是哪一版跑的。
+
 ## 8. 常见故障速查
 
 | 现象 | 根因 | 修法 |
@@ -646,7 +818,9 @@ v0.4 给了两条真正能用的路：
 - `references/sfx-design.md` — **（v0.3）音效设计**：物理拆解流程、配方表、听感诊断表、QC 规则
 - `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
 - `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
-- `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单
+- `references/quality-gates.md` — G0–G6 全部门禁、可复制代码、验收清单（文内另有「两套编号别混用」的映射说明）
+- `references/word-timeline.md` — **（v0.8）词级时间轴**：词级契约、句时长为何仍是权威、词锚点写法与退化路径、四个真实坑
+- `references/v08-quality.md` — **（v0.8）三道新门禁**：VMAF/SSIM、ASR 回读、渲前预检的判据、阈值来源、实测数据与关闭方式
 - `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/style/scenes.py 各要重跑什么
 - `references/style-packs.md` — **（v0.5）风格包**：主题/配乐/声线字段、三级指纹规则、加第 9 套风格的步骤
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
@@ -656,11 +830,14 @@ v0.4 给了两条真正能用的路：
 | 文件 | 作用 |
 |---|---|
 | `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
-| `scripts/render.py` | 编排器：**13 个 stage**（含 `accept` / `explain`）、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`） |
+| `scripts/render.py` | 编排器：**13 个 stage**（含 `accept` / `explain`）、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`）。v0.8 增：`--batch` 批量、`--preview N` 前 N 秒试片、`--run-id` 运行标签（`work/runs/<runId>/`）、`--vmaf full\|sample\|off`、`--no-preflight` |
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**43 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP） |
+| `scripts/selfcheck.py` | 回归自检：**51 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷（legacy 必须回落）/ 51 金帧回归（调 `tools/golden_frames.py`） |
+| `scripts/preflight.py` | **（v0.8）渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
+| `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
+| `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
 | `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
@@ -669,6 +846,7 @@ v0.4 给了两条真正能用的路：
 | `assets/film.json` | 剧本模板（含 `hold`/`bpm`/`music`/`sfx.cues`/`engine` 等新字段） |
 | `<REPO>/schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，模板由 `tools/ci_check.py` 第 12 项守着 |
 | `<REPO>/tools/estimate.py` | **（v0.6）开渲前预演**：帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，`--json` 可机读。基准常量集中在文件顶部，换机请重测后回填 |
+| `<REPO>/tools/golden_frames.py` | **（v0.8）金帧像素回归**：渲 3 帧算 SHA-256 与 `assets/golden_frames.json` 比对（`--write` 重录 / `--check` 校验）。同环境像素变了是 fail，换了机器（字体指纹不同）是 skipped——跨机不误报 |
 | `assets/web/` | **（v0.3）浏览器页面模板**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本 |
 | `requirements.txt` | **（v0.4）Python 依赖清单**：必需（numpy/Pillow/edge-tts）/ 强烈建议（cv2）/ 可选（scipy、playwright）三档，带注释说明"缺了会怎样"。`pip install -r requirements.txt` 即可 |
 
@@ -697,6 +875,9 @@ v0.4 给了两条真正能用的路：
 6. `python selfcheck.py` 的 PASS 计数
 7. **（v0.3）帧级深检的三个数**：单帧闪烁 N 条 / 画面空窗 N 段 / 音画同步超差 N 条
    （有 web 引擎时再加页面层的 文字重叠 / 出画 / 一闪而过 / 从没露面 四项）
+8. **（v0.8）三道新门禁的数**：G10 词级（N 句 / M 词、末词偏差）、G11 的 **VMAF 与 SSIM**（外加用了多少帧）、
+   G12 的**字符召回**。这三项若在报告里是 `skipped`，要说明为什么没跑（没拷模块 / web 引擎 / 显式关闭），
+   **不能只字不提**。
 
 > **v0.6 起不要口头复述这些数字**：`out/QC-REPORT.md` 是机器生成的交付凭据，
 > 照抄报告里的"实测值"即可；报告里的 `skipped` 项必须逐项说明为什么没执行。
@@ -707,7 +888,10 @@ v0.4 给了两条真正能用的路：
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
 > 信号：-16.0 LUFS / 真峰 -1.2 dBTP / 锐度比 1.01 / 黑帧 0 / 字幕 4 条 = 剧本 4 句
 > 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步超差 0（本条为 web 引擎或写了 visual_at 时才有意义）
-> 自检：selfcheck PASS 43 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 词级：4 句 / 64 词 / 末词偏差最大 0.09 s（G10）
+> 画质：VMAF 97.22 / SSIM 0.9928 / 870 帧（G11，参考帧由场景函数重渲）
+> 回读：字符召回 0.803（G12，faster-whisper small；中英混排专名会掉分，< 0.72 才 fail）
+> 自检：selfcheck PASS 51 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
 > 音频：work/score.json 的 variation 非 0（指纹参与了结构变奏）、audio_similarity --strict 全 PASS
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
@@ -769,7 +953,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ## 13. 升级须知（从旧版迁移要动的地方）
 
-### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 要做什么）
+### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 / v0.8.0 要做什么）
 
 **一句话**：v0.4 的老项目**不写新字段就能继续跑**（不写 `style` = legacy 行为，配乐逐样本不变），
 但**工作目录要多拷文件**，且有两处默认值变了要重新听。按版本逐条过：
@@ -781,9 +965,20 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 | v0.6 → **v0.7** | 想吃到「配乐/音效随内容变化」就保持 `style: "auto"`，**不要**写死 `music.seed` 或关掉 `seed_from_content`；音效想更丰富就把提示点写进 `scenes.py` 的 `cues()` | CHANGELOG 0.7.0「升级须知（v0.6 → v0.7）」 |
 | v0.7 → **v0.7.1** | 配乐基线默认值从 `music.gain_db=-1.5` 变成 **-12**（模板也已改），有人声处再压配乐 6 dB / 音效 3 dB；**之前手调过 `gain_db`/`duck_db` 的片子要重新听一遍**（现在背景整体更低）。显式写 0 可关掉对应侧链 | CHANGELOG 0.7.1「修了什么」+ `assets/film.json` 的 `music` 默认值 |
 | v0.7.1 → **v0.7.2** | `QC-REPORT.md` 现在**只落在 `--out` 的目录**（以前 `accept` 分支按 `work` 的兄弟目录算，`--out deliver/film.mp4` 时签核会更新到另一份没人交付的文件）。如果你用 `--out` 指到了非 `out/` 的目录，交付时请看新位置；旧的 `out/QC-REPORT.md` 不会被再写 | `render._report_path()` 的 docstring + `selfcheck` 第 40 条（本轮新增） |
+| v0.7.2 → **v0.8.0** | ① 新工作目录**多拷三个文件**：`scripts/preflight.py`、`scripts/qavmaf.py`、`scripts/qaasr.py`（都是**可选**：不拷对应门禁记 `skipped` 并写明原因，不会让渲染失败——但 `skipped != 通过`）。② **默认行为变了**：`film.json` 的 `words` 默认 **true**，老项目第一次跑 `--stage tts` 会**把每句重新联网合成一次**（老缓存没有词级记录）；不想付这次网络成本就写 `"words": false`。③ **qa 变慢**：全片 VMAF 每片多渲一遍参考帧（29 s 片实测 14.2 s），ASR 8.7 s——全链从约 28 s 涨到 **47.3 s**，qa（23.9 s）已超过渲染本身（12.5 s）。④ **输出仍默认 1080p@30**：不写 `video` 块行为与 v0.7 完全一致。⑤ 自检 43 → **51** 条，三档门禁多了 `G0/G10/G11/G12` 四行 | CHANGELOG 0.8.0「升级须知（v0.7.2 -> v0.8.0）」+ 本节下方逐条说明 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
-> 升级后建议按 §14 重跑一次自检（43 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+> 升级后建议按 §14 重跑一次自检（51 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+>
+> **v0.7.2 → v0.8.0 的具体迁移动作**（表里那一行的展开）：
+> 1. 从 `<SKILL_DIR>/scripts/` 拷 `preflight.py` / `qavmaf.py` / `qaasr.py` 过来（不拷也能出片，只是三项门禁 `skipped`）。
+> 2. 决定要不要词级：默认 `words=true` 会让老项目**首次**重合成全部旁白（每句多一次词事件采集）。
+>    不想重合成、或线上环境不允许额外网络请求，就在 `film.json` 写 `"words": false`。
+> 3. 交付前预留时间：全片 VMAF 的参考帧要按场景函数重渲一遍（模板片 14.2 s），ASR 8.7 s/片；
+>    29 s 片全链 47.3 s，**qa 比渲染还贵**。
+>    着急出片用 `--vmaf off`，但请把 `skipped` 项在报告里说明白。
+> 4. 想要别的画幅/帧率才写 `video` 块；**默认输出仍是 1920x1080@30**，老项目不写就完全不变。
+> 5. 有历史交付脚本在 grep 输出的话：`PASS 43` → `PASS 51`，`webengine --selftest 24 项` → `31 项`。
 
 ### 13.1 v0.3.0 → v0.4.0
 
@@ -834,10 +1029,10 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 43 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 51 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
-python webengine.py --selftest       # 浏览器引擎（24 项，会真起无头浏览器，约 15 秒）
+python webengine.py --selftest       # 浏览器引擎（31 项，会真起无头浏览器，约 60 秒）
 python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
 ```
 

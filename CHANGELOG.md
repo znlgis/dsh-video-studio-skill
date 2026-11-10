@@ -2,6 +2,120 @@
 
 版本号规则：`主.次.修订`；技能正文（SKILL.md / references / scripts / assets）有实质改动才升次级。
 
+## 0.8.0 — 词级时间轴 / 画幅参数化 / 批量 / 三道新门禁（2026-11-10）
+
+> 本轮的主线是「把已经能看到、但抓不住的东西变成阻断性门禁」：词级时间戳（字幕断行的依据）、
+> 全片 VMAF（不是抽 4 帧看锐度）、ASR 回读（音轨里念的到底是不是剧本那几句）。
+> 顺带把画幅/帧率参数化、批量生产、预览片与运行版本化补齐。
+> 口径仍是三档：`pass` = 这次真的查了且通过 / `fail` = 查了没过 / `skipped` = **这次没执行**（不等于通过）。
+
+### 新增能力
+
+| # | 能力 | 实现 | 怎么用 |
+|---|---|---|---|
+| 1 | **词级时间轴** | `filmkit.tts(..., words=True)` 用 `edge_tts.Communicate(boundary="WordBoundary")` + `stream()` 同时收音频与词事件；音频先写 `.part` 再 `os.replace`（防断网截断缓存）；meta 增 `words / words_key / words_events / words_shift / words_ok`；新函数 `tts_words_key / trim_silence_bounds / words_normalize / words_summary / sub_words_at / wrap_by_words`；`fit_sub_lines(..., words=)` 与 `draw_subtitle(..., words=)` 按词边界折行；`build_timeline(..., fps=)` 给每段补 `words_abs` | `film.json` 写 `"words": true`（**默认 true**）；`--stage tts` 落 `work/words.json` |
+| 2 | **cue 词锚点** | `cue_time` 新增 `"l03:w2"` / `"l03:w2+0.1"`（**从 1 数**）；找不到该词退化为句偏移并 WARN，不让一个写错的锚点炸掉整条 cues | `sfx.cues[].at` 或 `scenes.cues()` 里直接写 |
+| 3 | **渲染前资源预检** `scripts/preflight.py` | `check(script, *, work, engine, timeline) -> {ok, errors, warnings, checks}`；检查项 script / glyphs / tts / fonts / web_page；字形按**字段实际字重**逐字检测；纯函数，不打印不落盘 | `render.py` 在 `frames` 之前调用，记门禁 **G0**；`--no-preflight` 可跳过（QC 报告留痕） |
+| 4 | **全片 VMAF/SSIM** `scripts/qavmaf.py` | 参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 从 stdin 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 **G11** | `--vmaf full\|sample\|off`（默认 full）；阈值**只有一份**：权威定义在 `qavmaf.py`（`VMAF_PASS=92.0` / `VMAF_WARN=96.0`，SSIM 0.95/0.98 仅诊断），`render.py` 不设第二套常量；按片覆盖写 `qa.vmaf.pass / warn` |
+| 5 | **ASR 回读** `scripts/qaasr.py` | 成片音轨转文字与剧本逐句对账：faster-whisper > ffmpeg whisper 滤镜 > `skipped`；字符级**多重集**召回 + 每句偏移；门禁 **G12** | 默认跑；`"qa": {"asr": {"enabled": false}}` 可关；阈值 `QA_ASR_RECALL_PASS=0.85` / `QA_ASR_RECALL_WARN=0.72` |
+| 6 | **画幅/帧率参数化（只做 16:9 横屏）** | `filmkit.video_plan(script)`：`"video": {"width":1280,"height":720,"fps":24}`；内部构图**恒 1920x1080**，编码时 ffmpeg `scale` 下采样（`FrameSink(out_w=, out_h=)`）；timeline 增 `video` 块；`filmkit.qa_report` 新增 `expect_w / expect_h / expect_fps`，G4 改按**交付规格**比对；`encode_quality` 参考帧缩到交付分辨率再比 | 不写 `video` = 1920x1080@30（v0.7 行为）。竖屏 / 非 16:9 / 上采样 / 非法 fps **直接报错**；允许 1920x1080 / 1280x720 / 960x540；fps 24/25/30/50/60 |
+| 7 | **批量生产** `render.py --batch films.json` | 清单可为 `["a/film.json"]` 或 `{"films": [{script, scenes, work, out, label}]}`；**上限 100 条 / 1 MiB**；**启动前全量 filmcheck 预检**（任一条不过则一条都不跑）；逐条子进程渲染、单条失败不阻断其余；末尾 `batch-report.json` + 退出码（全成功 0 / 部分失败 1） | `python render.py --batch films.json` |
+| 8 | **运行版本化** | `--run-id`（缺省 `rYYYYMMDD-HHMMSS`）；`work/gates.json` 增 `runId` 与 `inputs`（script / scenes / words / filmkit 四个指纹）；收尾时 `gates.archive_run` 把账本快照 + `QC-REPORT.md` + `run.json` 复制到 `work/runs/<runId>/`；QC 报告多「运行编号 / 输入指纹」两行 | `--run-id hero-v3` |
+| 9 | **预览片** | `--preview N` 只渲前 N 秒 -> `out/preview/<片名>_preview.mp4` + `.gif`（480 px / 10 fps，两遍调色板）；音轨先截到预览时长再混入；**不落交付账本** | `--preview 15` |
+| 10 | **web 引擎跟随风格包** | `webengine.open_page/render_frames/render_full/page_meta/export_cues` 增 `style / width / height / fps`；页面加载前 `add_init_script` 注入 `window.__STYLE__`（色板/版式/材质/画布）；**style=None 时逐字节等于 v0.7**（连 add_init_script 都不调）；注入后断言页面真的读了它（`FK.style` 非空、画布尺寸与注入一致），防止"老页面静默忽略"的假通过 | `--engine web` 自动生效；`webengine.py --selftest` 24 -> **31 项** |
+| 11 | **金帧回归** `tools/golden_frames.py` | `--write` / `--check`；渲 3 帧算 SHA-256 与 `skills/video-studio/assets/golden_frames.json` 比对；同环境像素变了 = fail，字体指纹不同 = `skipped: font differs`（跨机不误报） | `python tools/golden_frames.py --check` |
+
+### 行为变化（升级前先看这几条）
+
+| 变化 | v0.7.2 | v0.8.0 | 影响 |
+|---|---|---|---|
+| `words` 默认值 | 无此字段（无词级） | **默认 `true`** | 老项目第一次 `--stage tts` 会**把每句重新联网合成一次**（老缓存里没有 `words_key`）；不想付就把 `"words": false` 写进 `film.json` |
+| `qa` 阶段时长 | 只跑容器/信号/帧级 | 增 G0 / G10 / G11 / G12 | 29 s 片全链从约 28 s 涨到 **47.3 s**，其中 `qa` **23.9 s**（VMAF 14.2 + ASR 8.7）——**qa 已超过渲染本身**；着急出片用 `--vmaf off` |
+| 三档门禁行数 | pass 8 左右（`stale / G4–G9 / signoff`） | 多 4 行（`G0 / G10 / G11 / G12`） | 交付报告矩阵变长；`skipped` 项目要逐项说明理由 |
+| 输出规格 | 恒 1920x1080@30 | 可配，**但默认仍是 1920x1080@30** | 不写 `video` 块的项目行为不变；720p 交付时 G4 按 1280x720 比对（已实测通过） |
+| `--engine web` 画面 | 深蓝橙写死 | 跟随 `style` plan（`window.__STYLE__`） | 旧页面若不读 `__STYLE__` 会**当场报错**（以前是静默画成旧配色）；`style=None` 路径逐字节不变 |
+| 自检条数 | 43 | **51** | 新增 44 词级 / 45 画幅 / 46 金帧确定性 / 47 依赖漂移 / 48 批量清单 / 49 TTS 后端 / 50 web 风格载荷 / 51 金帧回归；grep `PASS 43` 的脚本要改 |
+| 成本预演 | estimate 只算渲染链路 | 含 preflight / vmaf / asr 三段 | 29 s 模板片预演 total **28.4 s -> 58.8–108.2 s**（vmaf 单阶段 31–50 s 是瓶颈）——**v0.8 之后出片时间不再只是渲染时间** |
+| `ci_check` | 12 项 | 12 项（白名单扩展） | 依赖白名单加 `faster_whisper`；本地模块白名单加 `preflight / qavmaf / qaasr`；体积检查忽略 `.team` 与媒体后缀 |
+
+### 升级须知（v0.7.2 -> v0.8.0）
+
+1. **新增必拷文件（在 `<SKILL_DIR>/scripts/` 下）**：`preflight.py`、`qavmaf.py`、`qaasr.py`。
+   严格说它们是**可选**的——不拷对应门禁记 `skipped` 并写明原因，不会让渲染失败
+   （`render.py` 用 `_try_module` 探测）；但交付时 `skipped` 必须逐项说明，**别把它当"通过"**。
+2. **默认行为变化 ①：词级默认开着**。老项目第一次 `--stage tts` 会把每句重合成一次
+   （音频本身可以复用，但词级事件必须重新联网采集）。不接受额外网络请求 / 离线交付的，
+   在 `film.json` 顶层写 `"words": false`，行为回到 v0.7。
+3. **默认行为变化 ②：qa 变慢，而且已比渲染贵**。29 s 模板片实测 VMAF 14.2 s + ASR 8.7 s，
+   全链 47.3 s（`qa` 23.9 s vs `frames` 12.5 s）。**输出仍默认 1920x1080@30**——
+   不写 `video` 块的项目画面参数完全没变。
+4. **旧报告不能直接拿来对新版本**：`work/gates.json` 增 `runId` 与 `inputs`，QC 报告多「运行编号 / 输入指纹」
+   两行；`G4` 的 detail 现在写的是**交付规格**（`1280x720@24` 是合法输出），不再恒为 1920x1080。
+5. **`G4` 容器门禁改按交付规格比对**：工程里如果有脚本断言"G4 detail 一定是 1920x1080@30"，
+   改用 `timeline.json` 的 `video` 块对账（`filmkit.qa_report` 的 `expect_w/expect_h/expect_fps`）。
+6. **grep 输出**：`PASS 43` -> `PASS 51`；`webengine --selftest` 24 项 -> **31 项**；
+   `references/quality-gates.md` 顶部新增「两套编号别混用」映射表（方法论的 G0–G8 与账本 id 不同义）。
+7. **批量/预览是新入口，不是新 stage**：`--batch` / `--preview` 都在 `--stage` 之前分流，
+   不改变 `--stage all` 的 10 个阶段顺序。
+
+### 实测数据（本机 Windows 11 / Python 3.12 / ffmpeg 9.0.2；换机请重测）
+
+| 项 | 实测 |
+|---|---|
+| 全链 `--stage all --cost`（29.011 s / 870 帧，全新 work） | 总 **47.3 s**：style 0.0 · tts 3.4 · layout 0.0 · cues 0.0 · score 3.4 · sfx 0.5 · audio 0.5 · frames 12.5 · mux 1.9 · **qa 23.9**（VMAF 14.2 + ASR 8.7） |
+| 门禁汇总（1080p 交付） | pass **10** / fail 0 / skipped 1（signoff）——G4 1920x1080@30 · G6 锐度比 **1.009** · G10 4 句 64 词（末词偏差 0.09 s）· G11 **VMAF 97.22 / SSIM 0.9928 / 870 帧 / 14.2 s** · G12 召回 **0.803 / 8.7 s** |
+| 门禁汇总（720p@24 交付，同一剧本） | pass **10** / fail 0 / skipped 1——G4 1280x720@24 / 696 帧 / 29.00 s · G6 锐度比 **1.206** · G11 **VMAF 97.10 / SSIM 0.9925 / 7.2 s** · G12 召回 **0.853 / 6.4 s** |
+| 720p 与 1080p 的画质差 | VMAF 只差 **0.12 分**（qavmaf 作者独立素材测得 -0.22）——"内部 1080p 构图 + 编码时 lanczos 下采样"是超采样式降规格，不是糊 |
+| 门禁判据标定（qavmaf 作者实测，参考帧含字幕与淡入淡出） | crf17 **97.24**（pass）· crf30 **95.74**（pass + warning）· 二次编码 + 缩放坏片 **29.45**（fail）——阈值由此定为 **92 / 96** |
+| 另一份参考（1080p 纯测试图，无字幕，不可直接对比） | crf18 **96.98** / 22 96.32 / 26 94.87 / 30 **92.25** / 36 **83.03** / 46 50.23（crf30 恰好压在 92 失败线上，说明这档会抖） |
+| G11 抽样模式 | `--vmaf sample`（每 5 帧取 1）**8.0 s** 跑完 184 帧，与全片差 **0.34** 分 |
+| G11 线程无关性 | threads=0/1/4/8/16 与跨进程复跑的逐帧分数 sha1 **全同** |
+| G12（small / CPU int8） | 加载 1.99 s + 转写 3.79 s = **6.18 s**（第一轮）；干净成片召回 **0.803–0.853**（4 段全对上、缺句 0） |
+| G12 丢句反证 | 把 l03 从音轨剪掉 -> 召回 **0.677**、`missing_lines=["l03"]`、gate=fail、exit 1 |
+| G12 后备引擎 | ffmpeg whisper 滤镜（ggml-tiny）：19.87 s 音频 3.75 s，召回 **0.723**（只作后备） |
+| 词级（模板片） | 4 句 / **64 词**；末词偏差最大 **0.09 s**；词覆盖率约 0.7；`words_shift` 约 0.1 s |
+| 词级退化验证 | 不传 `boundary`（默认 SentenceBoundary）时词事件数 = **0**；30 字句开 WordBoundary 得 **13** 个词事件 |
+| 渲前预检 | 干净剧本 **< 1 s**（tts / web_page 视情况 skipped）；故意写 ✓ / 🚀 / ↵ 在**渲第一帧之前** FAIL，报出「字符 + 字段 + 句 id」 |
+| 画幅（720p@24 交付） | `--stage all` 出片 EXIT=0，G4 = `1280x720@24`、G11 pass；锐度比 1.206（同片 1080p 为 1.009，**跨分辨率不可比**——参考帧也缩到交付分辨率，笔画占比变了） |
+| 批量（2 条 29 s 片） | **67.2 s / 60.1 s**，各 `pass 11 · fail 0 · skipped 1`；清单里故意坏一条 -> 预检阶段 exit **1**、一条都没跑 |
+| 预览 | `--preview 15` 出 `out/preview/film_preview.mp4` + `.gif`（480 px / 10 fps），音轨按 15 s 截断后混入 |
+| 金帧 | 3 帧（36 / 270 / 369）sha256 全等，`status=pass`；故意改主题色 / 改 1 个像素 -> fail 并列出变化帧；字体指纹不同 -> skipped |
+| 成本预演（`tools/estimate.py`） | 29 s 模板片 total **58.8–108.2 s**（v0.7 为 28.4 s）；瓶颈识别为 **vmaf 31–50 s**、asr 6–10 s |
+| 自检 / 仓库体检 | `selfcheck` **PASS 51 / FAIL 0 / SKIP 0**；`ci_check` **PASS 12 / FAIL 0**（CI 不接受旧的 43 条断言） |
+
+### 已知限制（本版没做，写下来别装看不见）
+
+- **web 模板页仍是 12 s 独立演示**：`assets/web/film.js` 只有 3 幕 12 秒，换剧本要**重写场景**才能出全片；
+  "拷模板 + `--engine web`" 只能得到演示片。web 路线也因此没有可重渲的参考帧，**G11 恒 `skipped`**。
+- **qa 时间显著上升，已经超过渲染本身**：29 s 模板片全链 **47.3 s**，其中 `qa` **23.9 s**（VMAF 14.2 + ASR 8.7）、
+  `frames` 12.5 s。v0.7 的全链约 28 s。**批量出片的瓶颈从渲染转到质检**；要压回渲染量级
+  就 `--vmaf off` 或 `--vmaf sample`。另外**同机负载不同能差近 2×**（另一轮同代码 VMAF 测到 28.8 s），
+  文档里的秒数只代表"这一跑"，不是承诺。
+- **VMAF 成本口径**：全片门禁 = 参考帧渲染 + 比较。1080p 模板场景约 **0.5× 片长**（29 s 片 14.2 s）；
+  创意场景 `draw_frame` 更重（30–50 ms/帧），整体按 **0.4–1× 片长** 估，12 分钟片按 0.4× 外推约 **5 分钟**。
+  纯 libvmaf 比较本身约 **1.2× 实时**——这是两个口径，别混着引用（12 分钟片纯比较约 10 分钟）。
+  720p 交付便宜得多（696 帧 7.2 s），因为帧数与比较分辨率都降了。
+- **720p / 540p 的 VMAF 阈值仍按 1080p 标定**：分数不完全可比（比较分辨率变了），qavmaf 会打 warning
+  提醒但**不因此改判**。实测同片 720p 比 1080p 只低 **0.12 分**（独立素材 -0.22），
+  说明"内部 1080p 构图 + 编码时 lanczos 下采样"是超采样式降规格，不是糊——但跨分辨率比 VMAF 仍要谨慎。
+- **ASR 对中英混排专名会掉召回**（"DeepSeek 4.1 Flash" 被听成 "DIXX4.1flash" / "DeepX Carnacy"），
+  干净模板片也只有 **0.803–0.853**。所以默认线定在 **0.85 / 0.72**：0.72 以下才说明"整句丢了或音轨不是这一版"，
+  0.72–0.85 只给 warning。这条门禁的定位是**抓整句丢失 / 音轨不是这一版，不是逐字校对**。
+- **ASR 偏移检查依赖 `voice_start`**：手搓 timeline 缺这个字段时，每句都会多算一个 `lead`（默认 0.55 s），
+  全片报偏移 warning。这是判据的已知限制，不是片子坏了。
+- **G11 的 SSIM 只是诊断项**：文本画面 SSIM 对字幕边缘过于敏感，低于阈值只记 warning、不阻断。
+- **画幅只做 16:9 横屏**：竖屏 / 非 16:9 直接拒绝；2560x1440 在允许列表里但会被上采样规则拒掉
+  （要真高清得改内部构图分辨率，不是放大输出）。
+- **`layout` 只改标题/导语锚点与卡片栏位几何**（`title_x / title_y / title_w / kicker_y / sub_w /
+  panel_x / panel_y / panel_w / panel_h / panel_gap`），**不重排字号**——字号在主题的 `th["scale"]` 里，
+  改 layout 不会让字变大。HUD 也不由 layout 决定（在主题的 `hud` 字段）。想改字号改主题，不是改 layout。
+- **preflight 的字形检测按 sans（msyh）口径**，serif / kai / round 主题的实际字族覆盖没有逐一核对
+  （它会在 warnings 里提示这一点）；金帧只覆盖 PIL 引擎 + 模板片，web 引擎的像素回归不在范围内。
+- **批量是串行**（逐条子进程），没有并行跑多条；每条都要付全片 VMAF 成本，批量不是摊销而是线性叠加。
+- **`--preview` 不写交付账本**，它只是给人快速看效果；正式结论仍以 `--stage qa` 的报告为准。
+- **`gates.json` 的 `inputs.words` 是"文件存在则记 sha1、不存在记 missing"**，
+  所以"没启用词级"和"启用了但还没跑 tts"在报告里都显示 `missing`，要结合 G10 的 detail 判断。
+
 ## 0.7.2 — 全项目深审：修掉 30+ 处「看着没问题、其实没在查」
 
 > 本轮没有新功能。起因是一次完整的项目复核：把 14 个 Python 模块（约 2.7 万行）、10 篇 references、

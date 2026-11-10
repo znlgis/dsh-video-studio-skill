@@ -2,6 +2,25 @@
 
 Agent 看不见画面、听不见声音，所以**验收必须脚本化 + 静帧目检**双轨。
 
+> ## ⚠ 两套编号别混用
+>
+> 本页的 `G0–G8` 是 v0.3 起的**方法论分组**（按"查什么"分类，写给写剧本/写场景的人看）。
+> `render.py` 落进 `work/gates.json` 与 `out/QC-REPORT.md` 的，是**运行时账本 id**（按"哪一步判"排）。
+> 两套编号**有重名但不同义**，看到 `G0` 先确认是哪一套：
+>
+> | 本页（方法论） | 账本 id（运行时） | 关系 |
+> |---|---|---|
+> | G0 内容门禁：上屏数字可溯源 | `G0` 渲染前资源预检（v0.8） | **同名不同义**：账本 G0 查字形/字体/TTS/web 页，不核对数字出处 |
+> | G1 帧级门禁（确定性/单帧预算/元素存在性） | — | 人工/代码评审，不进账本 |
+> | G2 静帧门禁（母版预览目检） | `signoff`（`stills` 闸） | 目检结论走人工签核 |
+> | G3 音频门禁（音效/混音/母带） | `G5` 响度/真峰 | 账本只查成片级的两个数 |
+> | G4 成片门禁（容器/时长/锐度/字幕/黑帧） | `G4` 容器 · `G5` 响度 · `G6` 锐度比 · `G7` 字幕条数 · `G8` 黑帧 | 账本把 G4 拆成 5 行 |
+> | G7 时间层门禁（闪烁/空窗/同步） | `G9` 帧级深检 | **同名不同义**：账本 G9 才是时间层 |
+> | G8 页面层门禁（web 文字重叠/出画） | web 引擎 qa_text 结果 | 只有 `--engine web` 才有 |
+> | — | `G10` 词级时间戳 · `G11` VMAF/SSIM · `G12` ASR 回读 | **v0.8 新增**，详见 [v08-quality.md](v08-quality.md) 与 [word-timeline.md](word-timeline.md) |
+>
+> 一句话记法：**本页 G0–G8 是"查什么"，账本 G0 + G4–G12 是"哪一行判"**。
+
 ## G0 内容门禁：上屏数字可溯源
 
 | 判据 | 做法 |
@@ -61,7 +80,9 @@ pr = K.probe(film); f = pr["format"]
 # 容器
 assert f["duration"] > 0
 v = [s for s in pr["streams"] if s["codec_type"] == "video"][0]
-assert (v["width"], v["height"]) == (W, H)
+# v0.8：比的是**交付规格**不是内部构图。qa_report(expect_w=, expect_h=, expect_fps=) 会从
+# timeline.json 的 video 块取期望值；缺省回落 1920x1080@30（老项目行为不变）。
+assert (v["width"], v["height"]) == (W, H)   # W/H 这里代表交付宽高，不是 1920x1080 常量
 assert any(s["codec_type"] == "audio" for s in pr["streams"]), "无音轨"
 
 # 时长
@@ -221,5 +242,5 @@ python webengine.py textqa ./web/index.html --step 0.2
 信号：-16.3 LUFS / 真峰 -1.2 dBTP / 锐度比 0.94 / 黑帧 0 / 字幕 86 条 = 剧本 86 句
 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步最大偏差 38 ms
 页面：文字重叠 0 / 出画 0 / 一闪而过 0 / 从没露面 0
-自检：python selfcheck.py -> PASS 43 / FAIL 0 / SKIP 0
+自检：python selfcheck.py -> PASS 51 / FAIL 0 / SKIP 0
 ```

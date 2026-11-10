@@ -101,6 +101,10 @@ STAGE_LABELS = {
     "frames": "逐帧渲染+编码",
     "mux": "合成成片",
     "qa": "质检+抽帧",
+    # v0.8：交付前的三道新门禁单独列（它们的成本不能藏进 qa 里）
+    "preflight": "渲染前预检",
+    "vmaf": "全片VMAF/SSIM",
+    "asr": "ASR回读",
 }
 
 
@@ -396,10 +400,21 @@ def build_report(script_path, script, args):
         _warn("engine=%r 不认识（只能是 pil / web），按 pil 预演" % engine)
         engine = "pil"
 
+    # v0.8：画幅/帧率可以按片配置（只允许 16:9 横屏 + 下采样输出，见 filmkit.video_plan）。
+    # 预演必须跟着走，否则 720p 片会被按 1080p 估帧数与磁盘。
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
+                               "skills" / "video-studio" / "scripts"))
+        import filmkit as _FK
+        _vp = _FK.video_plan(script)
+    except Exception:                                       # noqa: BLE001
+        _vp = dict(fps=FPS, w=W, h=H, out_w=W, out_h=H,
+                   label="%dx%d" % (W, H))
     tl, tl_path = read_timeline(args.work)
     if tl is not None:
         total = _num(tl.get("total"))
-        fps = int(_num(tl.get("fps"), FPS)) or FPS
+        fps = int(_num(tl.get("fps"), _vp["fps"])) or _vp["fps"]
         frames = int(_num(tl.get("frames"), round(total * fps)))
         source = "timeline"
         source_note = "真实帧数：%s" % tl_path
@@ -463,6 +478,23 @@ def build_report(script_path, script, args):
     mux_lo, mux_hi = mux_seconds_pair(frames, jobs_eff, total, script)
     qa_lo = max(0.5, QA_BASE_SEC[0] + total * QA_SEC_PER_SEC[0])
     qa_hi = max(qa_lo, QA_BASE_SEC[1] + total * QA_SEC_PER_SEC[1])
+    # v0.8 的三个新门禁：预检（固定小开销）、全片 VMAF/SSIM、ASR 回读。
+    # 实测口径（29.0 s 模板片）：preflight 0.4 s；VMAF full 27–47 s（1.0–1.6× 片长，
+    # 参考帧重渲染与 libvmaf 都在里面）；ASR small ≈ 6–10 s。这三项全在**交付前**跑，
+    # 不写进预演就等于"预演说 40 s、实际 90 s"——所以单独列 stage，不并进 qa。
+    qcfg = script.get("qa") or {}
+    if not isinstance(qcfg, dict):
+        qcfg = {}
+    vcfg = qcfg.get("vmaf") or {}
+    vmaf_mode = str(vcfg.get("mode") or "full").lower()
+    vmaf_on = vmaf_mode != "off" and engine == "pil"      # web 路线没有可重渲参考帧
+    vmaf_lo = total * 1.0 + 2.0 if vmaf_on else 0.0
+    vmaf_hi = total * 1.6 + 4.0 if vmaf_on else 0.0
+    acfg = qcfg.get("asr") or {}
+    asr_on = bool(acfg.get("enabled", True)) != False    # noqa: E712  默认开
+    asr_lo = (total * 0.18 + 3.5) if asr_on else 0.0
+    asr_hi = (total * 0.35 + 6.5) if asr_on else 0.0
+    pre_lo, pre_hi = (0.3, 0.8)
 
     stages = [
         dict(stage="tts", lo=tts_lo, hi=tts_hi, measured=True,
@@ -496,8 +528,18 @@ def build_report(script_path, script, args):
         dict(stage="mux", lo=mux_lo, hi=mux_hi, measured=True,
              note=("-c:v copy + 两遍 loudnorm（实测 29 s 片 1.7–1.9 s，与帧数无关）；"
                    "reencode_video=true 才走 x264 %.0f fps" % X264_FPS)),
+        dict(stage="preflight", lo=pre_lo, hi=pre_hi, measured=True,
+             note="渲染前资源预检（缺字形/坏音频/缺字体；实测 0.4 s，渲一帧之前就失败）"),
         dict(stage="qa", lo=qa_lo, hi=qa_hi, measured=True,
              note=("联系表 + 锐度参考帧重渲染 + 帧级深检（实测 29 s 片 6.2–6.8 s，不是 1 s）")),
+        dict(stage="vmaf", lo=vmaf_lo, hi=vmaf_hi, measured=False,
+             note=("全片 VMAF/SSIM（参考帧=场景函数重渲染，约 1.0–1.6× 片长；"
+                   "实测 29 s 片 27–47 s）。web 引擎没有参考帧 -> 跳过"
+                   if vmaf_on else "本次不跑（--vmaf off 或 engine=web）")),
+        dict(stage="asr", lo=asr_lo, hi=asr_hi, measured=False,
+             note=("ASR 回读（faster-whisper small / CPU int8，RTF≈0.17 + 加载 2–3 s；"
+                   "实测 29 s 片 6–10 s）"
+                   if asr_on else "本次不跑（qa.asr.enabled=false）")),
     ]
     total_lo = sum(s["lo"] for s in stages)
     total_hi = sum(s["hi"] for s in stages)
@@ -521,7 +563,10 @@ def build_report(script_path, script, args):
         "source": source,
         "source_note": source_note,
         "video": {"title": script.get("title"),
-                  "width": W, "height": H, "fps": fps, "frames": frames,
+                  # v0.8：内部构图恒为 1080p，交付尺寸可以更小（_vp 从 film.json 的 video 块来）
+                  "width": _vp["w"], "height": _vp["h"],
+                  "out_width": _vp["out_w"], "out_height": _vp["out_h"],
+                  "fps": fps, "frames": frames,
                   "duration_s": round(total, 3), "engine": engine,
                   "crf": crf, "preset": preset, "bpm": mus.get("bpm", script.get("bpm")),
                   "style": script.get("style", None)},
@@ -547,7 +592,8 @@ def build_report(script_path, script, args):
                        "share": round(share, 3),
                        "advice": bottleneck_advice(worst["stage"], engine, jobs_eff)},
         "assumptions": [
-            "分辨率 1920x1080@%d 由 filmkit.W/H/FPS 写死，film.json 改不了" % FPS,
+            "内部构图恒为 1920x1080@%d；交付尺寸/帧率可写 film.json 的 video 块"
+            "（v0.8，只允许 16:9 横屏且只能下采样）" % FPS,
             "lead=%.2f / tail=%.2f / min_dur=%.1f（v0.5 body 基准；剧本写了就以剧本为准）"
             % (DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR),
             "tts 耗时按 %d 句 ÷ workers × %.1f–%.1f s（每句每 worker）；实际受网络波动影响"
@@ -556,6 +602,8 @@ def build_report(script_path, script, args):
             % (PARALLEL_EFF, CORES),
             "mux 默认 -c:v copy，只跟片长有关；reencode_video=true 才按帧数重编",
             "layout/cues/audio/sfx 给 ±%d%% 经验区间（无单阶段实测）" % int(UNMEASURED_BAND * 100),
+            "v0.8 新增门禁口径：preflight 0.4 s 固定；vmaf ≈ 1.0–1.6× 片长（参考帧重渲染 + "
+            "libvmaf 全片逐帧）；asr ≈ 0.18–0.35× 片长 + 3.5–6.5 s（faster-whisper small / CPU int8）",
             "基准来源见 calibration 字段（机型/日期/样本）；换机请重测后回填顶部常量",
         ],
         "baseline": BASELINE_NOTE,

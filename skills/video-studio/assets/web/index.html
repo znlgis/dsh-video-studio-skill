@@ -3,12 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1920, height=1080">
-  <title>DSH Video Studio · Canvas2D 逐帧渲染模板（v0.3.0）</title>
+  <title>DSH Video Studio · Canvas2D 逐帧渲染模板（v0.8.0）</title>
   <!-- 本地样式与脚本：不引 CDN、不连任何网络 -->
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- 1920x1080 固定画布：宽高必须与 webengine.py 的 viewport 一致，截图才是 1:1 像素 -->
+  <!-- 画布默认 1920x1080，必须与 webengine.py 的 viewport 一致，截图才是 1:1 像素。
+       v0.8.0：webengine.open_page(style=...) 注入 window.__STYLE__.canvas 时，engine.js 会把
+       canvas 宽高与 CSS 尺寸改成注入值（仍只允许 16:9 横屏）；没有 __STYLE__ 时就是下面这组。 -->
   <canvas id="stage" width="1920" height="1080"></canvas>
 
   <script src="engine.js"></script>

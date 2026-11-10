@@ -113,10 +113,13 @@ class GateLedger:
     """一次运行内的门禁账本（多 stage 共用；--stage all 时是同一个对象）。"""
 
     def __init__(self, work, script=None, scenes_path="", script_path="", engine="pil",
-                 web_entry=""):
+                 web_entry="", run_id=""):
         self.work = str(work or "work")
         self.items = []
         self.t0 = time.time()
+        # v0.8：run_id 是"这一版"的标签（--run-id）。没给就按时间戳生成，
+        # 保证每次运行在 work/runs/<runId>/ 下都有独立记录，而不是互相覆盖。
+        self.run_id = str(run_id or "").strip() or time.strftime("r%Y%m%d-%H%M%S")
         self.script = script or {}
         self.scenes_path = str(scenes_path or "")
         self.script_path = str(script_path or "")
@@ -181,12 +184,29 @@ class GateLedger:
     # ---- 落盘 ----
     def to_dict(self):
         d = dict(schema=SCHEMA, at=self.t0, contentHash=self.content_hash,
+                 runId=self.run_id,
                  engine=self.engine, counts=self.counts(),
-                 items=list(self.items), bypassed=list(self.bypassed))
+                 items=list(self.items), bypassed=list(self.bypassed),
+                 inputs=self.input_fingerprints())
         if self.engine == "web":
             # 审计用：让用户/CI 能看出这个指纹到底盖了哪些页面脚本（不进 hash，绝对路径不外泄）
             d["webAssets"] = list(self.web_assets)
         return d
+
+    def input_fingerprints(self):
+        """输入指纹快照（v0.8）：剧本 / scenes / 词级 / 本脚本。
+
+        为什么要单独记：contentHash 是"一个 16 位 hex"，能判"变了没"，但**说不出
+        变了哪个**。批量出片时最常见的问题是"这条用的还是上一版的词级时间戳"，
+        有个逐项指纹才能在事后对账（也让 QT 报告能标出"本次跑的是哪一版输入"）。
+        """
+        return {
+            "script": _sha1_file(self.script_path) if self.script_path else "missing",
+            "scenes": _sha1_file(self.scenes_path) if self.scenes_path else "missing",
+            "words": _sha1_file(os.path.join(self.work, "words.json")),
+            "gates_py": _sha1_file(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                "filmkit.py")),
+        }
 
     def write_json(self):
         """work/gates.json —— 给程序读（QC-REPORT.md 只是它的渲染层）。"""
@@ -196,6 +216,37 @@ class GateLedger:
         d["wall_s"] = round(time.time() - self.t0, 2)
         _atomic_json(p, d)
         return p
+
+
+def archive_run(work, ledger, artifacts=None, report_path=None):
+    """把"这一版"的账本快照归档到 work/runs/<runId>/（v0.8）。
+
+    只归档**小文件**（gates.json / QC-REPORT.md / run.json）。视频/音频/分块体积大，
+    就地保留即可——这里要解决的是"跑了几版之后，谁都说不清上一版的门禁结论是什么"，
+    不是备份媒体。返回 run 目录。
+    """
+    d = os.path.join(str(work), "runs", str(ledger.run_id))
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError as e:                                    # noqa: BLE001
+        return "", "建目录失败：%s" % e
+    info = dict(runId=ledger.run_id, at=ledger.t0,
+                atText=time.strftime("%Y-%m-%d %H:%M:%S"),
+                contentHash=ledger.content_hash, counts=ledger.counts(),
+                inputs=ledger.input_fingerprints(),
+                artifacts=[str(x) for x in (artifacts or [])])
+    _atomic_json(os.path.join(d, "run.json"), info)
+    for src, name in ((os.path.join(str(work), "gates.json"), "gates.json"),
+                      (str(report_path or ""), "QC-REPORT.md")):
+        try:
+            if src and os.path.exists(src):
+                with open(src, "rb") as fh:
+                    data = fh.read()
+                with open(os.path.join(d, name), "wb") as fh:
+                    fh.write(data)
+        except OSError:
+            pass
+    return d, ""
 
 
 # ---------------------------------------------------------------- 签核账本
@@ -346,7 +397,13 @@ def render_report(work, out=None):
     L.append("| 项 | 值 |")
     L.append("|---|---|")
     L.append("| 内容指纹 | `%s` |" % (ch or "未生成"))
+    L.append("| 运行编号 | `%s` |" % (g.get("runId") or "-"))
     L.append("| 引擎 | `%s` |" % (g.get("engine") or "-"))
+    _inp = g.get("inputs") or {}
+    if _inp:
+        L.append("| 输入指纹 | script `%s` · scenes `%s` · words `%s` |"
+                 % (_inp.get("script", "-"), _inp.get("scenes", "-"),
+                    _inp.get("words", "-")))
     L.append("| 生成时间 | %s |"
              % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(g.get("at") or time.time())))
     L.append("| 门禁合计 | pass %d · fail %d · skipped %d |"

@@ -44,13 +44,21 @@ TOOLS = ROOT / "tools"
 REFS = SKILL / "references"
 
 # 技能允许的三方依赖（与 README「环境前提」一一对应；加东西必须先改文档）
-ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright"}
+ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright",
+                       # v0.8：ASR 回读门禁（可选，缺了 qaasr 自动降级到 ffmpeg whisper / skipped）
+                       "faster_whisper"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
                  "stylekit", "voicekit", "scenes", "scenes_demo",
                  # v0.6.0：门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
-                 "gates", "stagewatch", "filmcheck"}
+                 "gates", "stagewatch", "filmcheck",
+                 # v0.8.0：渲染前资源闸门、全片 VMAF/SSIM 门禁、ASR 回读门禁
+                 "preflight", "qavmaf", "qaasr"}
 MAX_FILE_BYTES = 400 * 1024
+# 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
+# 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
+SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv"}
+SIZE_SKIP_EXT = {".mp4", ".mp3", ".wav", ".mov", ".webm", ".gif", ".webp", ".zip", ".tgz"}
 
 _results: list[tuple[bool, str, str]] = []
 
@@ -283,8 +291,9 @@ def t_doc_refs():
 def t_size():
     big = []
     for p in [p for p in ROOT.rglob("*") if p.is_file()
-              and ".git" not in p.parts and "node_modules" not in p.parts
+              and not (set(p.parts) & SIZE_SKIP_DIRS)
               and not str(p.relative_to(ROOT)).startswith("tmp_scratch_")
+              and p.suffix.lower() not in SIZE_SKIP_EXT
               and p.suffix != ".png"]:
         n = p.stat().st_size
         if n > MAX_FILE_BYTES:

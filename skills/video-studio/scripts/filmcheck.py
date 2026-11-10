@@ -315,6 +315,38 @@ SCRIPT_SPEC = {
         "web": {"t": "dict", "props": {
             "entry": {"t": "str"},
             "chunk_s": {"t": "num", "min": 0.0}}},
+        # ---- v0.8 ----
+        # 词级时间戳开关（字幕按词折行 / cue 词锚点 / G10 门禁都依赖它）
+        "words": {"t": "bool"},
+        # TTS 后端选择（v0.8 接口化；默认 edge，其它后端需先 register_tts_backend）
+        "tts": {"t": "dict", "props": {
+            "backend": {"t": "str"},
+            "voice": {"t": ("str", "dict")}}},
+        # 画幅与帧率：只允许 16:9 横屏 + 下采样输出（见 filmkit.video_plan 的取舍说明）
+        "video": {"t": "dict", "props": {
+            "width": {"t": "int", "min": 2},
+            "height": {"t": "int", "min": 2},
+            "out_width": {"t": "int", "min": 2},
+            "out_height": {"t": "int", "min": 2},
+            "fps": {"t": "int", "min": 1, "max": 120}}},
+        # 质检门禁参数（全片 VMAF/SSIM 阻断 + ASR 回读）
+        "qa": {"t": "dict", "props": {
+            "vmaf": {"t": "dict", "props": {
+                "enabled": {"t": "bool"},
+                "mode": {"t": "str", "enum": ("full", "sample", "off")},
+                "pass": {"t": "num", "min": 0.0},
+                "warn": {"t": "num", "min": 0.0},
+                "sample_s": {"t": "num", "min": 0.1}}},
+            "ssim": {"t": "dict", "props": {
+                "enabled": {"t": "bool"},
+                "pass": {"t": "num", "min": 0.0, "max": 1.0},
+                "warn": {"t": "num", "min": 0.0, "max": 1.0}}},
+            "asr": {"t": "dict", "props": {
+                "enabled": {"t": "bool"},
+                "model": {"t": "str"},
+                "recall_pass": {"t": "num", "min": 0.0, "max": 1.0},
+                "recall_warn": {"t": "num", "min": 0.0, "max": 1.0}}},
+            "require_vmaf": {"t": "bool"}}},
     },
 }
 
@@ -453,6 +485,13 @@ def _cue_ref(at):
             float(off)
         except ValueError:
             return "bad", "偏移 %r 不是数字（写 l03+0.35 或 l03-0.2）" % off
+    # v0.8 词锚点：<id>:w<N>[+/-秒]。把 ":wN" 剥掉再做 id 存在性检查，
+    # 否则合法写法会被报成"场景 id 不存在"（假失败比不校验更糟）。
+    if ":w" in sid:
+        head, _sep, tail = sid.partition(":w")
+        if not tail.isdigit() or int(tail) < 1:
+            return "bad", "词锚点要写成 l03:w2（词序号从 1 开始），收到 %r" % sid
+        return "id", head
     return "id", sid
 
 
@@ -496,6 +535,31 @@ def check_cross(script, script_path, rep, ctx):
                 "voice_plan（--stage tts 落 work/voice_plan.json，st_layout 会并进 "
                 "tail_map）。例如 %s: 1.4" % lid),
                 "inert_line_tail")
+
+    # ---- v0.8 video 块：只支持 16:9 横屏 + 下采样输出 ----
+    vv = script.get("video") if isinstance(script.get("video"), dict) else None
+    if vv:
+        try:
+            ow = int(vv.get("width") or vv.get("out_width") or 1920)
+            oh = int(vv.get("height") or vv.get("out_height") or 1080)
+        except (TypeError, ValueError):
+            rep.err("video", "width/height 必须是整数", "bad_video")
+            ow = oh = 1920
+        if oh > ow:
+            rep.err("video", "是竖屏（%dx%d）：本项目只支持 16:9 横屏——安全区/版式/HUD 全部"
+                             "按横屏像素写死，竖屏是另一套版式（要竖屏请单独立项）" % (ow, oh),
+                    "video_portrait")
+        elif abs(ow / float(oh) - 16.0 / 9.0) > 0.01:
+            rep.err("video", "%dx%d 不是 16:9：换宽高比要重做版式几何与字幕安全区" % (ow, oh),
+                    "video_aspect")
+        elif ow > 1920 or oh > 1080:
+            rep.err("video", "输出 %dx%d 大于内部构图 1920x1080：那是上采样，只会把 1080p 的"
+                             "清晰度包装成更高分辨率（假高清）。要真高清得改内部构图分辨率"
+                             % (ow, oh), "video_upscale")
+        fs = vv.get("fps")
+        if fs is not None and (not isinstance(fs, int) or isinstance(fs, bool)
+                               or fs not in (24, 25, 30, 50, 60)):
+            rep.err("video.fps", "不支持 %r（可用 24/25/30/50/60）" % (fs,), "video_fps")
 
     # ---- sfx.cues[].at 引用的场景 id 必须在 lines 里 ----
     sfx = script.get("sfx") if isinstance(script.get("sfx"), dict) else {}

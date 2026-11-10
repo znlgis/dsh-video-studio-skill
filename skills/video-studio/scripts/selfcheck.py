@@ -1141,6 +1141,257 @@ def t_theme_overrides_linted():
     return "最终主题参与体检（%s）" % "；".join(bad)[:60]
 
 
+# ------------------------------------------------------------------ v0.8.0 用例
+def t_word_events():
+    """44 词级时间戳：规整/裁剪平移/单调兜底/词锚点解析（不联网）。
+
+    为什么能在不联网的 selfcheck 里测：真正的网络合成在 --stage tts 里，
+    而"事件 -> 句内词表"这一步是纯函数。离线固定住它，等于固定住了字幕断行、
+    cue 词锚点、G10 门禁三处的共同数据源。
+    """
+    # offset 用 100ns 单位（实测 edge-tts 7.3.1 口径）：0.10s / 0.36s / 0.50s 起，
+    # 词之间刻意留 0.02s 级空隙 —— 真实事件本来就不连续覆盖，抹平它就等于制造错位。
+    ev = [{"type": "WordBoundary", "offset": 1000000, "duration": 2360000, "text": "别"},
+          {"type": "WordBoundary", "offset": 3600000, "duration": 1180000, "text": "把"},
+          {"type": "WordBoundary", "offset": 5000000, "duration": 5050000, "text": "傻子"}]
+    ws = K.words_normalize(ev, offset_shift=0.1, dur=1.6)
+    assert len(ws) == 3, "词事件数被吃掉：%r" % (ws,)
+    assert abs(ws[0]["start"] - 0.0) < 1e-6, "句首裁剪平移没生效（start=%.4f）" % ws[0]["start"]
+    # 词间空隙必须保留（中文词之间本来就有 0.1–0.3s 停），不能被"拉平"
+    assert ws[1]["start"] > ws[0]["end"], "词间隙被抹平了（会让字幕和语音错位）"
+    assert all(ws[i]["start"] <= ws[i + 1]["start"] for i in range(len(ws) - 1)), "词偏移非单调"
+    # 末词终点不得超过整句实测时长
+    ws2 = K.words_normalize(ev, dur=0.5)
+    assert ws2[-1]["end"] <= 0.5 + 1e-6, "末词被算到句外：%r" % (ws2[-1],)
+    # 空事件 -> 空表（调用方据此判 skipped，而不是当成"有词级"）
+    assert K.words_normalize([]) == [], "空事件应得到空表"
+    # 词锚点：l03:w2 = 第二个词的起点
+    scenes = [dict(id="l03", start=2.0, dur=4.0,
+                   words_abs=[{"text": "别", "start": 2.55, "end": 2.79},
+                              {"text": "把", "start": 2.79, "end": 2.91}])]
+    assert abs(K.cue_time("l03:w2", scenes) - 2.79) < 1e-6, "词锚点 l03:w2 解析错"
+    assert abs(K.cue_time("l03:w2+0.2", scenes) - 2.99) < 1e-6, "词锚点带偏移解析错"
+    assert abs(K.cue_time("l03+0.5", scenes) - 2.5) < 1e-6, "旧写法 l03+0.5 被改坏"
+    return "3 词事件 / 平移 %.2fs / 词锚点 OK"
+
+
+def t_video_plan():
+    """45 画幅规划：只允许 16:9 横屏 + 下采样，竖屏/上采样必须报错。
+
+    这条守的是"用户以为能出竖屏"的期望管理：安全区/版式/HUD 全按 16:9 像素写死，
+    静默出一个变形或带黑边的片子，比直接报错更伤。
+    """
+    p = K.video_plan({})
+    assert (p["out_w"], p["out_h"], p["fps"]) == (1920, 1080, 30), "默认规格变了：%r" % (p,)
+    assert p["scale"] is False, "默认不该触发缩放"
+    p7 = K.video_plan({"video": {"width": 1280, "height": 720}})
+    assert (p7["out_w"], p7["out_h"]) == (1280, 720) and p7["scale"], "720p 下采样没生效"
+    assert p7["w"] == 1920 and p7["h"] == 1080, "内部构图应恒为 1080p（缩放只在编码时做）"
+    p24 = K.video_plan({"video": {"fps": 24}})
+    assert p24["fps"] == 24, "fps 参数化没生效"
+
+    def _must_fail(cfg, why):
+        try:
+            K.video_plan(cfg)
+        except ValueError:
+            return
+        raise AssertionError("%s 没有报错（会被静默接受）" % why)
+
+    _must_fail({"video": {"width": 1080, "height": 1920}}, "竖屏")
+    _must_fail({"video": {"width": 1920, "height": 1440}}, "4:3")
+    _must_fail({"video": {"width": 3840, "height": 2160}}, "上采样到 4K")
+    _must_fail({"video": {"fps": 31}}, "非法 fps")
+    return "默认 1080p30 / 720p 下采样 / 竖屏与上采样均拒绝"
+
+
+def t_golden_determinism():
+    """46 金帧确定性：同一帧连画两次必须逐字节一致（跨进程可复现的前提）。
+
+    比"看起来一样"强的地方：它会在**改了引擎/主题/随机源**时立刻红，
+    而不是等观众看出"这版画面怎么抖了一下"。
+    """
+    mod = _load_scenes_mod()
+    if mod is None:
+        return "skip（没有 assets/scenes.py）"
+    import hashlib
+    sc = dict(id="l01", kind="hook", start=0.0, dur=4.0, chapter="01 · 测试",
+              text="金帧确定性自检", sub="金帧确定性", big="金帧确定性")
+    script = {"title": "selfcheck", "_total": 8.0}
+    try:
+        plan = __import__("stylekit").resolve_script_style(dict(script, lines=[sc]))
+        script["_style"] = plan
+    except Exception:                                       # noqa: BLE001
+        pass
+    hs = []
+    for _ in range(2):
+        fr = mod.draw_frame(sc, 1.25, 4.0, 1.25, script, 37)
+        hs.append(hashlib.sha256(fr.tobytes()).hexdigest()[:16])
+    assert hs[0] == hs[1], "同一帧画了两次不一致（有隐藏的 random/time 依赖）：%r" % (hs,)
+    return "同一帧两次 SHA-256 = %s" % hs[0]
+
+
+def t_dependency_drift():
+    """47 依赖漂移体检：上游一改就悄悄退化，这里先喊。
+
+    只做**离线**断言（不联网、不下载）：主版本区间 + edge-tts 是否仍暴露
+    boundary 参数。词级时间戳整条链路吊在这个参数上，7.x 一旦改名，
+    表现会是"词事件为空"，而不是报错。
+    """
+    import numpy as np
+    from PIL import __version__ as pil_ver
+    assert int(np.__version__.split(".")[0]) >= 1, "numpy 主版本异常：%s" % np.__version__
+    assert int(pil_ver.split(".")[0]) >= 9, "Pillow 版本过旧：%s" % pil_ver
+    try:
+        import edge_tts
+    except Exception:                                       # noqa: BLE001
+        return "skip（没装 edge-tts，只能用手工音频）"
+    try:
+        mode = edge_tts.Communicate.__init__.__doc__ or ""
+        import inspect
+        params = inspect.signature(edge_tts.Communicate.__init__).parameters
+    except (TypeError, ValueError):                         # noqa: BLE001
+        return "skip（edge-tts 的签名取不到，版本 %s）" % getattr(edge_tts, "__version__", "?")
+    assert "boundary" in params,         ("edge-tts %s 的 Communicate 不再接受 boundary 参数：词级时间戳链路会静默退化成"
+         "整句字幕，请检查上游变更" % getattr(edge_tts, "__version__", "?"))
+    return "numpy %s / Pillow %s / edge-tts %s(boundary OK)" % (
+        np.__version__, pil_ver, getattr(edge_tts, "__version__", "?"))
+
+
+# ------------------------------------------------------------------ v0.8.0 用例（续）
+def t_batch_manifest():
+    """48 批量清单解析：两种写法都认、上限卡死、坏条目在**开跑前**报错。
+
+    批量最容易死在"第 7 条跑一半才发现清单写错"。这条固定住的是
+    render._load_batch 的"先解析、后执行"契约——写错就一条都不跑。
+    """
+    import render as R
+
+    def _must_fail(payload, why):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "b.json")
+            open(p, "w", encoding="utf-8").write(payload)
+            try:
+                R._load_batch(p)
+            except SystemExit:
+                return
+            raise AssertionError("%s 没有被拒绝（会带着坏清单开跑）" % why)
+
+    with tempfile.TemporaryDirectory() as d:
+        film = os.path.join(d, "a", "film.json")
+        os.makedirs(os.path.dirname(film), exist_ok=True)
+        open(film, "w", encoding="utf-8").write("{}")
+        p = os.path.join(d, "list.json")
+        json.dump(["a/film.json"], open(p, "w", encoding="utf-8"))
+        jobs = R._load_batch(p)
+        assert len(jobs) == 1, "简写清单解析错：%r" % (jobs,)
+        assert os.path.isfile(jobs[0]["script"]), "剧本路径没转成绝对路径：%r" % (jobs[0],)
+        assert jobs[0]["work"].endswith("work_film"), "默认 work 目录命名变了：%r" % (jobs[0],)
+        p2 = os.path.join(d, "list2.json")
+        json.dump({"films": [{"script": "a/film.json", "label": "x",
+                              "work": "w1", "out": "o1.mp4"}]},
+                  open(p2, "w", encoding="utf-8"))
+        j2 = R._load_batch(p2)
+        assert j2[0]["label"] == "x" and j2[0]["out"].endswith("o1.mp4"), "显式字段被忽略：%r" % (j2,)
+    _must_fail("[]", "空清单")
+    _must_fail('{"films": [{"label": "x"}]}', "缺 script 的条目")
+    _must_fail("[" * 0 + json.dumps([{"script": "a.json"}] * 101), "超过 100 条上限")
+    return "两种写法 + 3 类坏清单都按预期拒绝"
+
+
+def t_tts_backend():
+    """49 TTS 后端可替换：注册即生效、未知后端报错、默认仍是 edge。
+
+    这条守的是"旁白链路只挂在非官方 edge-tts 上"的对冲面：换 provider 时
+    timeline/layout/QA 不该跟着改。这里只测接口契约，不联网。
+    """
+    names = K.tts_backend_names()
+    assert names[0] == "edge", "默认后端不是 edge：%r" % (names,)
+
+    def fake(text, out_mp3, **kw):
+        with open(out_mp3, "wb") as fh:
+            fh.write(b"\x00" * 4096)
+        return dict(path=out_mp3, dur=1.25, words=[], trimmed=False)
+
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        mp3 = os.path.join(d, "x.mp3")
+        try:
+            K.tts("测试", mp3, backend="no-such-backend")
+        except RuntimeError as e:
+            assert "未知的 TTS 后端" in str(e), "未知后端报错文案不清晰：%s" % e
+        else:
+            raise AssertionError("未知后端没有报错（会静默走到别的路径）")
+        K.register_tts_backend("fake-test", fake, note="selfcheck")
+        assert "fake-test" in K.tts_backend_names()
+        m = K.tts("测试", mp3, backend="fake-test")
+        assert m["dur"] == 1.25 and m["backend"] == "fake-test", "后端返回值没被采纳：%r" % (m,)
+    return "注册/分发/未知后端报错 全部符合契约"
+
+
+def t_web_style_payload():
+    """50 web 引擎风格载荷：非 legacy 才注入、legacy 必须回落 None（逐字节兼容的前提）。
+
+    v0.8 给 web 引擎加了"跟随风格包"，但兼容性要求是 style=None 时页面输出**逐字节**
+    等于 v0.7。这条守住"什么时候该注入、什么时候必须不注入"这个开关。
+    """
+    import render as R
+    try:
+        import webengine as we
+    except Exception as e:                                  # noqa: BLE001
+        return "skip（没有 webengine.py：%s）" % e
+    script = {"title": "x", "style": "cinema",
+              "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
+    tl = {"fps": 30, "video": {"out_w": 1280, "out_h": 720}}
+    payload = R._web_style_payload(we, script, tl)
+    assert payload is not None, "非 legacy 项目没有生成 style 载荷（页面不会跟随风格）"
+    canvas = payload.get("canvas") or {}
+    assert int(canvas.get("w") or 0) == 1280 and int(canvas.get("h") or 0) == 720, \
+        "画布尺寸没跟着 video 块走：%r" % (canvas,)
+    legacy = {"title": "x", "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
+    assert R._web_style_payload(we, legacy, tl) is None, \
+        "legacy 项目也注入了 style（v0.7 的逐字节兼容会被打破）"
+    return "非 legacy 注入 %dx%d / legacy 回落 None" % (canvas["w"], canvas["h"])
+
+
+def t_golden_frames():
+    """51 金帧回归：像素基线真的能拦住"画面变了"（仓库工具 tools/golden_frames.py）。
+
+    为什么放进 selfcheck 而不是只放 CI：改引擎/主题后"画面变了一点"是最难发现的一类回归，
+    而它只需要 0.65 秒。约定：基线缺失 / 字体或环境指纹不同 -> skip（跨机不误报），
+    同环境像素变了才是 fail。
+    """
+    # HERE = <repo>/skills/video-studio/scripts -> 上溯三级才是仓库根
+    # （两级会落到 <repo>/skills，工具与基线都找不到，这条就永远 skip —— 静默失效）
+    root = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+    tool = os.path.join(root, "tools", "golden_frames.py")
+    if not os.path.exists(tool):
+        return "skip（没有 tools/golden_frames.py）"
+    base = os.path.join(root, "skills", "video-studio", "assets", "golden_frames.json")
+    if not os.path.exists(base):
+        return "skip（没有金帧基线 assets/golden_frames.json）"
+    p = subprocess.run([sys.executable, tool, "--check", "--json"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=root)
+    out = (p.stdout or "").strip()
+    # 工具会在 JSON 前打印几行人读输出；从第一个 '{' 起解析
+    i = out.find("{")
+    if i < 0:
+        return "skip（golden_frames 没输出 JSON：%s）" % (p.stderr or out)[:120]
+    try:
+        d = json.loads(out[i:])
+    except json.JSONDecodeError as e:
+        return "skip（golden_frames JSON 解析失败：%s）" % e
+    changed = d.get("changed") or []
+    if p.returncode == 0 and not changed:
+        frames = d.get("frames") or []
+        return "%d 帧像素一致（font_fp %s）" % (len(frames),
+                                               str(d.get("font_fp") or "")[:8])
+    if changed:
+        raise AssertionError("金帧变了（画面回归）：changed=%r；若是有意改画风，"
+                             "确认后用 python tools/golden_frames.py --write 重录基线" % (changed,))
+    return "skip（golden_frames exit=%s：%s）" % (p.returncode, (d.get("reason") or "")[:120])
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -1185,6 +1436,14 @@ CASES = [
     ("41 空门禁账本不许写成通过", t_empty_ledger_not_pass),
     ("42 单阶段产物归属（防假 stale）", t_stage_io_no_phantom_output),
     ("43 theme_overrides 参与主题体检", t_theme_overrides_linted),
+    ("44 词级时间戳（规整/裁剪/锚点）", t_word_events),
+    ("45 画幅规划（只允许横屏下采样）", t_video_plan),
+    ("46 金帧确定性（同帧两次一致）", t_golden_determinism),
+    ("47 依赖漂移体检（离线）", t_dependency_drift),
+    ("48 批量清单解析（预检先于执行）", t_batch_manifest),
+    ("49 TTS 后端可替换（接口契约）", t_tts_backend),
+    ("50 web 风格载荷（legacy 必须回落）", t_web_style_payload),
+    ("51 金帧回归（像素基线）", t_golden_frames),
 ]
 
 

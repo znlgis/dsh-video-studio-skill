@@ -547,17 +547,89 @@ def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
     return wrap_cn(text, f, max_w), f
 
 
+def _split_with_seps(text, words):
+    """把原文按词表切开，保留**词与词之间的原始分隔符**（空格/标点）。
+
+    返回 [(sep, token), ...] + 尾部残余；任何一步在原文里找不到时就返回 None。
+    为什么要保留 sep：edge-tts 的中文词表不含空格，但剧本里可能有
+    "用 DeepSeek 生成"这种中英混排——直接拼 token 会把空格吃成 "用DeepSeek生成"。
+    """
+    s = str(text or "")
+    toks = [str(w.get("text") or "") for w in (words or [])]
+    toks = [t for t in toks if t]
+    if not toks:
+        return None
+    out, pos = [], 0
+    for tk in toks:
+        i = s.find(tk, pos)
+        if i < 0:
+            return None
+        out.append((s[pos:i], tk))
+        pos = i + len(tk)
+    return out, s[pos:]
+
+
+def wrap_by_words(text, f, max_w, words):
+    """按**真实词边界**折行（v0.8）。词表对不上原文时返回 None（调用方回退字符折行）。
+
+    为什么值得：中文按字符折行会在一句话的中间硬切（"…不是读/稿"），
+    而词边界是 TTS 自己切的分词结果，折出来的断点读起来自然，也更容易和
+    词级高亮/字幕窗口对齐。
+    """
+    got = _split_with_seps(text, words)
+    if not got:
+        return None
+    pairs, tail = got
+    if tail.strip():                    # 词表没覆盖整句：不对齐，交回字符折行
+        return None
+    lines, cur = [], ""
+    for sep, tok in pairs:
+        trial = cur + sep + tok
+        if cur and text_w(trial, f) > max_w:
+            lines.append(cur)
+            cur = tok.lstrip()
+        else:
+            cur = trial
+    if tail:
+        cur += tail
+    if cur:
+        lines.append(cur)
+    return lines or None
+
+
+def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
+                  family="sans", words=None):
+    """字幕折行：优先两行，超宽逐级缩字号。返回 (lines, font)。
+
+    v0.8：传 words（句内词表）时优先按词边界折行；词表对不上原文、或折出来
+    仍超过 max_lines 时，**回退到原来的字符折行**——旧项目的排版不会因为升级而变样。
+    """
+    for sz in (size, int(size * 0.92), int(size * 0.84), int(size * 0.76)):
+        f = font(sz, weight, family)
+        lines = None
+        if words:
+            lines = wrap_by_words(text, f, max_w, words)
+            if lines is not None and len(lines) > max_lines:
+                lines = None            # 词边界折不下：交给字符折行兜底
+        if lines is None:
+            lines = wrap_cn(text, f, max_w)
+        if len(lines) <= max_lines:
+            return lines, f
+    f = font(int(size * 0.76), weight, family)
+    return wrap_cn(text, f, max_w), f
+
+
 def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None,
-                  theme=None, family=None):
+                  theme=None, family=None, words=None):
     """烧字幕。v0.5.0 加 theme（stylekit 主题）与 family（字体族）；
-    theme=None 时与 v0.4 逐像素一致。"""
+    theme=None 时与 v0.4 逐像素一致。v0.8 加 words（按词边界折行）。"""
     if not text or alpha <= 0.01:
         return img
     if band_w is None:
         band_w = SUB_BAND[2] - SUB_BAND[0]
     th = theme if isinstance(theme, dict) else None
     fam = family or (th or {}).get("family") or "sans"
-    lines, f = fit_sub_lines(text, max_w=band_w, size=size, family=fam)
+    lines, f = fit_sub_lines(text, max_w=band_w, size=size, family=fam, words=words)
     lines = lines[:2]                       # 硬约束：最多两行
     lh = int(f.size * 1.32)
     cx = (SUB_BAND[0] + SUB_BAND[2]) // 2
@@ -821,10 +893,13 @@ CUE_BASE_DB = {
 def cue_time(at, scenes=None, total=None):
     """把提示点的 at 解析成成片绝对秒。
 
-    支持三种写法（CONTRACT.md §4.1）：
+    支持四种写法（CONTRACT.md §4.1）：
       "abs:12.5" / 12.5      -> 绝对秒
       "l03+0.35" / "l03-0.2" -> 场景 id 加/减偏移（相对场景 start）
       "l03"                  -> 场景起点
+      "l03:w2" / "l03:w2+0.1" -> **词锚点**（v0.8）：该句第 2 个词的起点 + 偏移。
+        下标从 1 开始（w1 = 第一个词）；找不到该词时**退化为句偏移**并告警，
+        不让一个写错的锚点把整条 cues 链路炸掉（与 v0.7.2 的"跳过并留痕"一致）。
     """
     if isinstance(at, (int, float)):
         return round(float(at), 3)
@@ -837,6 +912,32 @@ def cue_time(at, scenes=None, total=None):
         return round(float(s), 3)
     except ValueError:
         pass
+    # 词锚点：<id>:w<N>[+/-<offset>]
+    if ":w" in s:
+        head, _sep, tail = s.partition(":w")
+        # tail 形如 "2" / "2+0.1" / "2-0.1"：词序号 + 可选偏移（偏移可带符号）
+        m = re.match(r"^([0-9]+)(.*)$", tail)
+        if m:
+            num = m.group(1)
+            rest = m.group(2) or ""
+            off = 0.0
+            if rest:
+                try:
+                    off = float(rest)
+                except ValueError:
+                    off = 0.0
+            if scenes:
+                for sc in scenes:
+                    if str(sc.get("id")) != head:
+                        continue
+                    ws = sc.get("words_abs") or sc.get("words") or []
+                    idx = int(num) - 1
+                    if 0 <= idx < len(ws):
+                        return round(float(ws[idx]["start"]) + off, 3)
+                    print("   [WARN] cue at=%r：%s 只有 %d 个词，w%s 不存在，退化为句偏移"
+                          % (at, head, len(ws), num), flush=True)
+                    return round(float(sc["start"]) + off, 3)
+            raise ValueError("cue at=%r：找不到场景 %r（先跑 layout，或改用 abs:秒）" % (at, head))
     # 形如 <id>[+-]<offset>
     cut = len(s)
     for i, ch in enumerate(s):
@@ -1513,9 +1614,127 @@ def tts_key_v2(text, voice, rate, pitch, volume="+0%", trim=True, trim_db=-42.0,
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------- TTS 后端
+# 为什么要有这一层（v0.8）：整条旁白链路现在只挂在一个**非官方**客户端（edge-tts）上。
+# 它的服务端随时可能改协议/加鉴权，而我们的时间轴、词级字幕、门禁全部建立在这些产物上。
+# 这里只做**接口**（不实现第二个后端）：把"合成一句话 -> 音频 + 词表"这个动作抽象出来，
+# 将来要换 Azure 官方 TTS / 离线引擎，只加一个 register 的实现，timeline/layout/QA 一行不改。
+#
+# 协议（实现者必须满足）：
+#   fn(text, out_mp3, *, voice, rate, pitch, volume, trim, trim_db, words) -> dict
+#   返回的 dict 至少含：path（可播放音频路径）、dur（实测秒数，**必须是时间轴权威**）、
+#                       words（可空列表）、trimmed（bool）
+TTS_BACKENDS = {}
+
+
+def register_tts_backend(name, fn, *, note=""):
+    """注册一个 TTS 后端实现。name 用于 film.json 的 tts.backend 选择。"""
+    if not callable(fn):
+        raise TypeError("register_tts_backend 需要一个可调用对象，收到 %r" % (fn,))
+    TTS_BACKENDS[str(name)] = dict(fn=fn, note=str(note or ""))
+    return str(name)
+
+
+def tts_backend_names():
+    return ["edge"] + sorted(n for n in TTS_BACKENDS if n != "edge")
+
+
+def tts_words_key(text, voice, rate, pitch, volume="+0%", trim=True,
+                   trim_db=-42.0) -> str:
+    """词级元数据的独立缓存键（v0.8）。
+
+    为什么不并进 tts_key_v2：并进去会让**所有老项目的音频缓存一次性失效**（必须重新联网
+    合成整片）。分开记 -> 老音频照旧复用，只有"这次显式要词级"时才补一次事件采集。
+    """
+    payload = "%s|%s|%s|%s|%s|%s|%s" % ("words", text, voice, rate, pitch,
+                                       volume, int(bool(trim)))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def trim_silence_bounds(pcm, sr=SR, thresh_db=-42.0, keep_ms=80):
+    """返回 trim_silence 会保留的样本区间 [a, b)。
+
+    v0.8 的词级时间戳需要它：edge-tts 的 WordBoundary offset 是相对**原始 mp3** 的，
+    而 trim=True 时 timeline 用的是裁剪后的语音。不减去 a，词就会整体提前 ~0.1–1 s。
+    与 trim_silence 共用同一套判据（idx[0]/idx[-1] ± keep），保证两边永远一致。
+    """
+    pcm = np.asarray(pcm, dtype=np.float32)
+    if pcm.size == 0:
+        return 0, 0
+    th = 10 ** (thresh_db / 20.0)
+    idx = np.where(np.abs(pcm) > th)[0]
+    if idx.size == 0:
+        return 0, 0
+    keep = int(sr * keep_ms / 1000.0)
+    a = max(0, int(idx[0]) - keep)
+    b = min(len(pcm), int(idx[-1]) + keep)
+    return a, b
+
+
+def words_normalize(events, *, offset_shift=0.0, dur=None, min_gap=0.0):
+    """把 edge-tts 的 WordBoundary 事件规整成 "句内词表"。
+
+    输入事件：{"type":"WordBoundary","offset":<100ns>,"duration":<100ns>,"text":str}
+    输出行： {"text":str,"start":秒,"dur":秒,"end":秒}（start/end 都是相对本句语音起点，
+             offset_shift 为裁剪掉的句首静音秒数，会从 start 里减掉）。
+
+    两个必须处理的现实（实测 edge-tts 7.3.1 zh-CN）：
+      * 词之间有 0.1–0.3 s 空隙，事件不覆盖空隙 —— 所以 start/dur 会留洞，这是对的；
+      * 句尾静音（约 0.5 s）不在任何事件里 —— 排轴时用"整句实测时长"兜底，不用词时长求和。
+    """
+    out = []
+    for ev in events or []:
+        txt = str(ev.get("text") or "").strip()
+        if not txt:
+            continue
+        try:
+            st = float(ev.get("offset") or 0.0) / 1e7 - float(offset_shift)
+            du = float(ev.get("duration") or 0.0) / 1e7
+        except (TypeError, ValueError):
+            continue
+        if st < 0:
+            # 裁剪把词首切掉一点：钳到 0，不丢词（丢词会让"字幕少一句"这类门禁误报）
+            du = max(0.0, du + st)
+            st = 0.0
+        row = dict(text=txt, start=round(st, 4), dur=round(du, 4),
+                   end=round(st + du, 4))
+        out.append(row)
+    out.sort(key=lambda r: r["start"])
+    # 单调性兜底：极端情况下服务端事件的 offset 可能轻微乱序/重叠，
+    # 这里按"后一个不得早于前一个"夹紧，保证下游（字幕、cue 锚点）拿到的是可用的序列。
+    prev_end = 0.0
+    for r in out:
+        if r["start"] < prev_end:
+            r["start"] = round(prev_end, 4)
+            r["end"] = round(r["start"] + r["dur"], 4)
+        prev_end = r["end"]
+    if dur is not None and out:
+        # 末词终点不得超过整句语音（防止边界事件把尾巴算到下一句）
+        lim = float(dur)
+        for r in out:
+            if r["end"] > lim + 1e-6:
+                r["end"] = round(lim, 4)
+                r["dur"] = round(max(0.0, r["end"] - r["start"]), 4)
+    return out
+
+
+def words_summary(words, dur=None):
+    """词表的自检摘要（给 QC 门禁用：单调性 / 覆盖率 / 末词偏差）。"""
+    ws = list(words or [])
+    n = len(ws)
+    gaps = []
+    for i in range(1, n):
+        gaps.append(round(float(ws[i]["start"]) - float(ws[i - 1]["end"]), 4))
+    covered = round(sum(float(r["dur"]) for r in ws), 4)
+    tail = round(float(dur) - float(ws[-1]["end"]), 4) if (dur and n) else None
+    mono = all(float(ws[i]["start"]) >= float(ws[i - 1]["start"]) for i in range(1, n))
+    return dict(n=n, covered=covered, gaps=gaps, tail=tail, mono=bool(mono),
+                start=round(float(ws[0]["start"]), 4) if n else None)
+
+
 def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
         cache=True, retries=4, trim=True, trim_db=-42.0, volume="+0%",
-        persona=None, tone=None):
+        persona=None, tone=None, words=False, backend="edge"):
     """逐句合成旁白（带输入校验的缓存 + 网络重试 + 可选尾静音裁剪）。
 
     v0.1 的缓存只判断文件是否存在，改一句台词会静默复用旧音频；
@@ -1528,20 +1747,51 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
     d = os.path.dirname(os.path.abspath(out_mp3))
     if d:
         os.makedirs(d, exist_ok=True)
+    # 可替换后端（v0.8）：接口只规定"返回音频 + 词表 + 实测时长"，
+    # 默认仍是 edge 的内联实现（逐字节不变）。
+    if str(backend or "edge") != "edge":
+        impl = (TTS_BACKENDS.get(str(backend)) or {}).get("fn")
+        if impl is None:
+            raise RuntimeError("未知的 TTS 后端 %r（已注册：%s）"
+                               % (backend, ", ".join(tts_backend_names())))
+        row = impl(text, out_mp3, voice=voice, rate=rate, pitch=pitch,
+                   volume=str(volume or "+0%"), trim=trim, trim_db=trim_db, words=words)
+        row = dict(row or {})
+        if "dur" not in row or not row.get("path"):
+            raise RuntimeError("TTS 后端 %r 的返回值缺 path/dur（协议见 filmkit.TTS_BACKENDS）"
+                               % backend)
+        row.setdefault("text", text)
+        row.setdefault("voice", voice)
+        row.setdefault("backend", str(backend))
+        return row
     meta_path = out_mp3 + ".json"
     vol = str(volume or "+0%")
     key = tts_key_v2(text, voice, rate, pitch, volume=vol, trim=trim, trim_db=trim_db)
     legacy_key = tts_key(text, voice, rate, pitch)
 
+    wk = tts_words_key(text, voice, rate, pitch, volume=vol, trim=trim,
+                       trim_db=trim_db)
+
+    def _words_ok(m):
+        """要词级时必须真有词级记录（老缓存没有 -> 补采一次，别静默返回空词表）。"""
+        if not words:
+            return True
+        return bool(m.get("words_key") == wk and m.get("words"))
+
+    audio_cached = None                 # 可用音频（可能缺词级记录）
     if cache and os.path.exists(out_mp3) and os.path.getsize(out_mp3) > 2000:
         try:
             m = json.load(open(meta_path, encoding="utf-8"))
             # v2 命中：key 已经含 volume/trim，不需要再分叉判断 trimmed
             if m.get("key") == key and m.get("text") == text:
                 if m.get("trimmed") and m.get("path") and os.path.exists(m["path"]):
-                    return m
+                    if _words_ok(m):
+                        return m
+                    audio_cached = m          # 有音频、缺词级：断网时降级复用它
                 if not m.get("trimmed") and not trim:
-                    return m
+                    if _words_ok(m):
+                        return m
+                    audio_cached = m
             # v1 老缓存（升级前合成的）只有在参数完全等于 v1 语义时才复用，
             # 避免"改了一个 volume 却拿到老音频"这种升级期的静默错配。
             elif (legacy_key == tts_key(text, voice, rate, pitch)
@@ -1555,13 +1805,41 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
     import asyncio
     import time as _time
 
+    raw_events = []
     for attempt in range(max(1, int(retries))):
         try:
             import edge_tts
 
             async def go():
-                c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=vol)
-                await c.save(out_mp3)
+                # v0.8：要词级时不能再用 save()——save 会把 WordBoundary 丢掉（只写音频）。
+                # 显式传 boundary="WordBoundary"：默认是 SentenceBoundary，此时一条词事件都收不到
+                # （实测 edge-tts 7.3.1：不传 boundary 时 zh-CN 词事件数 = 0）。
+                c = edge_tts.Communicate(
+                    text, voice, rate=rate, pitch=pitch, volume=vol,
+                    boundary="WordBoundary" if words else "SentenceBoundary")
+                if not words:
+                    await c.save(out_mp3)
+                    return
+                raw_events.clear()
+                # 先写 .part 再 os.replace：中途中失败/断网时**绝不能**截断已有的缓存音频
+                # （旧实现直接 "wb" 打开目标文件，一次失败就把好音频清成 0 字节）。
+                part = out_mp3 + ".part"
+                try:
+                    with open(part, "wb") as fh:
+                        async for chunk in c.stream():
+                            if chunk["type"] == "audio":
+                                fh.write(chunk["data"])
+                            else:
+                                raw_events.append(dict(chunk))
+                    if not os.path.exists(part) or os.path.getsize(part) <= 2000:
+                        raise RuntimeError("合成产物异常")
+                    os.replace(part, out_mp3)
+                finally:
+                    if os.path.exists(part):
+                        try:
+                            os.remove(part)
+                        except OSError:
+                            pass
 
             asyncio.run(go())
             if not os.path.exists(out_mp3) or os.path.getsize(out_mp3) <= 2000:
@@ -1569,22 +1847,45 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
             break
         except Exception as e:              # noqa: BLE001
             if attempt == max(1, int(retries)) - 1:
+                if audio_cached is not None and words:
+                    # 断网 / 服务端拒绝时的降级：**音频还在**，只是这次没词级。
+                    # 不静默：打 WARN，并在 meta 里记 words_ok=False，让 gates 判 skipped。
+                    print("   [WARN] %s: 拿不到词级时间戳（%s），复用已有音频；"
+                          "本次词级门禁会记 skipped" % (os.path.basename(out_mp3), e),
+                          flush=True)
+                    audio_cached["words"] = []
+                    audio_cached["words_ok"] = False
+                    audio_cached["words_events"] = 0
+                    return audio_cached
                 raise RuntimeError("edge-tts 合成失败（重试 %d 次）：%s" % (retries, e)) from e
             _time.sleep(1.2 * (attempt + 1))
 
     dur_raw = audio_dur(out_mp3)
     used = out_mp3
     dur = dur_raw
+    shift = 0.0                         # 句首被裁掉的静音秒数（词时间戳要减掉它）
     if trim:
-        pcm = trim_silence(decode_pcm(out_mp3), thresh_db=trim_db)
+        pcm_raw = decode_pcm(out_mp3)
+        a, b = trim_silence_bounds(pcm_raw, thresh_db=trim_db)
+        pcm = pcm_raw[a:b] if b > a else pcm_raw
         wav_path = os.path.splitext(out_mp3)[0] + ".trim.wav"
         wav_write(wav_path, pcm)
         used = wav_path
         dur = len(pcm) / float(SR)
+        shift = a / float(SR) if pcm_raw.size else 0.0
 
     m = dict(path=used, mp3=out_mp3, text=text, voice=voice, rate=rate, pitch=pitch,
              volume=vol, key=key, spec_version=2, dur=dur, dur_raw=dur_raw,
              trimmed=bool(trim), trim_db=float(trim_db))
+    if words:
+        wlist = words_normalize(raw_events, offset_shift=shift, dur=dur)
+        m["words"] = wlist
+        m["words_key"] = wk
+        m["words_events"] = len(raw_events)
+        m["words_shift"] = round(float(shift), 4)
+        # 词事件收不到不是崩溃，而是"服务端行为变了"：留空表 + 事件计数，
+        # 由 gates 判 skipped 并写进 QC 报告（不许静默当成"有词级"）。
+        m["words_ok"] = bool(wlist)
     if persona:
         m["persona"] = str(persona)
     if tone:
@@ -1594,7 +1895,8 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
 
 
 def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
-              workers=4, trim=True, plan=None, trim_db=-42.0):
+              workers=4, trim=True, plan=None, trim_db=-42.0, words=True,
+              backend="edge"):
     """并发逐句合成（并发只影响墙钟，不影响产物：每句独立缓存）。
 
     v0.5.0：plan=[{voice,rate,pitch,volume,persona,tone}, ...]（与 lines 等长）时
@@ -1617,7 +1919,7 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
                 rate=spec.get("rate") or rate,
                 pitch=spec.get("pitch") or pitch,
                 volume=spec.get("volume") or "+0%",
-                trim=trim, trim_db=trim_db,
+                trim=trim, trim_db=trim_db, words=words, backend=backend,
                 persona=spec.get("persona"), tone=spec.get("tone"))
         row = dict(ln)
         row.update(m)
@@ -1632,9 +1934,64 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
     return results
 
 
+# ---------------------------------------------------------------- 画幅规划
+VIDEO_FPS_ALLOWED = (24, 25, 30, 50, 60)
+VIDEO_OUT_ALLOWED = ((1920, 1080), (1280, 720), (960, 540), (2560, 1440))
+VIDEO_ASPECT = 16.0 / 9.0
+
+
+def video_plan(script=None):
+    """解析 film.json 的 video 块 -> 内部分辨率 / 输出分辨率 / 帧率（v0.8）。
+
+    设计取舍（都是刻意的）：
+      * **只做横屏 16:9**。竖屏不是"把宽高换一下"：安全区、版式几何、HUD、字幕折行
+        全部按 16:9 的像素坐标写死，换比例要重做一套版式（用户已确认本轮不做）。
+        竖屏/非 16:9 直接报错，而不是悄悄出个变形或带黑边的片子。
+      * **构图恒定 1920x1080，只允许下采样输出**（720p/540p/1440p 里 1440p 需上采样，
+        因此默认拒绝）：上采样不会增加信息，只会把"1080p 的清晰度"包装成"4K"，
+        与项目"文档真话化 / 不糊弄"的原则冲突。要 4K 就改内部构图分辨率。
+      * fps 只接受常见交付值；改 fps 只改时间→帧的换算，不改变画面内容。
+    """
+    v = dict((script or {}).get("video") or {})
+    try:
+        fps = int(v.get("fps") or (script or {}).get("fps") or FPS)
+    except (TypeError, ValueError):
+        raise ValueError("video.fps 必须是整数，收到 %r" % (v.get("fps"),))
+    if fps not in VIDEO_FPS_ALLOWED:
+        raise ValueError("video.fps=%d 不支持（可用：%s）"
+                         % (fps, "/".join(str(x) for x in VIDEO_FPS_ALLOWED)))
+    try:
+        ow = int(v.get("width") or v.get("out_width") or W)
+        oh = int(v.get("height") or v.get("out_height") or H)
+    except (TypeError, ValueError):
+        raise ValueError("video.width/height 必须是整数，收到 %r/%r"
+                         % (v.get("width"), v.get("height")))
+    if (ow, oh) == (W, H):
+        return dict(fps=fps, w=W, h=H, out_w=ow, out_h=oh, scale=False,
+                    label="%dx%d" % (ow, oh))
+    if ow < oh:
+        raise ValueError("video.width=%d height=%d 是竖屏：本项目只支持 16:9 横屏"
+                         "（安全区/版式按横屏像素写死，竖屏是另一套版式，本轮不做）"
+                         % (ow, oh))
+    if abs(ow / float(oh) - VIDEO_ASPECT) > 0.01:
+        raise ValueError("video.width=%d height=%d 不是 16:9（%.3f:1）：换宽高比要重做"
+                         "版式几何与字幕安全区，本轮只支持 16:9 横屏的缩放输出"
+                         % (ow, oh, ow / float(oh)))
+    if (ow, oh) not in VIDEO_OUT_ALLOWED:
+        raise ValueError("video 输出尺寸 %dx%d 不在允许列表 %s 内（要新尺寸先确认镜头/字号"
+                         "在目标分辨率下仍然成立，再把它加进 VIDEO_OUT_ALLOWED）"
+                         % (ow, oh, ", ".join("%dx%d" % s for s in VIDEO_OUT_ALLOWED)))
+    if ow > W or oh > H:
+        raise ValueError("video 输出 %dx%d 大于内部构图 %dx%d：那是上采样，只会把 1080p 的"
+                         "清晰度包装成更高分辨率（假 4K）。要真高清请改内部构图分辨率，"
+                         "而不是放大输出。" % (ow, oh, W, H))
+    return dict(fps=fps, w=W, h=H, out_w=ow, out_h=oh, scale=True,
+                label="%dx%d" % (ow, oh))
+
+
 # ---------------------------------------------------------------- 时间轴
 def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_dur=None,
-                   hold=0.0, hold_map=None, bar=0.0, lead_map=None):
+                   hold=0.0, hold_map=None, bar=0.0, lead_map=None, fps=None):
     """由实测语音时长反推时间轴。第一段 start 必须严格为 0。
 
     hold / hold_map（v0.3.0）：语音结束后额外停留的秒数——这就是 ai-history-film 的"停留窗口"：
@@ -1655,13 +2012,22 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
             d = float(max_dur)
         if bar and float(bar) > 0:
             d = math.ceil(d / float(bar) - 1e-9) * float(bar)
-        scenes.append(dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
-                           voice_start=round(t + lead_i, 3),
-                           voice_end=round(t + lead_i + voice, 3)))
+        row = dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
+                   voice_start=round(t + lead_i, 3),
+                   voice_end=round(t + lead_i + voice, 3))
+        # v0.8：把句内词表平移成**绝对时间**，下游（字幕断行 / cue 词锚点 /
+        # 词级门禁）只需要读 words_abs，不必自己再算一遍 offset。
+        if ln.get("words"):
+            vs = row["voice_start"]
+            row["words_abs"] = [dict(w, start=round(vs + float(w["start"]), 4),
+                                     end=round(vs + float(w["end"]), 4))
+                                for w in ln["words"]]
+        scenes.append(row)
         t += d
     if scenes:
         scenes[0]["start"] = 0.0
-    return dict(total=round(t, 3), scenes=scenes, fps=FPS, frames=int(round(t * FPS)))
+    f = int(fps or FPS)
+    return dict(total=round(t, 3), scenes=scenes, fps=f, frames=int(round(t * f)))
 
 
 def sub_window(scenes, i, max_hold=None):
@@ -1686,6 +2052,15 @@ def sub_at(scenes, t, max_hold=None):
         if t0 <= t <= t1:
             return s.get("sub") or s.get("text", "")
     return ""
+
+
+def sub_words_at(scenes, t, max_hold=None):
+    """取当前时刻上屏字幕对应的**词表**（v0.8）；没有词级就返回 None。"""
+    for i, s in enumerate(scenes):
+        t0, t1 = sub_window(scenes, i, max_hold)
+        if t0 <= t <= t1:
+            return s.get("words_abs") or None
+    return None
 
 
 def write_srt(scenes, path, max_hold=None):
@@ -1773,11 +2148,21 @@ class FrameSink:
     """
 
     def __init__(self, out_path, w=W, h=H, fps=FPS, crf=18, preset="medium",
-                 audio=None, bitrate=None, strict=True, extra_args=None):
+                 audio=None, bitrate=None, strict=True, extra_args=None,
+                 out_w=None, out_h=None, scale_flags="lanczos"):
         self.out = str(out_path)
         self.w, self.h, self.fps = int(w), int(h), float(fps)
         self.strict = strict
         self.frames = 0
+        # v0.8：内部构图恒为 w x h（PIL 画布），输出可以更小（只允许下采样）。
+        # 缩放放在**编码这一遍**做（-vf scale），不二次编码、也不改变合成内容：
+        # 1920→1280 的 lanczos 下采样本身等于 1.5x 超采样，画面不会因为降规格而变糊。
+        self.out_w = int(out_w or self.w)
+        self.out_h = int(out_h or self.h)
+        if self.out_w > self.w or self.out_h > self.h:
+            raise ValueError("FrameSink: 输出 %dx%d 大于内部构图 %dx%d，拒绝上采样"
+                             % (self.out_w, self.out_h, self.w, self.h))
+        self.scale = (self.out_w, self.out_h) != (self.w, self.h)
         d = os.path.dirname(os.path.abspath(self.out))
         if d:
             os.makedirs(d, exist_ok=True)
@@ -1786,6 +2171,8 @@ class FrameSink:
                "-r", "%g" % self.fps, "-i", "-"]
         if audio:
             cmd += ["-i", str(audio)]
+        if self.scale:
+            cmd += ["-vf", "scale=%d:%d:flags=%s" % (self.out_w, self.out_h, scale_flags)]
         cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
                 "-pix_fmt", "yuv420p", "-g", str(int(self.fps * 2)),
                 "-keyint_min", str(int(self.fps * 2)), "-sc_threshold", "0"]
@@ -2039,6 +2426,11 @@ def encode_quality(film, ref_png, at_sec=None, ref_img=None):
         dec = cv2.imread(tmp, cv2.IMREAD_GRAYSCALE)
     if dec is None:
         return None
+    if ref.shape != dec.shape:
+        # v0.8：输出降到 720p 时，参考帧还是 1080p 的原图。不缩放就比 Laplacian 方差，
+        # 等于拿两个不同分辨率的东西比"锐不锐"——ratio 会假性偏低（v0.8 前只在
+        # 1920x1080 单一时是同一尺寸，所以没暴露）。这里统一缩到**交付分辨率**再比。
+        ref = cv2.resize(ref, (dec.shape[1], dec.shape[0]), interpolation=cv2.INTER_AREA)
     sa = float(cv2.Laplacian(ref, cv2.CV_64F).var())
     sb = float(cv2.Laplacian(dec, cv2.CV_64F).var())
     return dict(sharp_ref=round(sa, 1), sharp_dec=round(sb, 1),
@@ -2318,15 +2710,22 @@ def concat_segments(parts, out, workdir=None):
 
 # ---------------------------------------------------------------- 总质检
 def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None,
-              expected_subtitles=None, min_bitrate=0, notes=None, theme=None):
+              expected_subtitles=None, min_bitrate=0, notes=None, theme=None,
+              expect_w=None, expect_h=None, expect_fps=None):
     """分档质检：errors 必须修，warnings 看情况。
 
     v0.2 修正：
     - 真峰现在能测到（loudness 加 peak=true），<= -1 dBTP 才是真门禁；
     - 码率默认不再当"下限"（暗色简洁内容本来就只有 0.5Mbps，v0.1 会误判）；
     - 新增字幕条数校验（expected_subtitles），这是"静默丢字幕"的唯一检查点。
+
+    v0.8：交付规格可配置（expect_w/expect_h/expect_fps）。以前这里死比 K.W/K.H/K.FPS，
+    于是 720p/24fps 的合法交付会被报成"分辨率/帧率不符"——门禁判据跟交付规格脱节，
+    比误报更糟的是它会让人去"修"一个根本没错的东西。缺省仍回落到模块常量（老行为不变）。
     """
     errors, warns = [], []
+    W, H, FPS = (int(expect_w or globals()["W"]), int(expect_h or globals()["H"]),
+                 float(expect_fps or globals()["FPS"]))
     pr = probe(path)
     fmt = pr.get("format", {})
     streams = pr.get("streams") or [{}]
@@ -2341,7 +2740,7 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
             num, _, den = rate.partition("/")
             got = float(num) / float(den or 1)
             if abs(got - float(FPS)) > 0.05:
-                errors.append("帧率 %.3f != %d（SKILL 要求严格一致）" % (got, FPS))
+                errors.append("帧率 %.3f != %g（SKILL 要求严格一致）" % (got, FPS))
         except Exception:
             pass
     if not au:

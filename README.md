@@ -1,11 +1,12 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-0.7.2-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.8.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
 写剧本 → edge-tts 旁白 → **实测时长**排时间轴 → **提示点**驱动配乐与音效 → PIL 或浏览器逐帧渲染 →
-ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）。
+ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）+ **v0.8 的三道新闸**
+（渲前资源预检 `G0` / 词级时间戳 `G10` / 全片 VMAF `G11` / ASR 回读 `G12`）。
 零素材、可复现、可断点续跑、可脚本化验收；装成插件后，整片生产流程随技能一起进入每个会话。
 
 > 源自 `dsh-v` 资产包的 `02-技能包-video-studio`（817 个 DSH 会话的考古分析 + 5 套现存工程逆向 + 本机实测）。
@@ -36,6 +37,18 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 实测（真实素材）：旧混音 -4.2 dB → 新混音 12.0 dB，`audio_similarity --strict` D 组 12.9 dB；
 > selfcheck 34 → 38 条，其中第 35–38 条专盯这条链路。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §5.6 / §5.7、references/audio-variation.md。
+> **v0.8.0（把"看得见"变成"抓得住"）**：四个方向——① **词级时间轴**：edge-tts 的 WordBoundary 事件落
+> `work/words.json`（4 句 / 64 词 / 末词偏差 0.09 s），字幕改按词折行，cue 可写词锚点 `"l03:w2+0.1"`；
+> ② **三道新门禁**：渲前资源预检 `G0`（缺字形/坏音频在渲第一帧前 fail，< 1 s）、全片 VMAF/SSIM `G11`
+> （参考帧由场景函数**实时重渲**，不是成片抽帧；29 s 片 VMAF 97.22 / 14.2 s）、ASR 回读 `G12`
+> （成片音轨转文字对账，0.72 以下才 fail，8.7 s/片）；③ **画幅/帧率参数化**（只做 16:9 横屏，
+> 内部恒 1080p、编码时下采样，720p 已实测全门通过）、**批量** `--batch`（≤100 条、开跑前全量预检、
+> 单条失败不阻断）、**预览** `--preview N`（前 N 秒出 mp4+gif）、**运行版本化** `--run-id`（`work/runs/<runId>/`）；
+> ④ web 引擎跟随风格包（`window.__STYLE__` 注入，`style=None` 时逐字节等于 v0.7）+ 金帧像素回归
+> `tools/golden_frames.py`。**代价要说清**：29 s 模板片全链从约 28 s 涨到 **47.3 s**，其中 `qa` **23.9 s**
+> 已经**超过渲染本身**（`frames` 12.5 s）；`estimate` 预演也从 28.4 s 变成 **58.8–108.2 s**（vmaf 31–50 s 是瓶颈）。
+> v0.8 之后"出片时间"不再只是渲染时间。selfcheck 43 → **51 条**。
+> 详见 [CHANGELOG.md](CHANGELOG.md) 与 SKILL.md §6.1 / §7.5、references/word-timeline.md、references/v08-quality.md。
 
 ## 安装
 
@@ -112,11 +125,14 @@ mkdir -p myfilm && cd myfilm
 cp <SKILL_DIR>/assets/film.json .                       # 剧本模板（"style": "auto"）
 cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
 cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
+                                                         #   v0.8 还含 preflight/qaasr/qavmaf（可选：缺了对应门禁记 skipped）
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 43 条环境/回归断言（20 秒内，不联网）
+python selfcheck.py                                     # 51 条环境/回归断言（20 秒内，不联网）
 python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块（仓库/包里的工具，
                                                          #     不在 skills/video-studio/ 内，quickstart 拷出来的目录没有它）
+                                                         #     v0.8：已含 preflight/vmaf/asr 三段；29 s 模板片
+                                                         #     预演 total 28.4 s -> 58.8-108.2 s（vmaf 31-50 s 最贵）
 python render.py --stage stills --stills "l01:3,l02:5"  # 母版预览（缺 tts/layout 会自动补跑）
 python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
 cat out/QC-REPORT.md                                    # v0.6：机器可读交付结论（pass/fail/skipped）
@@ -157,6 +173,15 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 | 改完东西不知道要重跑什么 | `--stage explain`（机器判断过时阶段 + 给最小重跑命令），表见 [references/change-impact.md](skills/video-studio/references/change-impact.md) |
 | 规整 `film.json` 避免静默失效 | `python skills/video-studio/scripts/filmcheck.py film.json`（`holds`→提示写成 `hold`） |
 
+**v0.8 的四个新开关**（前三个会改变门禁结果，第四个只是看片更快）：
+
+| 想要 | 怎么做 |
+|---|---|
+| 交付 720p / 换帧率 | `film.json` 写 `"video": {"width":1280,"height":720,"fps":24}`（只做 16:9 横屏、只能下采样；720p 已实测全门通过） |
+| 批量出片 | `python render.py --batch films.json`（≤100 条、开跑前全量预检、单条失败不阻断、末尾 `batch-report.json`） |
+| 只渲前 N 秒给人看 | `--preview 15`（出 `out/preview/*.mp4` + `.gif`，不写交付账本） |
+| 让 QA 快一点 | `--vmaf sample`（每 5 帧取 1，实测 8.0 s vs 全片 14.2 s，VMAF 只差 0.34）或 `--vmaf off`（G11 记 skipped） |
+
 长片：`--stage frames --jobs 4`（按绝对帧号分块并行）+ `--resume`（中断只补缺块）。
 
 ## 这个技能解决什么
@@ -186,12 +211,17 @@ skills/video-studio/
   SKILL.md                   主线：上手 / 八阶段 / 引擎选型 / 画质 / 声音 / 提示点 / 停留窗口 / 质检 / 故障速查
   references/                pipeline · scene-authoring · audio · audio-variation · sfx-design · web-engine
                              frame-qa · quality-gates · change-impact · style-packs · pitfalls
+                             word-timeline（v0.8）· v08-quality（v0.8）
   scripts/filmkit.py         生产内核（字体/排版/字幕/音频总线/CueBus/TTS/时间轴/编码/质检）
   scripts/gates.py           v0.6 门禁账本 / QC 报告渲染 / 人工签核（绑内容指纹）
   scripts/stagewatch.py      v0.6 阶段新鲜度（work/manifest.json + --stage explain）
   scripts/filmcheck.py       v0.6 film.json 契约校验（未知键/枚举/跨字段）
-  scripts/render.py          编排器（13 个 stage、pil|web 双引擎、分块并行、断点续跑、母版预览、门禁账本）
-  scripts/selfcheck.py       回归自检（43 条"曾真的坏过"的断言）
+  scripts/render.py          编排器（13 个 stage、pil|web 双引擎、分块并行、断点续跑、母版预览、门禁账本；
+                             v0.8 增 --batch / --preview / --run-id / --vmaf / --no-preflight）
+  scripts/preflight.py       v0.8 渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
+  scripts/qavmaf.py          v0.8 全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
+  scripts/qaasr.py           v0.8 ASR 回读（成片音轨转文字对账，门禁 G12）
+  scripts/selfcheck.py       回归自检（51 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
@@ -199,9 +229,11 @@ skills/video-studio/
   requirements.txt           Python 依赖（必需 / 强烈建议 / 可选三档，带注释）
   assets/film.json           剧本模板（含 bpm / music / sfx.cues / 逐句 hold；顶层 hold 可选，缺省用风格 pacing）
   assets/scenes.py           场景模板（开场 / 正文卡片 / 收尾 + cues() 钩子）
-  assets/web/                浏览器页面模板（原生 Canvas2D 确定性时间轴）
+  assets/golden_frames.json  v0.8 金帧基线（3 帧 sha256 + 字体/环境指纹，改绘制代码后重录）
+  assets/web/                浏览器页面模板（原生 Canvas2D 确定性时间轴；v0.8 读 window.__STYLE__）
 tools/ci_check.py            仓库级体检（12 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约，不需 ffmpeg）
-tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读）
+tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；v0.8 含 preflight/vmaf/asr）
+tools/golden_frames.py       v0.8 金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
 tools/audio_similarity.py    音频差异/相似度验收（--strict 阈值判定，改音频代码后必跑）
 tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scipy 后跑 sfxkit/scorekit 自检）
 schemas/film.schema.json     film.json 的契约（draft-07 子集）
@@ -213,7 +245,9 @@ schemas/film.schema.json     film.json 的契约（draft-07 子集）
 **插件运行**：Node.js ≥ 20（`package.json` 的 `engines`；这是 DSH 加载插件用的运行时，不必另装）。
 **必需**：ffmpeg + Python 的 numpy / Pillow / edge-tts。
 **可选**：cv2（编码锐度比）、scipy（音效滤波加速，缺了走 FFT 卷积）、
-playwright + Chromium/Edge（只在 `--engine web` 时需要）。
+playwright + Chromium/Edge（只在 `--engine web` 时需要）、
+faster-whisper（v0.8 的 ASR 回读门禁 G12；没装会降级到 ffmpeg whisper 滤镜，仍不可用则记 skipped）。
+v0.8 的 G11（全片 VMAF）不需要新依赖，但要求 ffmpeg 构建**带 libvmaf**（9.0.2 full_build 有）。
 不需要 moviepy / pydub / soundfile / librosa / manim——本技能一行都不 import 它们。
 
 依赖清单有机器可读的一份，别再手抄：

@@ -110,7 +110,9 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 1. 不碰 Math.random / Date.now / performance.now；随机数走 FK.hash / FK.rng(seed)。
 2. 不读上一帧状态：每帧清空画布、从头按 T 重画（不要写"每帧位移 += speed"这种累加）。
 3. 字体固定：canvas 内 fallback 到 "Microsoft YaHei", sans-serif；文档字体加载完才 ready。
-4. 视口固定 1920x1080、devicePixelRatio=1；画布 CSS 尺寸与分辨率一致，截图才是 1:1 像素。
+4. 视口默认 1920x1080、devicePixelRatio=1；画布 CSS 尺寸与分辨率一致，截图才是 1:1 像素。
+   （v0.8：`style/width/height/fps` 可让画布跟着交付规格走——只允许 **16:9 横屏偶数尺寸**，
+   竖屏 / 4:3 / 奇数在 `open_page` 入口就 raise；尺寸由 `window.__STYLE__.canvas` 注入。）
 5. 动画相位只用绝对时间 T（如 Math.sin(T*2)），不要用帧计数差或挂钟。
 6. 离屏缓存（发光精灵）在 boot 阶段建好，之后只读不写。
 7. 质检项：自检里"同一帧两次截图 byte 完全相同"就是这条守则的守门员。
@@ -121,11 +123,26 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 |---|---|
 | 1920x1080 PNG 截图 + 页面绘制 | 约 70–120 ms/帧（2 workers 时 70–85 ms/帧均摊） |
 | 12 秒 / 360 帧 / 2 workers / chunk 3s | 28.0 s 出片（约 78 ms/帧均摊） |
-| 自检（24 项，含真实无头浏览器与跨会话确定性验证） | 约 15 s |
+| 自检（**31 项**，含真实无头浏览器、跨会话确定性验证与 v0.8 风格注入断言） | 约 60 s |
 
 调参顺序：先降 workers（1–2 个足够，多了内存涨），再降 chunk_s（块小重渲代价低），
 最后才动 crf/preset（crf 17 / preset slow 是质量档；预览可用 crf 20 / preset veryfast）。
 PNG 截图比 JPEG q94 慢但无压缩伪影，本模块按契约固定 PNG。
+
+### 8.1 v0.8：跟随风格包（`window.__STYLE__`）
+
+`--engine web` 以前画风写死深蓝橙，现在是「`style` plan 驱动」：`open_page` 在 `page.goto`
+**之前**用 `add_init_script` 注入 `window.__STYLE__`（主题色板 / 版式 / 字体栈 / 画布 `w·h·fps`），
+`assets/web/engine.js` 与 `film.js` 优先读它、取不到就退回 v0.7 的深蓝橙常量。
+
+| 情形 | 行为 |
+|---|---|
+| `style=None`（pil 路线 / 显式关闭） | **连 `add_init_script` 都不调用**；页面里不存在 `window.__STYLE__`，像素与 v0.7 逐字节一致（自检有断言） |
+| 页面不认 `__STYLE__`（老 `engine.js`） | **当场报错**并给出入口页与 grep 提示，不能"截图能出图"就当通过 |
+| 注入的画布尺寸与页面实际画布不一致 | 报错（页面没按 `panel` 建画布）；`fps` 注入了却与 `window.FPS` 不一致也报错 |
+
+> 为什么要在 goto 之前注入：`engine.js` / `film.js` 是同步 IIFE，加载时就要读到 `__STYLE__`，
+> 页面开始跑之后再注入就晚了。
 
 ## 9. 文字质检 qaText
 

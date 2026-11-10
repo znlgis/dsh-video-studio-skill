@@ -1,9 +1,24 @@
 # -*- coding: utf-8 -*-
-"""webengine.py — 浏览器逐帧渲染引擎（v0.3.0）。
+"""webengine.py — 浏览器逐帧渲染引擎（v0.8.0）。
 
 用无头浏览器（优先 Microsoft Edge，失败回落 Playwright Chromium）打开 Canvas 页面，
 把时间精确跳到「帧号 / FPS」后经 CDP 截 PNG，喂给 ffmpeg 的 image2pipe 编成视频。
 分块并行 + 断点续跑 + 显式缺口检测 + 崩溃重开；同一帧号渲染出的画面完全一致。
+
+v0.8.0：**跟随风格包**。公开入口都多了一组可选参数（style / width / height / fps）：
+    style       stylekit 的 style plan（dict，含 "theme"）或裸主题 dict；None = 不注入
+    width/height 画布尺寸，只接受 16:9 横屏偶数尺寸（竖屏 / 4:3 / 奇数直接 raise）
+    fps         写进注入 payload 的帧率；None = 不约束（页面自己的 window.FPS 为准）
+注入方式：add_init_script 在**页面加载前**写 window.__STYLE__（主题色板 / 版式 / 字体栈 /
+画布 w·h·fps）。assets/web/engine.js 与 film.js 优先读它，取不到就退回 v0.7 深蓝橙常量。
+
+三条硬约束（改这块必须先读）：
+1. **style=None 时一个字节都不注入**：open_page 连 add_init_script 都不调，页面里不存在
+   window.__STYLE__，渲染像素与 v0.7 逐字节一致（自检里有「无 style 页面无 __STYLE__」断言，
+   外部还有拿 git HEAD 老版本渲同一帧比 SHA-256 的证据）。
+2. 注入内容只来自入参：不读环境变量/时间/随机数，JSON 用 sort_keys 序列化，同输入同输出。
+3. 尺寸与帧率 fail-closed：不符合 16:9 横屏偶数就 raise，绝不静默缩放或改帧率
+   （静默改帧率会让分块帧号整体错位，成片音画不同步且门禁看不出来）。
 
 算法改编自 ai-history-film（MIT）video/render.py（逐帧 seek / 分块并行 / 崩溃重开 / 断点续跑），
 代码按本项目 v0.3.0 契约重写；拼接复用 filmkit.concat_segments（绝对路径，v0.2 修过的坑）。
@@ -18,14 +33,18 @@
 
 CLI：
     python webengine.py snap <html> --times 3,9.5 ...     # 截静帧 + 联系表
+    python webengine.py frames <html> --frames 45,270 ... # 指定帧号截 PNG，打印 SHA-256
     python webengine.py cues <html> [--out x.json]        # 导出 cue / 视觉事件（§4.2 schema）
     python webengine.py full <html> --out x.mp4 [--workers 2] [--resume]
     python webengine.py textqa <html> [--from 0 --to 12 --step 0.2]
     python webengine.py selftest                          # 等价于 --selftest
+    # 以上命令都可加风格参数（缺省 = 旧行为）：
+    #   --style magazine | --style work/style.json | --style '{"theme":{...}}'
+    #   --width 1920 --height 1080 [--fps 30]
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.8.0"
 
 import argparse
 import asyncio
@@ -111,6 +130,258 @@ def _load_filmkit():
 
 _K = _load_filmkit()
 FFMPEG = _K.FFMPEG
+
+
+# ---------------------------------------------------------------- 风格注入（v0.8.0 契约）
+# style 的两种合法写法：
+#   ① stylekit 的 style plan（dict，至少含 "theme" 字典；render.py --stage style 落的 work/style.json 就是它）
+#   ② 裸主题字典（stylekit.THEMES[...] / stylekit.theme_of(id)，扁平字段，颜色是 (r,g,b) 元组）
+# 归一化后是**纯数据** payload，经 add_init_script 写成 window.__STYLE__。
+# 这里不做任何"猜"：缺键 / 颜色非法 / 字体族未知一律 raise，不做静默回落（回落等于换个画风还不告诉人）。
+STYLE_VERSION = 1
+
+# family → 浏览器字体栈。键必须与 filmkit.FONT_FAMILIES 的四个族一致，否则网页与 PIL 两条
+# 路线的画风会对不上（同一套 style 在 --engine pil / web 下字体要看起来是一家人）。
+FONT_STACKS = {
+    "sans": '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif',
+    "serif": '"Noto Serif SC", "Source Han Serif SC", SimSun, "Songti SC", serif',
+    "kai": 'KaiTi, "Kaiti SC", STKaiti, "Microsoft YaHei", serif',
+    "round": 'DengXian, "Microsoft YaHei", sans-serif',
+}
+
+# 主题里必须齐全的色板键（stylekit 的 8 套主题全都有；少一个就说明传错东西了）
+THEME_COLOR_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
+                    "accent", "accent2", "good", "bad", "rule")
+
+# 画布只收 16:9 横屏：宽高都必须偶数（H.264 yuv420p 要求），宽高比误差 ≤ 1e-3。
+_ASPECT_TOL = 1e-3
+_MIN_CANVAS = (320, 180)
+
+
+def _validate_canvas(width, height):
+    """校验画布尺寸（16:9 横屏 + 偶数），返回 (int, int)；不合格 raise ValueError。
+
+    为什么 fail-closed：竖屏 9:16 / 4:3 在网页模板里没有对应的安全区与版式，静默接受会渲出
+    "文字贴边、构图塌掉"的片子；而 render.py 的 --engine pil 路线也不支持非 16:9，
+    两边不一致时最容易出现"预览好好的、出片是竖的"。所以上游拒绝之外，这里再拦一道。
+    """
+    try:
+        w = int(width)
+        h = int(height)
+    except (TypeError, ValueError):
+        raise ValueError("画布尺寸必须是整数，收到 %r x %r" % (width, height))
+    if w <= 0 or h <= 0:
+        raise ValueError("画布尺寸必须是正数，收到 %dx%d" % (w, h))
+    if w < _MIN_CANVAS[0] or h < _MIN_CANVAS[1]:
+        raise ValueError("画布太小：%dx%d（下限 %dx%d）" % (w, h, _MIN_CANVAS[0], _MIN_CANVAS[1]))
+    if w < h:
+        raise ValueError(
+            "只支持 16:9 横屏，收到 %dx%d 是竖屏（9:16）。竖屏请在剧本/上游拒绝，"
+            "web 引擎这里不做静默裁切或拉伸。" % (w, h))
+    if w % 2 or h % 2:
+        raise ValueError(
+            "画布宽高必须是偶数（H.264 yuv420p 的子采样要求），收到 %dx%d。"
+            "改成 %dx%d 即可。" % (w, h, w + (w % 2), h + (h % 2)))
+    ratio = w / float(h)
+    if abs(ratio - 16.0 / 9.0) > _ASPECT_TOL:
+        raise ValueError(
+            "只支持 16:9 横屏；%dx%d 的宽高比是 %.4f:1，不是 %.4f:1。"
+            "常见合法尺寸：1920x1080 / 1280x720 / 2560x1440 / 3840x2160。" % (w, h, ratio, 16.0 / 9.0))
+    return w, h
+
+
+def _hex_color(value, where):
+    """把颜色统一成 "#rrggbb"（小程序/网页都认）。支持 (r,g,b) 元组与 "#rrggbb"/"#rgb"。
+
+    非法值直接 raise：颜色写错在画布上表现为"看不见字"，靠肉眼发现的成本远高于这里报错。
+    """
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            rgb = [int(value[0]), int(value[1]), int(value[2])]
+        except (TypeError, ValueError):
+            raise ValueError("%s 的颜色不是三个整数：%r" % (where, value))
+        if min(rgb) < 0 or max(rgb) > 255:
+            raise ValueError("%s 的颜色分量必须在 0–255：%r" % (where, value))
+        return "#%02x%02x%02x" % (rgb[0], rgb[1], rgb[2])
+    if isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+            return s.lower()
+        if re.fullmatch(r"#[0-9a-fA-F]{3}", s):
+            return "#" + "".join(ch * 2 for ch in s[1:].lower())
+    raise ValueError("%s 必须是 (r,g,b) 或 \"#rrggbb\"，收到 %r" % (where, value))
+
+
+def _luma(color_hex):
+    """相对亮度（0–1，sRGB 线性化前的近似即可）：只用来判断"深色/浅色主题"。"""
+    s = str(color_hex).lstrip("#")
+    r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _style_theme_dict(style):
+    """从两种合法写法里取出「主题 dict」，并返回 (theme, plan_extra)。
+
+    plan_extra 只在写法①里非空（style / style_name / legacy / layout_default / chapter_layout）。
+    """
+    if not isinstance(style, dict):
+        raise TypeError("style 必须是 dict（stylekit 的 style plan 或裸主题 dict）或 None，收到 %r"
+                        % (type(style).__name__,))
+    theme = style.get("theme")
+    if isinstance(theme, dict):
+        extra = {
+            "style": style.get("style"),
+            "style_name": style.get("style_name"),
+            "legacy": style.get("legacy"),
+            "layout_default": style.get("layout_default"),
+            "chapter_layout": style.get("chapter_layout"),
+        }
+        return theme, extra
+    # 写法②：裸主题 dict（必须有 id/bg 之类的字段）
+    if "bg" in style or "ink" in style:
+        return style, {"style": style.get("id"), "style_name": style.get("label"),
+                       "legacy": None, "layout_default": None, "chapter_layout": None}
+    raise ValueError(
+        "style 既不是 style plan（没有 \"theme\" 字典）也不是裸主题 dict（没有 bg / ink）。"
+        "可用写法：stylekit 的 plan（work/style.json）或 stylekit.THEMES[...]。收到键：%s"
+        % (sorted(style)[:12],))
+
+
+def normalize_style(style, *, width=W, height=H, fps=None):
+    """把 style 归一成注入用 payload；style=None 返回 None（= 完全不注入）。
+
+    payload 结构（window.__STYLE__，字段名即契约；改动要同步 assets/web/*.js）：
+        version / style / style_name / theme_id / theme_label / legacy / dark
+        canvas      {w, h, aspect, fps}      fps=None 时写 null（页面保留自己的 window.FPS）
+        theme       {bg,bg2,surface,ink,muted,dim,accent,accent2,good,bad,rule}  # "#rrggbb"
+        typography  {family, font_stack, scale, tracking, line_gap}
+        layout      {default, chapter}
+        card        {radius, fill_a, outline_a, pad, h, gap}
+        material    {vignette, grain, grain_freq, texture, texture_alpha, vignette_tint}
+        motion      {ease, entrance_dx, entrance_dy, push, item_stagger, transition}
+        hud         "chip-left" | "corner-line" | "none"
+        safe        {bias}
+    """
+    if style is None:
+        return None
+    w, h = _validate_canvas(width, height)
+    theme, extra = _style_theme_dict(style)
+
+    colors = {}
+    for key in THEME_COLOR_KEYS:
+        if key not in theme:
+            raise ValueError("style 的主题缺少颜色 %r（需要齐全：%s）"
+                             % (key, ", ".join(THEME_COLOR_KEYS)))
+        colors[key] = _hex_color(theme[key], "theme.%s" % key)
+
+    family = str(theme.get("family") or "sans")
+    if family not in FONT_STACKS:
+        raise ValueError("style 的字体族 %r 不认识；可用：%s（与 filmkit.FONT_FAMILIES 对齐）"
+                         % (family, " / ".join(sorted(FONT_STACKS))))
+
+    layout_default = extra.get("layout_default") or theme.get("layout") or "left-stack"
+    chapter_layout = extra.get("chapter_layout") if isinstance(extra.get("chapter_layout"), dict) else {}
+
+    def _num(v, default):
+        try:
+            return float(v) if v is not None else float(default)
+        except (TypeError, ValueError):
+            raise ValueError("style 字段 %r 不是数字：%r" % (v, v))
+
+    scale = {}
+    raw_scale = theme.get("scale") if isinstance(theme.get("scale"), dict) else {}
+    for k, v in raw_scale.items():
+        if isinstance(v, (list, tuple)) and len(v) >= 2:
+            scale[str(k)] = [int(v[0]), str(v[1])]
+        elif isinstance(v, (int, float)):
+            scale[str(k)] = [int(v), "reg"]
+        else:
+            raise ValueError("style.typography.scale.%s 必须是 (字号, 字重)，收到 %r" % (k, v))
+
+    card = {}
+    raw_card = theme.get("card") if isinstance(theme.get("card"), dict) else {}
+    for k, v in raw_card.items():
+        if isinstance(v, (int, float)):
+            card[str(k)] = float(v) if isinstance(v, float) and not float(v).is_integer() else int(v)
+        else:
+            raise ValueError("style.layout.card.%s 必须是数字，收到 %r" % (k, v))
+
+    qa = theme.get("qa") if isinstance(theme.get("qa"), dict) else {}
+    if "dark" in qa:
+        dark = bool(qa["dark"])
+    else:
+        dark = _luma(colors["bg"]) < 0.5
+
+    fps_val = None
+    if fps is not None:
+        try:
+            fps_val = float(fps)
+        except (TypeError, ValueError):
+            raise ValueError("fps 必须是数字，收到 %r" % (fps,))
+        if not math.isfinite(fps_val) or fps_val <= 0:
+            raise ValueError("fps 必须是正数，收到 %r" % (fps,))
+
+    hud = str(theme.get("hud") or "none")
+    if hud not in ("chip-left", "corner-line", "none"):
+        raise ValueError("style 的 hud 装帧 %r 不认识；可用：chip-left / corner-line / none" % (hud,))
+
+    payload = {
+        "version": STYLE_VERSION,
+        "style": extra.get("style") or theme.get("id"),
+        "style_name": extra.get("style_name") or theme.get("label") or "",
+        "theme_id": theme.get("id") or extra.get("style") or "",
+        "theme_label": theme.get("label") or extra.get("style_name") or "",
+        "legacy": bool(extra.get("legacy")) if extra.get("legacy") is not None else False,
+        "dark": bool(dark),
+        "canvas": {"w": w, "h": h, "aspect": "16:9", "fps": fps_val},
+        "theme": colors,
+        "typography": {
+            "family": family,
+            "font_stack": FONT_STACKS[family],
+            "scale": scale,
+            "tracking": _num(theme.get("tracking"), 0.0),
+            "line_gap": _num(theme.get("line_gap"), 1.30),
+        },
+        "layout": {"default": str(layout_default),
+                   "chapter": {str(k): str(v) for k, v in chapter_layout.items()}},
+        "card": card,
+        "material": {
+            "vignette": _num(theme.get("vignette"), 0.0),
+            "grain": _num(theme.get("grain"), 0.0),
+            "grain_freq": _num(theme.get("grain_freq"), 0.0),
+            "texture": str(theme.get("texture") or "none"),
+            "texture_alpha": _num(theme.get("texture_alpha"), 0.0),
+            "vignette_tint": _hex_color(theme.get("vignette_tint", (0, 0, 0)), "material.vignette_tint")
+            if "vignette_tint" in theme else "#000000",
+        },
+        "motion": {
+            "ease": str(theme.get("ease") or "out3"),
+            "entrance_dx": int(_num(theme.get("entrance_dx"), 0)),
+            "entrance_dy": int(_num(theme.get("entrance_dy"), 0)),
+            "push": _num(theme.get("push"), 0.0),
+            "item_stagger": _num(theme.get("item_stagger"), 0.0),
+            "transition": str(theme.get("transition") or "black"),
+        },
+        "hud": hud,
+        "safe": {"bias": int(_num(theme.get("safe_bias"), 0))},
+    }
+    return payload
+
+
+def style_sha256(payload) -> str:
+    """注入 payload 的稳定指纹（sort_keys + 紧凑分隔符）：同 style 同尺寸 → 同指纹。
+
+    用途：① 日志里一眼看出"这次渲的是不是同一套画风"；② 分块目录名后缀——换了 style
+    就不能复用旧块（旧块是旧画风，混进成片就是花片）。
+    """
+    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _style_js(payload) -> str:
+    """生成 add_init_script 的脚本体：**纯 JSON 赋值**，页面里不做任何派生计算。"""
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "window.__STYLE__ = %s;" % blob
 
 
 # ---------------------------------------------------------------- 页面 / URL
@@ -212,12 +483,12 @@ async def page_number(page, key: str, *, default=None) -> float:
     return val
 
 
-async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None,
-                    ready_timeout=300_000):
+async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
+                    ready_timeout=300_000, style=None, fps=None):
     """打开页面并等到 window.ready === true，返回 (browser, page, cdp)。
 
     浏览器优先 Microsoft Edge（channel="msedge"），启动失败回落 Playwright 自带的 Chromium；
-    视口固定 1920x1080 / devicePixelRatio=1，截图与画布 1:1 像素。
+    视口按 width x height（devicePixelRatio=1），截图与画布 1:1 像素。
 
     v0.4.0 起多了两道**可操作**的契约检查（以前缺 window.ready / renderFrame 时只会
     抛 Playwright 的裸超时异常，看不出是页面脚本挂了还是没调 FK.boot()）：
@@ -225,8 +496,15 @@ async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None
       2. window.renderFrame 不是函数 → 直接报错（不再逐帧重试 5 次才发现）。
     确定性：deterministic=True（或环境变量 WEBENGINE_DETERMINISTIC=1）走软件光栅，
     跨浏览器会话 byte 级可复现；缺省走 GPU，快约 22%。
+
+    v0.8.0 风格：style 非 None 时在 page.goto **之前** add_init_script 注入 window.__STYLE__；
+    style=None 时**不调用 add_init_script**，页面里不存在 __STYLE__（旧行为逐字节不变）。
+    width/height 一律先过 _validate_canvas（16:9 横屏偶数，否则 raise）；fps 只用于写进
+    payload（None = 不让 payload 约束帧率，页面 window.FPS 才是真值）。
     """
     global _BROWSER_KIND
+    width, height = _validate_canvas(width, height)
+    payload = normalize_style(style, width=width, height=height, fps=fps) if style is not None else None
     browser = None
     args = browser_args(deterministic)
     try:
@@ -260,6 +538,16 @@ async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
+        if payload is not None:
+            # 必须在 goto 之前：engine.js/film.js 是同步 IIFE，加载时就要读到 __STYLE__
+            await page.add_init_script(script=_style_js(payload))
+            if log:
+                print("[样式] %s / %s / %dx%d / 字体族=%s / sha=%s"
+                      % (payload.get("style") or payload.get("theme_id"),
+                         payload.get("style_name") or payload.get("theme_label"),
+                         payload["canvas"]["w"], payload["canvas"]["h"],
+                         payload["typography"]["family"], style_sha256(payload)[:12]),
+                      flush=True)
         await page.goto(url, wait_until="domcontentloaded", timeout=180_000)
         try:
             await page.wait_for_function("window.ready === true", timeout=int(ready_timeout),
@@ -283,6 +571,33 @@ async def open_page(pw, url, width=W, height=1080, log=False, deterministic=None
                 "页面脚本顺序为 engine.js → film.js → qa_text.js。"
                 % (url, _format_contract(contract))
             )
+        if payload is not None:
+            # 注入的契约自检：payload 说 16:9 + w/h，页面就必须真的按它建画布；
+            # 页面没照做（老页面不认 __STYLE__）要当场报错，不能拿"截图能出图"当通过。
+            got = await page.evaluate(
+                "() => ({hasStyle: typeof window.__STYLE__ === 'object' && window.__STYLE__ !== null,"
+                " applied: !!(window.FK && window.FK.style),"
+                " w: window.FK ? window.FK.W : null, h: window.FK ? window.FK.H : null,"
+                " fps: window.FPS})")
+            want_w, want_h = payload["canvas"]["w"], payload["canvas"]["h"]
+            # 两个条件缺一不可：__STYLE__ 在（注入成功）+ engine.js 真的读了它（FK.style 非空）。
+            # 只查前者会漏掉"老 engine.js 静默忽略 __STYLE__、照样渲成深蓝橙"这种假通过。
+            if not got.get("hasStyle") or not got.get("applied"):
+                raise RuntimeError(
+                    "页面 %s 的 engine.js 不认 window.__STYLE__（FK.style 为空；注入后画风不会变）。"
+                    "风格注入要 engine.js v0.8.0 起才认；把新版 assets/web/ 一起拷过去，"
+                    "或确认页面脚本顺序是 engine.js → film.js → qa_text.js。" % url)
+            if got.get("w") != want_w or got.get("h") != want_h:
+                raise RuntimeError(
+                    "页面画布 %sx%s 与注入的 %dx%d 不一致：页面没按 __STYLE__.canvas 建画布"
+                    "（见 assets/web/engine.js 的 ST_CANVAS 段）。" % (got.get("w"), got.get("h"), want_w, want_h))
+            if payload["canvas"]["fps"] is not None:
+                page_fps = float(got.get("fps") or 0)
+                if abs(page_fps - float(payload["canvas"]["fps"])) > 1e-6:
+                    raise RuntimeError(
+                        "页面 window.FPS=%s 与注入的 __STYLE__.canvas.fps=%s 不一致："
+                        "帧率必须来自同一份 timeline，不能靠 style 猜。"
+                        % (page_fps, payload["canvas"]["fps"]))
     except Exception:
         try:
             await browser.close()
@@ -300,14 +615,15 @@ async def _grab(page, cdp, f: int) -> bytes:
     return base64.b64decode(reply["data"])
 
 
-async def _page_meta_async(html_path, deterministic=None):
+async def _page_meta_async(html_path, deterministic=None, style=None, width=W, height=H, fps=None):
     url = _to_url(html_path)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url, deterministic=deterministic)
+        browser, page, _cdp = await open_page(pw, url, width, height, deterministic=deterministic,
+                                             style=style, fps=fps)
         try:
             duration = await page_number(page, "DURATION")
-            fps = await page_number(page, "FPS", default=FPS)
-            return duration, fps
+            got_fps = await page_number(page, "FPS", default=FPS)
+            return duration, got_fps
         finally:
             try:
                 await browser.close()
@@ -315,15 +631,23 @@ async def _page_meta_async(html_path, deterministic=None):
                 pass
 
 
-def page_meta(html_path):
-    """打开一次页面，读回 (DURATION, FPS)。"""
+def page_meta(html_path, *, style=None, width=W, height=H, fps=None):
+    """打开一次页面，读回 (DURATION, FPS)。
+
+    v0.8.0：style 非 None 时按注入后的页面读（注入可能改画布尺寸，帧率仍以页面为准，
+    除非调用方显式传 fps 并在 payload 里断言）。
+    """
     _setup_stdout()
-    return asyncio.run(_page_meta_async(html_path))
+    return asyncio.run(_page_meta_async(html_path, style=style, width=width, height=height, fps=fps))
 
 
 # ---------------------------------------------------------------- snap
-def snap(html_path, times, out_dir, tag="", deterministic=None) -> list:
-    """截取指定时刻的静帧（PNG）；多帧时额外拼一张联系表。返回帧 PNG 路径列表。"""
+def snap(html_path, times, out_dir, tag="", deterministic=None, *, style=None,
+         width=W, height=H, fps=None) -> list:
+    """截取指定时刻的静帧（PNG）；多帧时额外拼一张联系表。返回帧 PNG 路径列表。
+
+    v0.8.0：style/width/height/fps 透传给 open_page（缺省 = 旧行为：1920x1080、不注入）。
+    """
     _setup_stdout()
     tlist = [float(t) for t in times]
     if not tlist:
@@ -332,14 +656,17 @@ def snap(html_path, times, out_dir, tag="", deterministic=None) -> list:
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(_snap_async(html_path, tlist, out, str(tag), deterministic))
+    return asyncio.run(_snap_async(html_path, tlist, out, str(tag), deterministic,
+                                   style=style, width=width, height=height, fps=fps))
 
 
-async def _snap_async(html_path, times, out: Path, tag: str, deterministic=None) -> list:
+async def _snap_async(html_path, times, out: Path, tag: str, deterministic=None, *,
+                      style=None, width=W, height=H, fps=None) -> list:
     url = _to_url(html_path)
     paths = []
     async with _playwright()() as pw:
-        browser, page, cdp = await open_page(pw, url, W, H, deterministic=deterministic)
+        browser, page, cdp = await open_page(pw, url, width, height, deterministic=deterministic,
+                                             style=style, fps=fps)
         try:
             fps = await page_number(page, "FPS", default=FPS)
             for t in times:
@@ -401,16 +728,23 @@ def _norm_events(raw) -> list:
     return out
 
 
-def export_cues(html_path, deterministic=None) -> dict:
-    """导出页面登记的 cue / 视觉事件，返回可直接写 work/cues.json 的字典（契约 §4.2）。"""
+def export_cues(html_path, deterministic=None, *, style=None, width=W, height=H, fps=None) -> dict:
+    """导出页面登记的 cue / 视觉事件，返回可直接写 work/cues.json 的字典（契约 §4.2）。
+
+    v0.8.0：width/height 写进返回头（打完 style 注入后画布可能不是 1080p），其余照旧。
+    """
     _setup_stdout()
-    return asyncio.run(_export_cues_async(html_path, deterministic))
+    return asyncio.run(_export_cues_async(html_path, deterministic,
+                                          style=style, width=width, height=height, fps=fps))
 
 
-async def _export_cues_async(html_path, deterministic=None) -> dict:
+async def _export_cues_async(html_path, deterministic=None, *, style=None,
+                             width=W, height=H, fps=None) -> dict:
     url = _to_url(html_path)
+    width, height = _validate_canvas(width, height)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
+        browser, page, _cdp = await open_page(pw, url, width, height, deterministic=deterministic,
+                                              style=style, fps=fps)
         try:
             duration = await page_number(page, "DURATION")
             fps = await page_number(page, "FPS", default=FPS)
@@ -425,8 +759,8 @@ async def _export_cues_async(html_path, deterministic=None) -> dict:
         "version": 1,
         "duration": round(duration, 3),
         "fps": fps,
-        "width": W,
-        "height": H,
+        "width": width,
+        "height": height,
         "cues": _norm_cue_list(cues, "web"),
         "events": _norm_events(events),
     }
@@ -447,9 +781,27 @@ def _encoder_cmd(dst, fps: float, crf: int = 17, preset: str = "slow") -> list:
     ]
 
 
-def _chunk_dir(out_mp4, from_s: float, to_s: float) -> Path:
+def _chunk_dir(out_mp4, from_s: float, to_s: float, token: str = "") -> Path:
+    """块目录：<stem>_<from>-<to>[_<token>]。
+
+    token 只在"画布尺寸不是 1920x1080 或注入了 style"时非空——不同画风/尺寸的块不能混用，
+    否则断点续跑会把旧画风的块拼进新片（花片）。token 为空时目录名与 v0.7 完全一致。
+    """
     out = Path(out_mp4)
-    return out.parent / "chunks" / ("%s_%g-%g" % (out.stem, float(from_s), float(to_s)))
+    name = "%s_%g-%g" % (out.stem, float(from_s), float(to_s))
+    if token:
+        name += "_" + token
+    return out.parent / "chunks" / name
+
+
+def _style_token(payload, width: int, height: int) -> str:
+    """分块目录的风格后缀；默认尺寸 + 无 style 时返回空串（保持 v0.7 的目录名）。"""
+    if payload is None and (int(width), int(height)) == (W, H):
+        return ""
+    parts = ["w%dh%d" % (int(width), int(height))]
+    if payload is not None:
+        parts.append("s" + style_sha256(payload)[:12])
+    return "_".join(parts)
 
 
 def _plan_chunks(chunk_dir, f0: int, f1: int, step: int) -> list:
@@ -512,7 +864,8 @@ def _check_chunk_durations(chunks, fps: float) -> None:
 class _Browser:
     """一个无头浏览器会话；卡住/崩溃时自动关掉重开（逐帧无状态，从同一帧继续即可）。"""
 
-    def __init__(self, pw, url, width=W, height=1080, k=0, log=False, deterministic=None):
+    def __init__(self, pw, url, width=W, height=1080, k=0, log=False, deterministic=None,
+                 style=None, fps=None):
         self.pw = pw
         self.url = url
         self.width = width
@@ -520,6 +873,8 @@ class _Browser:
         self.k = k
         self.log = log
         self.deterministic = deterministic
+        self.style = style
+        self.fps = fps
         self.browser = None
         self.page = None
         self.cdp = None
@@ -528,7 +883,7 @@ class _Browser:
         await self.close()
         self.browser, self.page, self.cdp = await open_page(
             self.pw, self.url, self.width, self.height, log=self.log,
-            deterministic=self.deterministic,
+            deterministic=self.deterministic, style=self.style, fps=self.fps,
         )
 
     async def close(self):
@@ -622,9 +977,10 @@ async def _write_chunk(br: _Browser, f0: int, f1: int, dst: Path, fps: float,
 
 
 async def _worker(k: int, queue, state: dict, url: str, fps: float, crf: int, preset: str,
-            deterministic=None) -> None:
+            deterministic=None, style=None, width=W, height=H) -> None:
     async with _playwright()() as pw:
-        br = _Browser(pw, url, W, H, k=k, deterministic=deterministic)
+        br = _Browser(pw, url, width, height, k=k, deterministic=deterministic,
+                      style=style, fps=fps)
         try:
             while True:
                 try:
@@ -639,30 +995,38 @@ async def _worker(k: int, queue, state: dict, url: str, fps: float, crf: int, pr
 # ---------------------------------------------------------------- render_full
 def render_full(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
                 resume=True, from_s=0.0, to_s=None, crf=17, preset="slow",
-                deterministic=None) -> Path:
+                deterministic=None, style=None, width=W, height=H, fps=None) -> Path:
     """并行渲染整片（或一段）→ mp4。返回成片绝对路径。
 
     duration 传 None 时读页面 window.DURATION；传数字时与页面对不上会直接 raise。
     deterministic=True（或 WEBENGINE_DETERMINISTIC=1）→ 软件光栅，跨会话 byte 可复现。
+
+    v0.8.0：style 非 None 时整片跟随风格包（每个 worker 都在页面加载前注入同一份
+    __STYLE__），块目录名会带尺寸 + style 指纹后缀，**换风格不会复用旧块**；
+    width/height 只收 16:9 横屏偶数（_validate_canvas），fps 非 None 时要求页面帧率一致。
     """
     _setup_stdout()
     return asyncio.run(_render_full_async(
         html_path, out_mp4, duration, workers=workers, chunk_s=chunk_s, resume=resume,
         from_s=from_s, to_s=to_s, crf=crf, preset=preset, deterministic=deterministic,
+        style=style, width=width, height=height, fps=fps,
     ))
 
 
 async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
                              resume=True, from_s=0.0, to_s=None, crf=17, preset="slow",
-                             deterministic=None) -> Path:
+                             deterministic=None, style=None, width=W, height=H, fps=None) -> Path:
     url = _to_url(html_path)
     out = Path(out_mp4).expanduser()
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
+    width, height = _validate_canvas(width, height)
+    payload = normalize_style(style, width=width, height=height, fps=fps) if style is not None else None
 
     # 先问页面要长度与帧率：这是块切分与成片校验的唯一真值来源
-    page_dur, fps = await _page_meta_async(url, deterministic=deterministic)
+    page_dur, fps_page = await _page_meta_async(url, deterministic=deterministic,
+                                                style=style, width=width, height=height, fps=fps)
     if duration is None:
         duration = page_dur
     duration = float(duration)
@@ -671,6 +1035,7 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
             "页面 window.DURATION=%.3f 与传入 duration=%.3f 不一致（先对齐剧本时长）"
             % (page_dur, duration)
         )
+    fps = fps_page
     from_s = float(from_s)
     to_s = duration if to_s is None else float(to_s)
     if from_s < 0 or to_s <= from_s or to_s > duration + 1e-6:
@@ -679,7 +1044,7 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
     f0 = int(round(from_s * fps))
     f1 = int(round(to_s * fps))
     step = max(1, int(round(float(chunk_s) * fps)))
-    chunk_dir = _chunk_dir(out, from_s, to_s)
+    chunk_dir = _chunk_dir(out, from_s, to_s, _style_token(payload, width, height))
     chunk_dir.mkdir(parents=True, exist_ok=True)
     chunks = _plan_chunks(chunk_dir, f0, f1, step)
     if not resume:
@@ -689,9 +1054,13 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
                     victim.unlink()
 
     todo = [c for c in chunks if not Path(c[2]).is_file()]
+    style_note = ""
+    if payload is not None:
+        style_note = "，style=%s（sha=%s）" % (payload.get("style") or payload.get("theme_id"),
+                                              style_sha256(payload)[:12])
     print(
-        "[full] %s\n[full] %s fps，渲染 %.2f–%.2f s（%d 帧），块 %.1fs → %d 块，work=%s"
-        % (url, ("%g" % fps), from_s, to_s, f1 - f0, float(chunk_s), len(chunks), chunk_dir),
+        "[full] %s\n[full] %s fps，渲染 %.2f–%.2f s（%d 帧），块 %.1fs → %d 块%s，work=%s"
+        % (url, ("%g" % fps), from_s, to_s, f1 - f0, float(chunk_s), len(chunks), style_note, chunk_dir),
         flush=True,
     )
     if todo:
@@ -703,7 +1072,8 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
         nw = max(1, min(int(workers), len(todo)))
         tasks = [
             asyncio.create_task(_worker(k, queue, state, url, fps, int(crf), str(preset),
-                                        deterministic=deterministic))
+                                        deterministic=deterministic, style=style,
+                                        width=width, height=height))
             for k in range(nw)
         ]
         try:
@@ -733,16 +1103,24 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
 
 
 # ---------------------------------------------------------------- 浏览器端文字质检
-def qa_text(html_path, t0=0.0, t1=None, step=0.2, deterministic=None) -> dict:
-    """浏览器端文字质检：重叠 / 出画 / 一闪而过 / 从没露面（渲染期间会临时改页面状态）。"""
+def qa_text(html_path, t0=0.0, t1=None, step=0.2, deterministic=None, *,
+            style=None, width=W, height=H, fps=None) -> dict:
+    """浏览器端文字质检：重叠 / 出画 / 一闪而过 / 从没露面（渲染期间会临时改页面状态）。
+
+    v0.8.0：跟着 style 一起检查——换了浅色主题/非 1080p 画布后，出画与重叠的判据必须用
+    同一份画布尺寸（qa_text.js 读 FK.W / FK.H），否则"检查通过"只是没在检查新尺寸。
+    """
     _setup_stdout()
-    return asyncio.run(_qa_text_async(html_path, t0, t1, step, deterministic))
+    return asyncio.run(_qa_text_async(html_path, t0, t1, step, deterministic,
+                                      style=style, width=width, height=height, fps=fps))
 
 
-async def _qa_text_async(html_path, t0, t1, step, deterministic=None) -> dict:
+async def _qa_text_async(html_path, t0, t1, step, deterministic=None, *,
+                         style=None, width=W, height=H, fps=None) -> dict:
     url = _to_url(html_path)
     async with _playwright()() as pw:
-        browser, page, _cdp = await open_page(pw, url, W, H, deterministic=deterministic)
+        browser, page, _cdp = await open_page(pw, url, width, height, deterministic=deterministic,
+                                              style=style, fps=fps)
         try:
             if t1 is None:
                 t1 = await page_number(page, "DURATION")
@@ -757,6 +1135,59 @@ async def _qa_text_async(html_path, t0, t1, step, deterministic=None) -> dict:
     if not isinstance(result, dict):
         raise RuntimeError("页面 qaText 返回值不是对象：%r" % (result,))
     return result
+
+
+# ---------------------------------------------------------------- 指定帧号截 PNG（v0.8.0）
+def render_frames(html_path, frames, out_dir=None, *, tag="", style=None, width=W, height=H,
+                  fps=None, deterministic=None) -> list:
+    """把**指定帧号**渲成 PNG，返回 [{"f","path","sha256","bytes","fps"}]（不编码视频）。
+
+    这是 v0.8.0 给 render.py / 自检 / 人工验收用的最小确定性入口：
+    帧号 → 时间 = f / FPS（与 render_full 同一口径），不存在"按播放时间截屏"。
+    style=None 时不注入 __STYLE__（像素与 v0.7 一致）；传 style 时整页跟随风格包。
+    out_dir 缺省 ./frames；文件名 <tag>f<帧号:05d>.png。
+    """
+    _setup_stdout()
+    flist = [int(f) for f in frames]
+    if not flist:
+        raise ValueError("render_frames 至少需要 1 个帧号（frames 为空）")
+    if any(f < 0 for f in flist):
+        raise ValueError("帧号不能为负：%r" % (flist,))
+    out = Path(out_dir).expanduser() if out_dir else (Path.cwd() / "frames")
+    if not out.is_absolute():
+        out = (Path.cwd() / out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    return asyncio.run(_render_frames_async(html_path, flist, out, str(tag), style,
+                                            width, height, fps, deterministic))
+
+
+async def _render_frames_async(html_path, frames, out: Path, tag: str, style=None,
+                               width=W, height=H, fps=None, deterministic=None) -> list:
+    url = _to_url(html_path)
+    width, height = _validate_canvas(width, height)
+    results = []
+    async with _playwright()() as pw:
+        browser, page, cdp = await open_page(pw, url, width, height, deterministic=deterministic,
+                                             style=style, fps=fps)
+        try:
+            page_fps = await page_number(page, "FPS", default=FPS)
+            for f in frames:
+                png = await _grab(page, cdp, f)
+                path = out / ("%sf%05d.png" % (tag, int(f)))
+                path.write_bytes(png)
+                results.append({
+                    "f": int(f),
+                    "path": str(path),
+                    "sha256": hashlib.sha256(png).hexdigest(),
+                    "bytes": len(png),
+                    "fps": page_fps,
+                })
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    return results
 
 
 # ---------------------------------------------------------------- 自检辅助
@@ -774,6 +1205,17 @@ def _png_stats(data: bytes) -> dict:
             top = i
             break
     return {"mean": round(mean, 2), "max": top, "w": im.width, "h": im.height}
+
+
+def _png_size(data):
+    """PNG 的像素尺寸 (w, h)；不是 PNG / 空数据返回 None（自检断言用，不抛异常）。"""
+    if not data:
+        return None
+    try:
+        st = _png_stats(data)
+        return (st["w"], st["h"])
+    except Exception:                       # noqa: BLE001
+        return None
 
 
 def _encode_pngs(pngs, dst, fps: float, crf: int = 17, preset: str = "slow") -> Path:
@@ -889,6 +1331,85 @@ async def _open_page_expect_error(html_path, ready_timeout=3000) -> str:
         raise RuntimeError("坏页面居然没有报错：%s" % html_path)
 
 
+# ---------------------------------------------------------------- 自检：风格注入（v0.8.0）
+# 自检用的主题故意选"浅色 + 衬线 + 右对齐 + 四角线框"：与模板默认的深蓝橙 + 居中 + 无框
+# 在每一次可观测维度上都不同，任何一处没跟着 __STYLE__ 走都会暴露成"两张图一样"。
+_SELFTEST_STYLE = {
+    "id": "selftest-light", "label": "自检浅色",
+    "bg": (250, 246, 238), "bg2": (236, 228, 214), "surface": (255, 252, 246),
+    "ink": (28, 26, 24), "muted": (88, 82, 74), "dim": (112, 104, 94),
+    "accent": (176, 48, 40), "accent2": (38, 86, 128),
+    "good": (30, 110, 72), "bad": (160, 36, 32), "rule": (28, 26, 24),
+    "vignette": 0.10, "vignette_tint": (214, 204, 186),
+    "grain": 3.0, "grain_freq": 0.27, "texture": "paper", "texture_alpha": 0.03,
+    "family": "serif",
+    "scale": {"display": (92, "bold"), "heading": (60, "bold")},
+    "line_gap": 1.34, "tracking": 2.0,
+    "layout": "split-right",
+    "card": {"radius": 8, "fill_a": 26, "outline_a": 40, "pad": 30, "h": 92, "gap": 112},
+    "safe_bias": -8,
+    "ease": "out5", "entrance_dx": 18, "entrance_dy": 20,
+    "push": 0.06, "item_stagger": 0.38, "transition": "wash",
+    "hud": "corner-line",
+    "qa": {"luma_max": 0.045, "flicker_thresh": 6.0, "dark": False},
+}
+
+
+async def _selftest_style_probe() -> dict:
+    """采集风格注入的三组证据（每个浏览器会话都独立，避免状态串味）。
+
+    ① 无 style：页面里不应有 __STYLE__、画布 1920x1080、同帧两次 byte 相同；
+    ② 有 style：__STYLE__ / 字体栈 / 画布生效、同帧两次 byte 相同、与 ① 同帧不同图；
+    ③ 1280x720 + style：画布与截图像素尺寸跟着变（证明确实不是"写死 1080p 假装支持"）。
+    """
+    url = _to_url(DEFAULT_HTML)
+    out = {}
+    async with _playwright()() as pw:
+        browser, page, cdp = await open_page(pw, url, W, H)
+        try:
+            out["plain_has_style"] = await page.evaluate(
+                "() => typeof window.__STYLE__ !== 'undefined'")
+            out["plain_canvas"] = await page.evaluate(
+                "() => [document.getElementById('stage').width, document.getElementById('stage').height]")
+            out["plain_a"] = await _grab(page, cdp, 45)
+            out["plain_b"] = await _grab(page, cdp, 45)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+        browser, page, cdp = await open_page(pw, url, W, H, style=_SELFTEST_STYLE)
+        try:
+            out["has_style"] = await page.evaluate(
+                "() => typeof window.__STYLE__ === 'object' && window.__STYLE__ !== null")
+            out["style_ink"] = await page.evaluate(
+                "() => window.__STYLE__ && window.__STYLE__.theme ? window.__STYLE__.theme.ink : null")
+            out["style_family"] = await page.evaluate(
+                "() => window.FK ? window.FK.FAMILY : null")
+            out["style_canvas"] = await page.evaluate(
+                "() => [document.getElementById('stage').width, document.getElementById('stage').height]")
+            out["style_a"] = await _grab(page, cdp, 45)
+            out["style_b"] = await _grab(page, cdp, 45)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+        browser, page, cdp = await open_page(pw, url, 1280, 720, style=_SELFTEST_STYLE)
+        try:
+            out["small_canvas"] = await page.evaluate(
+                "() => [document.getElementById('stage').width, document.getElementById('stage').height]")
+            out["small_png"] = await _grab(page, cdp, 45)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    return out
+
+
 # ---------------------------------------------------------------- 自检
 def selftest() -> int:
     """不联网自检：页面契约、确定性（同帧截图 byte 相同）、cue 递增、文字质检、编码链路。"""
@@ -902,7 +1423,7 @@ def selftest() -> int:
         print(("[PASS] " if ok else "[FAIL] ") + title + (("  —— " + detail) if detail else ""), flush=True)
 
     print("=" * 78)
-    print("webengine.py --selftest（v0.3.0）：无头浏览器逐帧渲染 / 确定性 / cue / 文字质检")
+    print("webengine.py --selftest（v0.8.0）：无头浏览器逐帧渲染 / 确定性 / cue / 文字质检 / 风格注入")
     print("=" * 78)
 
     names = ("index.html", "engine.js", "film.js", "style.css", "qa_text.js")
@@ -1089,6 +1610,104 @@ def selftest() -> int:
         check("不同帧渲染结果不同", bool(probe.get("diff_frames")),
               "f=45 与 f=46 的 PNG 不同" if probe.get("diff_frames") else (perr or "相邻帧截图相同（时间码没变？）"))
 
+        # ---- v0.8.0：画布尺寸 / 风格注入 ----
+        good_sizes, bad_sizes, portrait_msg = [], [], ""
+        for w_, h_ in ((1920, 1080), (1280, 720), (3840, 2160)):
+            try:
+                _validate_canvas(w_, h_)
+                good_sizes.append("%dx%d" % (w_, h_))
+            except Exception as exc:            # noqa: BLE001
+                good_sizes.append("意外拒绝 %dx%d（%s）" % (w_, h_, exc))
+        # 竖屏单独测：报错必须点名"竖屏"（用户最常踩的就是 9:16），不能被后面的用例覆盖
+        try:
+            _validate_canvas(1080, 1920)
+            bad_sizes.append("1080x1920 没被拒")
+        except ValueError as exc:
+            if "竖屏" not in str(exc):
+                bad_sizes.append("竖屏报错没点名竖屏：%s" % str(exc)[:80])
+            else:
+                portrait_msg = str(exc)
+        for w_, h_ in ((1920, 1200), (1921, 1080), (0, 1080)):
+            try:
+                _validate_canvas(w_, h_)
+                bad_sizes.append("%dx%d 没被拒" % (w_, h_))
+            except ValueError:
+                pass
+        check("画布只收 16:9 横屏偶数尺寸（竖屏/4:3/奇数/非正数 fail-closed）",
+              (not bad_sizes) and len(good_sizes) == 3 and "竖屏" in portrait_msg,
+              "；".join(bad_sizes) or ("合法：%s；竖屏报错点名竖屏" % "、".join(good_sizes)))
+
+        style_norm, style_lines = {}, []
+        try:
+            style_norm["none"] = normalize_style(None)
+        except Exception as exc:                # noqa: BLE001
+            style_lines.append("None 报错：%s" % exc)
+        try:
+            style_norm["plan"] = normalize_style({
+                "style": "selftest", "style_name": "自检",
+                "theme": dict(_SELFTEST_STYLE), "layout_default": "split-right"})
+        except Exception as exc:                # noqa: BLE001
+            style_lines.append("style plan 报错：%s" % exc)
+        try:
+            style_norm["theme"] = normalize_style(dict(_SELFTEST_STYLE))
+        except Exception as exc:                # noqa: BLE001
+            style_lines.append("裸主题报错：%s" % exc)
+        for label, bad in (("非 dict", "abc"),
+                           ("缺色键", {"bg": (1, 2, 3), "ink": (255, 255, 255)}),
+                           ("颜色越界", dict(_SELFTEST_STYLE, accent=(999, 0, 0))),
+                           ("未知字体族", dict(_SELFTEST_STYLE, family="comic"))):
+            try:
+                normalize_style(bad)
+                style_lines.append("%s 没被拒" % label)
+            except (ValueError, TypeError):
+                pass
+        plan = style_norm.get("plan") or {}
+        plan_ok = (plan.get("theme", {}).get("ink") == "#1c1a18"
+                   and plan.get("typography", {}).get("family") == "serif"
+                   and plan.get("layout", {}).get("default") == "split-right")
+        same_sha = bool(plan) and style_sha256(plan) == style_sha256(normalize_style(
+            {"style": "selftest", "style_name": "自检",
+             "theme": dict(_SELFTEST_STYLE), "layout_default": "split-right"}))
+        check("style=None 不注入；plan / 裸主题两种写法都归一；非法 style fail-closed",
+              style_norm.get("none") is None and plan_ok and same_sha and not style_lines,
+              "；".join(style_lines) or "None→None；ink=#1c1a18；family=serif；layout=split-right；非法 4 例全 raise")
+
+        style_probe = {}
+        try:
+            style_probe = asyncio.run(_selftest_style_probe())
+        except Exception as exc:                # noqa: BLE001
+            style_probe = {"_error": "%s: %s" % (type(exc).__name__, str(exc)[:300])}
+        serr = style_probe.get("_error")
+        plain_a = style_probe.get("plain_a") or b""
+        styled_a = style_probe.get("style_a") or b""
+        check("style=None 时页面无 window.__STYLE__、画布 1920x1080（旧行为零注入）",
+              (not serr) and style_probe.get("plain_has_style") is False
+              and style_probe.get("plain_canvas") == [W, H],
+              serr or "页面里没有 __STYLE__；画布 %s" % (style_probe.get("plain_canvas"),))
+        check("注入 style 后 __STYLE__ / 字体栈 / 画布生效",
+              (not serr) and bool(style_probe.get("has_style"))
+              and style_probe.get("style_ink") == "#1c1a18"
+              and style_probe.get("style_family") == FONT_STACKS["serif"]
+              and style_probe.get("style_canvas") == [W, H],
+              serr or ("theme.ink=%s；FK.FAMILY=衬线栈；画布 %s"
+                       % (style_probe.get("style_ink"), style_probe.get("style_canvas"))))
+        check("有 style 时同一帧两次截图 byte 相同（确定性不被风格破坏）",
+              bool(styled_a) and styled_a == style_probe.get("style_b"),
+              serr or ("两次均 %d bytes，sha256=%s…"
+                       % (len(styled_a), hashlib.sha256(styled_a).hexdigest()[:16])))
+        mean_plain = _png_stats(plain_a)["mean"] if plain_a else 0.0
+        mean_style = _png_stats(styled_a)["mean"] if styled_a else 0.0
+        check("有 style 与无 style 同一帧 PNG 不同（确实换了画风）",
+              bool(plain_a) and bool(styled_a) and plain_a != styled_a
+              and abs(mean_style - mean_plain) > 8.0,
+              serr or ("f=45 灰度均值 %.1f → %.1f（深蓝橙 → 浅色纸感）" % (mean_plain, mean_style)))
+        check("1280x720 + style 时画布与截图像素尺寸都跟着变",
+              (not serr) and style_probe.get("small_canvas") == [1280, 720]
+              and _png_size(style_probe.get("small_png")) == (1280, 720),
+              serr or ("canvas=%s，PNG=%s"
+                       % (style_probe.get("small_canvas"), _png_size(style_probe.get("small_png")))))
+
+
         cues = probe.get("cues") or []
         ts = [float(c.get("t", -1)) for c in cues]
         monotonic = len(ts) >= 2 and all(b > a for a, b in zip(ts, ts[1:]))
@@ -1235,10 +1854,69 @@ def _parse_times(text: str) -> list:
     return out
 
 
+def _parse_frames(text: str) -> list:
+    """解析 --frames 45,270（帧号，整数，逗号分隔）；非法项给可操作报错。"""
+    out = []
+    for part in str(text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            raise ValueError("--frames 里有不是整数的项：%r（要逗号分隔的帧号，如 45,270）" % (part,))
+    return out
+
+
+def _resolve_style_spec(text):
+    """解析 --style 的三种写法：内联 JSON / JSON 文件路径 / stylekit 风格 id。
+
+    返回 normalize_style 能吃的 dict；空字符串返回 None（= 不注入，旧行为）。
+    解析失败一律 SystemExit（CLI 场景，带可操作提示），不做静默回落。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return None
+    if s.startswith("{"):
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("[错误] --style 的内联 JSON 解析失败：%s" % exc)
+    p = Path(s).expanduser()
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit("[错误] --style 的 JSON 文件 %s 解析失败：%s" % (p, exc))
+    try:
+        import stylekit as ST
+    except Exception as exc:                # noqa: BLE001
+        raise SystemExit("[错误] --style %r 被当成风格 id，但 stylekit.py 不在同目录（%s）。"
+                         "要么用 --style work/style.json，要么把 stylekit.py 放在脚本旁边。"
+                         % (s, exc))
+    try:
+        pack = ST.get(s)
+    except KeyError as exc:
+        raise SystemExit("[错误] %s" % (exc.args[0] if exc.args else exc))
+    return {"style": s, "style_name": pack.get("name"), "legacy": ST.is_legacy(s),
+            "theme": ST.theme_of(s), "layout_default": (pack.get("layouts") or ("left-stack",))[0]}
+
+
+def _add_style_args(p, *, fps=True):
+    """给子命令加风格参数（缺省 = v0.7 旧行为：不注入、1920x1080）。"""
+    p.add_argument("--style", default="",
+                   help="风格：stylekit 风格 id（如 magazine）/ work/style.json / 内联 JSON；缺省不注入")
+    p.add_argument("--width", type=int, default=W, help="画布宽（只收 16:9 横屏偶数，默认 %d）" % W)
+    p.add_argument("--height", type=int, default=H, help="画布高（默认 %d）" % H)
+    if fps:
+        p.add_argument("--fps", type=float, default=None,
+                       help="写进 __STYLE__.canvas.fps 的帧率（缺省不约束，页面 window.FPS 为准）")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="webengine.py",
-        description="浏览器逐帧渲染引擎（v0.3.0）：Canvas 页面 → CDP 截图 → ffmpeg → mp4",
+        description="浏览器逐帧渲染引擎（v0.8.0）：Canvas 页面 → CDP 截图 → ffmpeg → mp4（支持风格包注入）",
     )
     ap.add_argument("--selftest", action="store_true", help="跑自检（不联网，≤60 秒）")
     sub = ap.add_subparsers(dest="cmd")
@@ -1253,11 +1931,21 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag", default="", help="文件名前缀")
     s.add_argument("--deterministic", action="store_true",
                    help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
+    _add_style_args(s)
+
+    fr = sub.add_parser("frames", help="指定帧号截 PNG（打印 SHA-256，用于像素回归对比）")
+    fr.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
+    fr.add_argument("--frames", required=True, help="逗号分隔的帧号，如 45,270")
+    fr.add_argument("--out", default="", help="输出目录（缺省 ./frames）")
+    fr.add_argument("--tag", default="", help="文件名前缀")
+    fr.add_argument("--deterministic", action="store_true")
+    _add_style_args(fr)
 
     c = sub.add_parser("cues", help="导出 cue / 视觉事件（契约 §4.2 schema）")
     c.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
     c.add_argument("--out", default="", help="写到 JSON 文件；缺省打到标准输出")
     c.add_argument("--deterministic", action="store_true")
+    _add_style_args(c, fps=False)
 
     f = sub.add_parser("full", help="并行渲染整片（分块 + 断点续跑 + 缺口检测）")
     f.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
@@ -1273,6 +1961,7 @@ def _build_parser() -> argparse.ArgumentParser:
     f.add_argument("--preset", default="slow")
     f.add_argument("--deterministic", action="store_true",
                    help="软件光栅（跨浏览器会话 byte 级可复现，慢约 20%%）")
+    _add_style_args(f)
 
     q = sub.add_parser("textqa", help="浏览器端文字质检（重叠 / 出画 / 一闪而过 / 从没露面）")
     q.add_argument("html", nargs="?", default=str(DEFAULT_HTML))
@@ -1281,6 +1970,7 @@ def _build_parser() -> argparse.ArgumentParser:
     q.add_argument("--step", type=float, default=0.2)
     q.add_argument("--out", default="", help="把完整结果写到 JSON")
     q.add_argument("--deterministic", action="store_true")
+    _add_style_args(q)
 
     sub.add_parser("selftest", help="跑自检（等价于 --selftest）")
     return ap
@@ -1304,6 +1994,16 @@ def main(argv=None) -> int:
         _build_parser().print_help()
         return 2
 
+    # --style 统一在分支之前解析：内联 JSON / JSON 文件 / 风格 id 三种写法，解析失败算用法
+    # 错误（exit 2）。以前每个分支各自解析，坏 id 会抛 SystemExit 变成 exit 1，脚本里分不清
+    # "参数写错"和"渲染失败"。
+    try:
+        style_spec = _resolve_style_spec(getattr(args, "style", ""))
+    except SystemExit as exc:
+        msg = exc.code if isinstance(exc.code, str) else ("[错误] %s" % (exc.code,))
+        print(msg, flush=True)
+        return 2
+
     if args.cmd == "snap":
         try:
             times = _parse_times(args.times)
@@ -1318,7 +2018,9 @@ def main(argv=None) -> int:
                   flush=True)
             return 2
         if args.every:
-            end = args.t_to if args.t_to is not None else page_meta(args.html)[0]
+            end = args.t_to if args.t_to is not None else page_meta(
+                args.html, style=style_spec, width=args.width, height=args.height,
+                fps=args.fps)[0]
             k = float(args.t_from)
             while k <= end + 1e-9:
                 times.append(round(k, 3))
@@ -1327,11 +2029,43 @@ def main(argv=None) -> int:
             print("[错误] snap 需要 --times 3,9.5 或 --every 2 [--to 12]", flush=True)
             return 2
         out_dir = args.out or str(Path.cwd() / "snaps")
-        snap(args.html, times, out_dir, tag=args.tag, deterministic=args.deterministic)
+        try:
+            snap(args.html, times, out_dir, tag=args.tag, deterministic=args.deterministic,
+                 style=style_spec, width=args.width, height=args.height, fps=args.fps)
+        except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
+        return 0
+
+    if args.cmd == "frames":
+        try:
+            frames = _parse_frames(args.frames)
+        except ValueError as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
+        if not frames:
+            print("[错误] frames 需要 --frames 45,270（逗号分隔的帧号）", flush=True)
+            return 2
+        out_dir = args.out or str(Path.cwd() / "frames")
+        try:
+            results = render_frames(args.html, frames, out_dir, tag=args.tag,
+                                    style=style_spec, width=args.width, height=args.height,
+                                    fps=args.fps, deterministic=args.deterministic)
+        except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
+        for r in results:
+            print("[frames] f=%d %s  sha256=%s  %d bytes  → %s"
+                  % (r["f"], "fps=%g" % r["fps"], r["sha256"], r["bytes"], r["path"]), flush=True)
         return 0
 
     if args.cmd == "cues":
-        data = export_cues(args.html, deterministic=args.deterministic)
+        try:
+            data = export_cues(args.html, deterministic=args.deterministic, style=style_spec,
+                               width=args.width, height=args.height)
+        except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
         if args.out:
             dst = _json_dump(data, args.out)
             print("[cues] %d 个 cue、%d 个视觉事件 → %s"
@@ -1341,18 +2075,28 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "full":
-        out = render_full(
-            args.html, args.out, args.duration,
-            workers=args.workers, chunk_s=args.chunk_s, resume=args.resume,
-            from_s=args.t_from, to_s=args.t_to, crf=args.crf, preset=args.preset,
-            deterministic=args.deterministic,
-        )
+        try:
+            out = render_full(
+                args.html, args.out, args.duration,
+                workers=args.workers, chunk_s=args.chunk_s, resume=args.resume,
+                from_s=args.t_from, to_s=args.t_to, crf=args.crf, preset=args.preset,
+                deterministic=args.deterministic,
+                style=style_spec, width=args.width, height=args.height, fps=args.fps,
+            )
+        except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
         print("[done] %s" % out, flush=True)
         return 0
 
     if args.cmd == "textqa":
-        result = qa_text(args.html, args.t0, args.t1, args.step,
-                         deterministic=args.deterministic)
+        try:
+            result = qa_text(args.html, args.t0, args.t1, args.step,
+                             deterministic=args.deterministic, style=style_spec,
+                             width=args.width, height=args.height, fps=args.fps)
+        except (ValueError, TypeError) as exc:
+            print("[错误] %s" % exc, flush=True)
+            return 2
         print("[textqa] 重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"
               % (len(result.get("overlaps") or []), len(result.get("offscreen") or []),
                  len(result.get("brief") or []), len(result.get("never") or [])), flush=True)

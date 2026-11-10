@@ -128,7 +128,7 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 > 下面 1–4 的路径都按**仓库根**写（`python skills/video-studio/scripts/…`）；如果你已经 `cd` 进技能目录，
 > 去掉 `skills/video-studio/` 前缀即可。`<REPO>` = 仓库根 / 装好后的包根。
 
-1. `python skills/video-studio/scripts/selfcheck.py` 全 PASS（现在 43 条）。
+1. `python skills/video-studio/scripts/selfcheck.py` 全 PASS（现在 51 条；v0.7.2 时的 43 条是旧的）。
 2. `python skills/video-studio/scripts/scorekit.py --selftest` 全 PASS。
 3. `python skills/video-studio/scripts/sfxkit.py --selftest` 全 PASS。
 4. `python <REPO>/tools/ci_check.py` 全 PASS（在包根执行）。

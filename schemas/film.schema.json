@@ -76,12 +76,16 @@
         "rate_range": {
           "type": "array",
           "description": "语速夹取区间（百分数，例如 [-15, 12]）",
-          "items": { "type": "number" }
+          "items": {
+            "type": "number"
+          }
         },
         "cps_band": {
           "type": "array",
           "description": "可接受的每秒字数区间（默认 [3.6, 5.6]）",
-          "items": { "type": "number" }
+          "items": {
+            "type": "number"
+          }
         }
       }
     },
@@ -591,6 +595,150 @@
           "type": "number",
           "minimum": 0,
           "description": "页面分块秒数（webengine 切块用，默认 30）"
+        }
+      }
+    },
+    "words": {
+      "type": "boolean",
+      "description": "v0.8 词级时间戳开关（默认 true）。true 时 --stage tts 会额外收 edge-tts 的 WordBoundary 事件落 work/words.json，字幕按词边界折行、cue 可用词锚点 l03:w2、QA 走 G10 门禁；false = 退回整句字幕（不影响出片）。"
+    },
+    "tts": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "v0.8 TTS 后端选择（接口化，默认 edge；其它后端需先 filmkit.register_tts_backend 注册）。",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "description": "后端名，缺省 edge"
+        },
+        "voice": {
+          "type": [
+            "string",
+            "object"
+          ],
+          "description": "覆盖顶层 voice"
+        }
+      }
+    },
+    "video": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "v0.8 画幅/帧率（**只支持 16:9 横屏**）。内部构图恒为 1920x1080，输出只能更小（编码时 lanczos 下采样）；竖屏 / 非 16:9 / 上采样 / 非法 fps 会被 filmkit.video_plan 直接报错。",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "enum": [
+            1920,
+            1280,
+            960,
+            2560
+          ],
+          "description": "输出宽（16:9 横屏）"
+        },
+        "height": {
+          "type": "integer",
+          "enum": [
+            1080,
+            720,
+            540,
+            1440
+          ],
+          "description": "输出高（16:9 横屏）"
+        },
+        "fps": {
+          "type": "integer",
+          "enum": [
+            24,
+            25,
+            30,
+            50,
+            60
+          ],
+          "description": "帧率，缺省 30"
+        }
+      }
+    },
+    "qa": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "v0.8 质检门禁参数：全片 VMAF/SSIM（G11）与 ASR 回读（G12）。",
+      "properties": {
+        "vmaf": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "全片 VMAF/SSIM 门禁（参考帧由场景函数实时渲染，不是成片抽帧）",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "full",
+                "sample",
+                "off"
+              ],
+              "description": "full=逐帧（默认，约 1.2x 实时）；sample=每 N 帧取 1；off=不跑"
+            },
+            "pass": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "VMAF 低于此值 -> fail（默认 88，实测标定见 render.QA_VMAF_PASS）"
+            },
+            "warn": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "介于 pass 与 warn 之间 -> pass+warning（默认 94）"
+            },
+            "sample_step": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "mode=sample 时的抽样步长"
+            }
+          }
+        },
+        "ssim": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "SSIM 阈值（诊断项，不单独阻断）",
+          "properties": {
+            "pass": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "warn": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "asr": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "ASR 回读门禁（把成片音轨转回文字与剧本对账）",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "false = 本次不做回读（记 skipped）"
+            },
+            "model": {
+              "type": "string",
+              "description": "faster-whisper 模型名，缺省 small"
+            },
+            "recall_pass": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "召回率 >= 此值算干净（默认 0.85）"
+            },
+            "recall_warn": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "低于此值 -> fail（默认 0.72）"
+            }
+          }
         }
       }
     }
