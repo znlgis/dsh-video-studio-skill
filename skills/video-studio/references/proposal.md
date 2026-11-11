@@ -103,19 +103,17 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 > 为什么不用 `--stage stills`：它缺 `tts.json` 时会**自动联网合成旁白**（render.py:2529-2537）。
 > 提案阶段不该付这个网络成本，也不该往用户的 TTS 缓存里写东西。
 
-## 6.1 预设起点与采样起点的差别（别把两者混为一谈）
+## 6.1 只有一条起点：现场采样（v1.0.1）
 
-`--preset <id>` 与 `--brief ...` 走的是两条不同的路，差异度本来就不一样：
+v1.0.0 曾经有 `--preset <id>`（以出厂预设为起点），v1.0.1 把预设与风格表**全部删除**——
+有预设就意味着用户的片子只能在预设里挑，第 9 种不存在。现在只有一条路：
 
-| | `--brief`（采样） | `--preset`（预设起点） |
-|---|---|---|
-| 配色 | **每个候选的配色族都不同**（确定性排列取前 n 个） | **全部相同**（用户选预设就是要那套配色） |
-| 母题/转场/版式/编号 | 全部轮转 | 全部轮转（第 1 个候选就是预设本身） |
-| 实测两两差异度 | n = 6–9 | n = 4 |
-| 适合 | "我不知道要什么，给我几个方向" | "我就要这个味道，给我几种排法" |
+```bash
+python propose.py --brief "题材/要求" --script film.json --n 3
+```
 
-所以预设路径的并排对比图里，三个候选"看着像同一个片子"是**预期行为**，不是 bug。
-真要三个方向，用 `--brief`；要同一套皮的不同排法，用 `--preset`。
+不满意就用 `--revise "更冷一点 / 少一点装饰"` 重出。想复现同一份设计就用 `--seed` 固定，
+而不是去找一套预设。
 
 ## 7. 常见误用
 
@@ -132,7 +130,7 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 | 现状 | P3 之后 |
 |---|---|
 | `style: "auto"` 自动选风格 | 删除。没有 design 就不出片 |
-| `stylekit.THEMES/STYLES/VISUAL_LANGUAGES` 8 套 | 下沉为 `presets/*.json`（可选起点，不自动生效） |
+| `stylekit.THEMES/STYLES/VISUAL_LANGUAGES` 8 套 | **已全部删除**（v1.0.1） |
 | legacy（不写 style 走 v0.4 绘制器） | 删除。老片复现只能靠当年留存的 work/ 快照 |
-| `scorekit.MUSIC_STYLES` 9 套 | 换成参数化编排器（`audio.music.arranger`） |
+| `scorekit.MUSIC_STYLES` 9 套 | **已删除**（v1.0.1）：配乐改由 `musicgen.py` 参数化编排，不再需要 `audio.music.arranger` 这一层 |
 | `voicekit.VOICE_PERSONAS` 9 个 | 换成裸 edge voice id + 自动响度校准（不再固定 9 个） |

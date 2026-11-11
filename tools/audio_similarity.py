@@ -9,8 +9,9 @@
 
 四组对照（阈值来自 skills/video-studio/references/audio-variation.md §5）：
 
-    A 跨片配乐（v0.7）：同风格/同 bpm/同调、只换内容指纹 -> 相关性（目标 <= 0.85）；
-                换风格 -> 相关性（目标 <= 0.52，且不能比改造前更接近）
+    A 跨片配乐（v1.0.1 起用 musicgen 参数化编排）：
+                同参数/同 bpm/同调、只换内容指纹 -> 相关性（目标 <= 0.85）；
+                换编排参数（mood + 音色） -> 相关性（目标 <= 0.52）
     B 跨片音效（v0.7）：同 cue 序列，legacy（不传 style/content_fp）必须逐样本相同；
                 不同 content_fp 必须不同（否则"跨片音效都一样"没被修掉）
     C 片内分离（v0.7）：duck 默认深度（目标 >= 3.5 dB）与配乐/音效的频谱质心对照
@@ -21,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -32,12 +34,12 @@ SCRIPTS = HERE.parent / "skills" / "video-studio" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 # 契约 §5 的阈值（改契约时两边一起改）
-THRESH_A_SAME_STYLE_MAX = 0.85      # 同风格、只换内容指纹的相关性上限
-THRESH_A_CROSS_STYLE_MAX = 0.52     # 换风格的相关性上限（改造前 0.534）
-# 实测余量提示（v0.7.2）：本机稳定测到 0.514（连跑 3 次逐位相同），离阈值只剩 0.006。
-# 这个生成链是确定性的，所以换平台/换 numpy 若把 0.514 推到 0.52 以上，
-# 更可能是「风格差异化真的缩水了」而不是浮点噪声 —— 请先查 scorekit 的变奏参数，
-# 别第一反应去抬阈值（抬到 0.53 就离改造前 0.534 只剩 0.004，等于这条门禁白设）。
+THRESH_A_SAME_STYLE_MAX = 0.85      # 同参数、只换内容指纹的相关性上限
+THRESH_A_CROSS_STYLE_MAX = 0.52     # 换编排参数的相关性上限（v0.7 改造前的 0.534）
+# v1.0.1：配乐改由 musicgen 参数化编排（scorekit 的 9 套风格表已删除），这两条阈值
+# 仍是「跨片不能太像」的验收线：同参数换指纹要 <=0.85，换编排参数要 <=0.52。
+# 生成链是确定性的，换平台/换 numpy 若把实测值推过线，先查 musicgen 的参数有没有
+# 变成死旋钮，别第一反应去抬阈值。
 THRESH_C_DUCK_MIN = 3.5             # duck 默认深度下限（dB）
 THRESH_D_SNR_MIN = 12.0             # 人声段 旁白/背景 响度差下限（dB）
 
@@ -101,10 +103,35 @@ def _utf8_stdio():
             pass
 
 
-def _music(dur, style, fp):
-    import scorekit as SK
-    samples, _rep = SK.render_styled(dur, style=style, bpm=110, key="Dm",
-                                     mood="steady", seed=7, fingerprint=fp)
+def _music(dur, profile, fp):
+    """用参数化编排器现场生成一条配乐（v1.0.1：scorekit 的 9 套风格表已删除）。
+
+    profile 是「一套编排参数」，对应旧版的一个 style id —— 换成 mood + 音色 + 和弦进行：
+      * "steady"    -> 稳重：pad=saw / bass=sine / arp=pluck / lead=bell
+      * "magazine"  -> 换一套色调：triangle 铺底 + bell 琶音 + hopeful
+    fp 除了派生 seed，还决定**和弦进行走哪一档**（结构层）：旧版 scorekit 的指纹会换
+    进行档，这里用同一思路 —— 否则只换 seed 时两段配乐的相关性接近 1.0，A1 门禁
+    就成了「永远通过」的假门禁。
+    """
+    import musicgen as MG
+    # 指纹 -> 两个**互相独立**的派生量：seed（音色/细节）与进行档（结构）。
+    # 早先用同一个 8 位片段同时取模，content-a / content-b 正好撞在一起（seed 与档位
+    # 全同 -> corr 恒 1.0，A1 门禁变成永远通过）。分开取片段才是真的"同一内容同一首、
+    # 换内容不像同一首"。
+    digest = hashlib.sha1(str(fp or "").encode("utf-8")).hexdigest()
+    seed = 7 + (int(digest[:12], 16) % (2 ** 31 - 1))
+    prog_idx = int(digest[12:20], 16) % 2
+    voices = {"steady": {"pad": "saw", "bass": "sine", "arp": "pluck", "lead": "bell"},
+              "magazine": {"pad": "triangle", "bass": "sine", "arp": "bell", "lead": "pluck"}}[profile]
+    progressions = [
+        {"calm": ["i", "VI", "iv", "v"], "body": ["i", "VI", "III", "VII"],
+         "drive": ["i", "VII", "VI", "V"], "climax": ["i", "VII", "VI", "V"]},
+        {"calm": ["i", "iv", "VI", "i"], "body": ["i", "III", "VII", "VI"],
+         "drive": ["i", "VI", "VII", "V"], "climax": ["i", "VI", "VII", "V"]},
+    ][prog_idx]
+    samples, _rep = MG.render(float(dur), bpm=110.0, key="Dm", scale="minor",
+                              mood="steady" if profile == "steady" else "hopeful",
+                              seed=seed, voices=voices, progressions=progressions)
     return samples
 
 
@@ -120,7 +147,7 @@ def _cue_track(content_fp=None, style=None, key=None):
 
 
 def _voice_priority_snr(sr=48000, guard_snr_db=12.0):
-    """量"人声比背景响多少"：用真实 scorekit 配乐 + 类人声，按 st_audio 的默认参数混音。
+    """量"人声比背景响多少"：用真实 musicgen 配乐 + 类人声，按 st_audio 的默认参数混音。
 
     返回 (人声活跃区 SNR dB, 间隙背景 RMS, 人声处背景额外让位 dB)。
     口径与 `filmkit.voice_snr` 一致：只统计人声活跃区（含间隙会稀释问题）。
@@ -130,16 +157,16 @@ def _voice_priority_snr(sr=48000, guard_snr_db=12.0):
     """
     import filmkit as K
     import numpy as np
-    import scorekit as SK
+    import musicgen as MG
     n = int(6.0 * sr)
     t = np.arange(n) / float(sr)
     voice = np.zeros(n, dtype=np.float64)
     for a, b in ((0.2, 2.6), (3.4, 5.8)):        # 两段"说话"，中间留间隙
         i, j = int(a * sr), int(b * sr)
         voice[i:j] = 0.12 * np.sin(2 * np.pi * 220 * t[i:j])
-    # 真实配乐（scorekit 输出 RMS 约 0.15，比"类人声"响 —— 正是需要侧链/兜底的场景）
-    music, _ = SK.render_styled(6.0, style="tech-deep", bpm=110, key="Am",
-                                mood="steady", seed=7, fingerprint="d-group")
+    # 真实配乐（musicgen 输出峰值 -6 dBFS，比"类人声"响 —— 正是需要侧链/兜底的场景）
+    music, _ = MG.render(6.0, bpm=110.0, key="Am", scale="minor",
+                         mood="steady", seed=7)
     music = np.asarray(music, dtype=np.float32)
     out = K.mix_film(voice.astype(np.float32), music, None, total=6.0, fade=0.0,
                      music_gain_db=-12.0, voice_duck_db=6.0,
@@ -174,29 +201,29 @@ def main(argv=None):
     import sfxkit as SX
 
     print("=" * 72)
-    print("A. 跨片配乐（差异来源 = 风格 / bpm / 调 / 内容指纹 / seed）")
+    print("A. 跨片配乐（差异来源 = 编排参数 / bpm / 调 / 内容指纹 / seed）")
     print("=" * 72)
-    a1 = _music(args.dur, "tech-deep", "content-a")
-    a2 = _music(args.dur, "tech-deep", "content-b")
+    a1 = _music(args.dur, "steady", "content-a")
+    a2 = _music(args.dur, "steady", "content-b")
     a3 = _music(args.dur, "magazine", "content-a")
-    a4 = _music(args.dur, "tech-deep", "content-a")   # 同指纹复渲染，验证确定性
+    a4 = _music(args.dur, "steady", "content-a")   # 同指纹复渲染，验证确定性
     same_style = _corr(a1, a2)
     cross_style = _corr(a1, a3)
     rms_a1 = _rms(a1)
     print("  配乐非静音（RMS > -60 dBFS）    : %s  （rms=%.4f，静音时相关系数无定义）"
           % (rms_a1 > 0.001, rms_a1))
-    print("  同风格·同bpm·同调，只换内容指纹 : corr = %.3f  （目标 <= %.2f）"
+    print("  同参数·同bpm·同调，只换内容指纹 : corr = %.3f  （目标 <= %.2f）"
           % (same_style, THRESH_A_SAME_STYLE_MAX))
-    print("  换风格（tech-deep -> magazine） : corr = %.3f  （目标 <= %.2f）"
+    print("  换编排参数（steady -> magazine） : corr = %.3f  （目标 <= %.2f）"
           % (cross_style, THRESH_A_CROSS_STYLE_MAX))
     print("  同指纹两次渲染逐样本相同        : %s" % bool(np.array_equal(a1, a4)))
     if args.strict:
         # A0 是前置条件：若配乐渲染成静音/常量，A1/A2 的相关系数没有定义（NaN），
         # 必须显式判 FAIL，而不是让 NaN 比较悄悄变成 False 后只剩一句 corr=nan。
         _ok("A0 配乐非静音", rms_a1 > 0.001, "rms=%.4f" % rms_a1)
-        _ok("A1 同风格换指纹可区分", same_style <= THRESH_A_SAME_STYLE_MAX,
+        _ok("A1 同参数换指纹可区分", same_style <= THRESH_A_SAME_STYLE_MAX,
             "corr=%.3f" % same_style)
-        _ok("A2 换风格更不像", cross_style <= THRESH_A_CROSS_STYLE_MAX,
+        _ok("A2 换编排参数更不像", cross_style <= THRESH_A_CROSS_STYLE_MAX,
             "corr=%.3f" % cross_style)
         _ok("A3 配乐可复现", bool(np.array_equal(a1, a4)), "同指纹逐样本一致")
 
@@ -256,10 +283,10 @@ def main(argv=None):
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        from scorekit import save as music_save
-        music_save(out / "music_tech_deep_a.wav", a1)
-        music_save(out / "music_tech_deep_b.wav", a2)
-        music_save(out / "music_magazine.wav", a3)
+        import musicgen as MG
+        MG.save(out / "music_steady_a.wav", a1)
+        MG.save(out / "music_steady_b.wav", a2)
+        MG.save(out / "music_magazine.wav", a3)
         for t in ("whoosh", "riser", "impact"):
             SX.save(out / ("sfx_%s.wav" % t), SX.render(t, seed=1000))
         print("\n对照样本已写入: %s" % out)

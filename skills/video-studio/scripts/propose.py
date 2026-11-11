@@ -15,7 +15,8 @@ render.py 的 13 个 stage 是一条"内容 → 成片"的生产线；提案是*
     revise   ->  rev2（不覆盖 rev1，带 feedback 原文）
     diff     ->  两个 rev 的设计向量差异
 
-确定性：同一 brief + 同一 seed 永远采样出同一组候选（designkit 内部 sha1 派生）。
+每次都不一样：同 brief 不传 seed 会得到**不同**的候选（v1.0.1 起，满足"每条视频都不同"）；
+可复现：显式 --seed 时同 seed 得到同一组候选（designkit 内部 sha1 派生，禁 random）。
 离线：预览只走合成时间轴（previewkit），**不联网、不合成旁白**；--with-audio 才多生成
       12 秒样音（仍全程离线，musicgen/scorekit 任选其一）。
 
@@ -197,32 +198,8 @@ def _fill_diversity(rows, designkit):
                                 "min_n": min([v["n"] for v in vs]) if vs else 0}
 
 
-def _designs_from_preset(preset_id, n=3, overrides=None):
-    """以预设为起点生成 n 个候选：第 1 个就是预设本身，其余在它基础上扰动。"""
-    import presetkit
-    pr = presetkit.load_preset(preset_id)
-    if pr is None:
-        raise SystemExit("[proposal] 没有预设 %r；可用：%s"
-                         % (preset_id, " / ".join(x["id"] for x in presetkit.list_presets())))
-    base = presetkit.preset_to_design(pr, overrides=overrides)
-    out = [base]
-    import designkit
-    for i in range(1, max(1, n)):
-        d = json.loads(json.dumps(base))
-        d["id"] = "%s-%d" % (base["id"], i + 1)
-        d["label"] = "%s（变体 %d）" % (base["label"], i + 1)
-        # 只扰动"结构签名"，配色保持预设的精确色值不变——用户选预设就是要那套配色
-        cur = d["visual"]
-        cur["motif"]["kind"] = designkit.MOTIFS[(designkit.MOTIFS.index(cur["motif"]["kind"]) + 3 * i) % len(designkit.MOTIFS)]
-        cur["transition"]["kind"] = designkit.TRANSITIONS[(designkit.TRANSITIONS.index(cur["transition"]["kind"]) + 2 * i) % len(designkit.TRANSITIONS)]
-        cur["layout"] = designkit.LAYOUTS[(designkit.LAYOUTS.index(cur["layout"]) + i) % len(designkit.LAYOUTS)]
-        cur["typography"]["number"] = designkit.NUMBERS[(designkit.NUMBERS.index(cur["typography"]["number"]) + 2 * i) % len(designkit.NUMBERS)]
-        out.append(d)
-    return out
-
-
 def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out=False,
-                  preset="", with_audio=False):
+                  with_audio=False):
     """生成一版提案（rev = 已有最大 rev + 1），落盘并打印人读摘要。"""
     designkit = _designkit()
     previewkit = _previewkit()
@@ -233,9 +210,8 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
     parent = prev.get("rev") if prev else None
     feedback = str(brief_text or "").strip() if rev > 1 else ""
 
-    designs = (_designs_from_preset(preset, n=n)
-               if str(preset or "").strip()
-               else designkit.sample_designs(brief, n=n, seed=seed))
+    # v1.0 起唯一的出方案方式是**按 brief 现场采样**：没有预设、没有模板可套。
+    designs = designkit.sample_designs(brief, n=n, seed=seed)
     # 认不出来的要求：采样器不会替你"悄悄放宽"，但也不会因此失败，而是挂在候选上。
     # 这里汇总一次，人读摘要里必须说出来——用户提的要求没生效，他得知道。
     unmatched = []
@@ -409,7 +385,7 @@ def confirm(work, candidate, by="user", note="", json_out=False,
     return prev
 
 def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=False,
-           preset="", with_audio=False):
+           with_audio=False):
     """不满意就重出：新 rev 不覆盖旧 rev，feedback 原文留存（这就是"迭代"的审计）。"""
     if not str(feedback or "").strip():
         raise SystemExit("[proposal] --revise 需要一段要求（例如：更冷一点、女声、节奏快些）")
@@ -419,7 +395,7 @@ def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=Fal
     script = _load_script(script_path)
     return make_proposal(str(feedback), script, work, n=n, seed=seed,
                          n_frames=n_frames, json_out=json_out,
-                         preset=preset, with_audio=with_audio)
+                         with_audio=with_audio)
 
 
 def diff(work, rev_a, rev_b, json_out=False):
@@ -542,7 +518,9 @@ def main(argv=None):
     ap.add_argument("--script", default="film.json")
     ap.add_argument("--brief", default="", help="一句话题材/要求（首次提案用）")
     ap.add_argument("--n", type=int, default=3, help="候选数（默认 3，最少 2）")
-    ap.add_argument("--seed", default=None, help="采样种子（同一 seed 结果可复现）")
+    ap.add_argument("--seed", default=None,
+                    help="采样种子：给了就逐字节可复现（调试/回归用）；"
+                         "不给则每次都不同（默认，满足『每条视频都不一样』）")
     ap.add_argument("--n-frames", type=int, default=4, help="每个候选渲几张静帧")
     ap.add_argument("--list", action="store_true", help="列出当前提案")
     ap.add_argument("--show", nargs="?", const="", default=None, help="看单个候选（给候选 id）")
@@ -551,9 +529,6 @@ def main(argv=None):
     ap.add_argument("--by", default="user")
     ap.add_argument("--note", default="")
     ap.add_argument("--revise", default=None, help="带一段要求重出方案（新 rev，不覆盖旧的）")
-    ap.add_argument("--preset", default="",
-                    help="以某套预设为起点（presets/<id>.json，见 python presetkit.py）："
-                         "预设只提供结构签名，不参与自动选型")
     ap.add_argument("--diff", nargs=2, type=int, metavar=("REV_A", "REV_B"),
                     help="看两版设计的差异")
     ap.add_argument("--with-audio", action="store_true",
@@ -588,13 +563,13 @@ def main(argv=None):
         if a.revise is not None:
             revise(a.work, a.revise, a.script, n=a.n, seed=a.seed,
                    n_frames=a.n_frames, json_out=a.json,
-                   preset=a.preset, with_audio=a.with_audio)
+                   with_audio=a.with_audio)
             return 0
         if a.brief or os.path.exists(a.script):
             script = _load_script(a.script)
             make_proposal(a.brief, script, a.work, n=a.n, seed=a.seed,
                           n_frames=a.n_frames, json_out=a.json,
-                          preset=a.preset, with_audio=a.with_audio)
+                          with_audio=a.with_audio)
             return 0
         ap.print_help()
         return 0

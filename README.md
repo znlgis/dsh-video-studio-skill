@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.0.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -72,13 +72,23 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > legacy（不写 `style`）仍逐字节不变。selfcheck 51 → **55 条**。
 > **v0.9.1** 把"逐帧全屏贴装饰"（实测 5.6 ms/帧）改成"装饰烘焙进背景底版"（1.3–2.0 ms），
 > 顺带让装饰跟着镜头缓推一起动（cinema / epic 的强 push 下不再穿帮）。
+> **v1.0.1（清除全部模板）**：v1.0.0 删了"自动选风格"，但留下了一堆目录表——`presets/*.json`（8 套预设定档）、
+> `stylekit` 的 `THEMES`（8 套命名主题）/`STYLES`（整套风格包 + 自动选型）/`VISUAL_LANGUAGES`（8 套命名结构签名）、
+> `designkit` 的 `PALETTE_FAMILIES`（8 个命名配色族）与 `_MUSIC_BY_MOOD`（情绪→曲风映射）、
+> `scorekit` 的 `MUSIC_STYLES`（9 套配乐风格表）。**有目录就意味着用户的片子只能在目录里挑**，
+> 目录外的第 9 种外观永远不存在——那是模板的另一种形式。本版把这些全部删除。
+> 换成技术原语：配色改为**连续色相空间**（`hsv_to_rgb` + 对比度网格求解，每套都必须过 `theme_lint`），
+> 视觉语言对**任意**字典体检（`visual_lint_language`），配乐由 `musicgen` 按参数现场编排。
+> 同时修正一个更要紧的行为：**同一个 brief 以前连拍两次会产出逐位相同的视频**（模板藏进了哈希里），
+> 现在默认每次新 nonce，只有显式 `--seed` 才复现。实测同 brief 连拍两次，配色/母题/转场/音乐全部不同。
+> `selfcheck` 57 条、`ci_check` 12 条保持全绿。
 > **v1.0.0（提案优先）**：解决"**机器替你选风格**"。v0.5–v0.9 换了三代风格系统，用户的原话
 > 始终是"每个视频都差不多"——根因不是风格不够多，而是 `style:auto` 用关键词 + 指纹**自动挑一套**，
 > 用户从头到尾没参与决策（实测 8 个题材只命中 5/8 套风格、3 个落进同一套；不写 style 时 8/8 全落 legacy）。
 > 本版把这条路径整个停掉：**出片前先给 3 个候选方案（各自配色族不同、各带 4–6 张静帧 + 12 秒样音），
 > 用户确认后才冻结 `design.json` 并出片**；不满意就 `--revise "要求"` 重出，旧版留着可 `--diff`。
 > 风格从"8 个枚举"变成"设计 DSL"：8 配色族 × 8 母题 × 6 转场 × 4 缓动 × 8 编号 × 2 调式 × 7 情绪
-> = **344,064 种**，且全部字段可写；8 套内置风格下沉成 `presets/*.json`（数据，可改可删，不参与自动选型）。
+> = **344,064 种**以上，且全部字段可写。**v1.0.1 起没有预设、没有模板**：配色是连续色相空间里的任意一点，
 > 配乐也换成参数化编排器（`musicgen.py`，**没有风格表**：和弦进行/动机/鼓型/音色全可传参），
 > 声线删掉 persona 身份表改裸 edge voice id + 实测响度补偿表。
 > **破坏性变更**：不写 `style` 或写 `style:"legacy"` 会**报错**并给两步迁移指引（不再是静默回落）。
@@ -166,9 +176,9 @@ TTS 实测时长、AAC 编码都会让真峰/响度/锐度浮动，**别 chasing
 
 ```bash
 mkdir -p myfilm && cd myfilm
-cp <SKILL_DIR>/assets/film.json .                       # 剧本模板（"style": "auto"）
+cp <SKILL_DIR>/assets/film.json .                       # 剧本样例（v1.0.1 起没有 style 字段，外观由 design.json 决定）
 cp <SKILL_DIR>/assets/scenes.py .                       # 场景模板
-cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine
+cp <SKILL_DIR>/scripts/*.py .                           # filmkit/voicekit/render/selfcheck + sfxkit/scorekit/qa_frames/webengine + musicgen（现场编排配乐）
                                                          #   v0.8 还含 preflight/qaasr/qavmaf（可选：缺了对应门禁记 skipped）
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
@@ -238,7 +248,7 @@ tts → layout → cues → score → sfx → audio → frames → mux → qa
 | 该有的淡入/字幕静默消失 | 质检门禁查"必须有"和"不能有"两类断言 |
 | 成片"像草稿" | -16 LUFS / 真峰 ≤ -1 dBTP / 编码锐度比 ≥ 0.85 |
 | **声音和画面对不上（v0.3）** | **提示点系统**：画面登记 cue → 音效按 cue 合成，改节奏不用重新对时间 |
-| **声音单薄、只有"叮叮咚咚"（v0.3）** | `sfxkit` 物理建模音效 + `scorekit` 一张和弦表贯穿全片 |
+| **声音单薄、只有"叮叮咚咚"（v0.3）** | `sfxkit` 物理建模音效 + `musicgen` 按参数现场编排配乐（没有现成曲风可选） |
 | **一帧白闪/两秒空窗没人发现（v0.3）** | `qa_frames` 帧级深检：单帧闪烁、画面空窗、音画同步 |
 | **"我查过了"无法复现（v0.6）** | `out/QC-REPORT.md` + `work/gates.json`：三档 gate matrix，"没执行"独立成 `skipped` |
 | **"我签过了"变成空头支票（v0.6）** | 签核绑内容指纹：改剧本 / `scenes.py` / 引擎，旧签核自动失效 |
@@ -267,7 +277,8 @@ skills/video-studio/
   scripts/qaasr.py           v0.8 ASR 回读（成片音轨转文字对账，门禁 G12）
   scripts/selfcheck.py       回归自检（58 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
-  scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
+  scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘；成片配乐由 musicgen 现场编排）
+  scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
   scripts/qa_frames.py       帧级深检（单帧闪烁 / 画面空窗 / 画面静止 / 音画同步 / 亮度响度曲线）
   requirements.txt           Python 依赖（必需 / 强烈建议 / 可选三档，带注释）
@@ -279,7 +290,7 @@ tools/ci_check.py            仓库级体检（12 项；语法/JSON/依赖白名
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；v0.8 含 preflight/vmaf/asr）
 tools/golden_frames.py       v0.8 金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
 tools/audio_similarity.py    音频差异/相似度验收（--strict 阈值判定，改音频代码后必跑）
-tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scipy 后跑 sfxkit/scorekit 自检）
+tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scipy 后跑 sfxkit/musicgen 自检）
 schemas/film.schema.json     film.json 的契约（draft-07 子集）
 .github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu）
 ```

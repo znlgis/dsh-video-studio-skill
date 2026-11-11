@@ -1,5 +1,9 @@
-# 音频多样性改造（v0.7）—— 接口契约
+# 音频多样性改造（v0.7）—— 接口契约（**已归档**）
 
+> **v1.0.1 起本文描述的 scorekit 风格层已删除**（`MUSIC_STYLES` / `render_styled` /
+> 指纹结构变奏）。保留本文是因为音效侧契约（sfxkit / CueBus / duck / 旁白优先）仍然有效；
+> 「A 路配乐变奏」那一节只作历史记录——现在配乐由 `musicgen.py` 参数化编排，没有风格表。
+>
 > 起草：lead，2026-11-09。本文件是本次改造的**唯一定义源**。
 > 三路并行改动的文件写域不重叠，但**接口必须按本文件逐字实现**，否则集成会失败。
 > 诊断证据见 `tools/audio_similarity.py` 的输出（改完后必须重跑，阈值见 §5）。
@@ -16,11 +20,11 @@
 
 | 路 | 负责文件 | 改什么 |
 |---|---|---|
-| A 配乐变奏 | `skills/video-studio/scripts/scorekit.py` | 指纹参与**和声/动机/鼓型/结构**，不再只影响音色细节 |
+| A 配乐变奏（**v1.0.1 已删除**） | 原 `skills/video-studio/scripts/scorekit.py` | 指纹参与**和声/动机/鼓型/结构**，不再只影响音色细节 |
 | B 音效差异化 | `skills/video-studio/scripts/sfxkit.py`、`assets/scenes.py`、`assets/film.json` | `in_key` 跟随配乐调性；`cues()` 按画面内容生成；模板 cue 去固定化 |
 | C 接线与混音 | `skills/video-studio/scripts/filmkit.py`（lead）、`render.py`（lead）、`stylekit.py`（只读）、`selfcheck.py`（lead） | CueBus 内容派生 seed、调性传给 sfxkit、duck 加深、风格过门避让 |
 
-**写域规则**：A 路只改 scorekit.py；B 路只改 sfxkit.py / assets/scenes.py / assets/film.json；
+**写域规则（历史）**：A 路只改 scorekit.py；B 路只改 sfxkit.py / assets/scenes.py / assets/film.json；
 C 路由 lead 改 filmkit.py / render.py / selfcheck.py。**任何一路不得改别人的文件**（包括顺手"优化"）。
 
 ## 3. 接口契约（逐字实现，向后兼容）
@@ -56,7 +60,7 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
     并把 key 透传给配方（render(kind, seed=..., key=key, **params)）。"""
 ```
 
-### 3.3 scorekit.render_styled（A 路）
+### 3.3 scorekit.render_styled（A 路）——**v1.0.1 已删除，仅存档**
 
 签名不变。**内部**行为变化：
 
@@ -71,8 +75,8 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 - **必须保证**：同 `fingerprint` 逐采样一致；不同 fingerprint 的相关性显著下降（§5 阈值）。
 - 新增报告字段：`variation`（dict：`{"chord_swaps": n, "motif_shifts": n, "drum_ghosts": n}`），
   写进 work/score.json，方便审计。
-- legacy 路径（style=None）**逐字节不变**（`scorekit.py --selftest` 的第 20 条会验；
-  别和 `selfcheck.py` 的编号搞混——那边第 21 条只查 scorekit 同 seed 确定性）。
+- legacy 路径（style=None）**逐字节不变**（`scorekit.py --selftest` 的 legacy 条会验）。
+  （v1.0.1：`render_styled` 已删除，这一条现在只说明历史契约。）
 
 ### 3.4 assets/scenes.py 的 cues()（B 路）
 
@@ -99,7 +103,7 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 - `st_sfx`：读 `script["_style"]`，把 `style` / `content_fp` / `key` / `sfx.content_seed` 传给
   `bus.build_audio(...)`；没有 `_style`（legacy）时不传，保持旧行为。
 - `st_audio`：duck 默认值改为按风格：在现有表基础上整体 +1.0 dB，且 `music.duck_db` 显式值仍然优先。
-  另外新增**过门避让**：`scorekit` 的过门音效已经在 music.wav 里，sfx 轨在
+  另外新增**过门避让**：配乐在 music.wav 里已经有段落过门，sfx 轨在
   [段落边界 - 2.2s, 边界] 区间内的 whoosh/riser/reverse_swell 需要自动 -3 dB（在 filmkit 里做，
   或 st_sfx 后处理；由 lead 决定实现位置，**B 路不要碰**）。
 
@@ -130,10 +134,10 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 > 去掉 `skills/video-studio/` 前缀即可。`<REPO>` = 仓库根 / 装好后的包根。
 
 1. `python skills/video-studio/scripts/selfcheck.py` 全 PASS（现在 55 条；v0.7.2 时的 43 条、v0.8 的 51 条是旧的）。
-2. `python skills/video-studio/scripts/scorekit.py --selftest` 全 PASS。
+2. `python skills/video-studio/scripts/musicgen.py --selftest` 全 PASS（原第 2 条要求 scorekit 风格层自测，v1.0.1 已随风格层删除）。
 3. `python skills/video-studio/scripts/sfxkit.py --selftest` 全 PASS。
 4. `python <REPO>/tools/ci_check.py` 全 PASS（在包根执行）。
-5. legacy 逐样本不变：`scorekit.py --selftest` 第 20 条 + `selfcheck.py` 第 26（风格 legacy）/33（音效 legacy）条，**这些断言不要改**。
+5. 音效 legacy 逐样本不变：`selfcheck.py` 的音效 legacy 断言（v1.0.1 起风格 legacy 断言随风格层一并删除）。
 
 ## 6. 协作规则
 
@@ -156,4 +160,4 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 **回归基线**（改前先录、改后逐条比对）：
 
 - sfxkit 9 条渲染的 sha256（ui_blip ×3 / answer_chime / text_stream ×2 / data_chirp / roulette_tick ×2）逐条相同。
-- scorekit legacy 路径（style=None）6 s 渲染逐样本与 v0.6 相同。
+- 配乐 legacy 路径（scorekit，style=None）6 s 渲染逐样本与 v0.6 相同（v1.0.1 起该路径只保留合成原语，不再承担成片配乐）。

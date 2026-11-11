@@ -164,7 +164,7 @@ PNG 截图比 JPEG q94 慢但无压缩伪影，本模块按契约固定 PNG。
 
 ## 10. 和别的模块怎么接
 
-- **配乐 / 音效**：webengine.py cues 输出 work/cues.json（§4.2），scorekit/sfxkit 按 t 对齐；
+- **配乐 / 音效**：webengine.py cues 输出 work/cues.json（§4.2），musicgen / sfxkit 按 t 对齐；
   页面 cue 的 type 用 sfxkit 配方名（ui_blip / whoosh / impact / data_chirp ...）。
 - **音画同步质检**：页面 S.event 登记的视觉事件进 work/cues.json 的 events，qa_frames.sync_check 用。
 - **合成成片**：webengine 只出无声画面；配音/配乐/混音由 filmkit 音频总线和 render.py 的 mux 阶段负责。

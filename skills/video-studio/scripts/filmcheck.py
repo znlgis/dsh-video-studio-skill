@@ -82,7 +82,7 @@ KEY_ALIASES = {
     "cue": "cues", "sfx_cues": "cues", "sound": "sfx", "bgm": "music",
 }
 
-# 不是 film.json 的其他产物（例如 assets/score_demo.json 是 scorekit 报告）——
+# 不是 film.json 的其他产物（例如配乐引擎落盘的 score.json 报告）——
 # 交给本脚本前先认出来，直接 SKIP 而不是按剧本报"缺 title"的错误。
 OTHER_ARTIFACT_KEYS = ("generator", "meas", "reproduce", "sections", "beats",
                        "transitions", "sr", "duration", "score")

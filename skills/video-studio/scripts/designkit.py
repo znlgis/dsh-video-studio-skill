@@ -114,26 +114,49 @@ FPSES = (24, 25, 30, 50, 60)
 HOLD_POLICIES = ("none", "readable", "long")
 SFX_DENSITIES = ("none", "sparse", "normal", "rich")
 
-# 配色族：只定"底色 + 主色相锚点"，其余语义色由 (s,v) 网格求解（见 _solve_palette）。
-# 契约要求每个族至少有 bg / bg2 / surface / accent_hue / dark 五个键。
-PALETTE_FAMILIES = {
-    "deep-blue": dict(label="科技深蓝", bg=(7, 14, 26), bg2=(17, 33, 54),
-                      surface=(26, 42, 64), accent_hue=24, dark=True),
-    "near-black": dict(label="近黑金", bg=(8, 8, 10), bg2=(22, 22, 26),
-                       surface=(32, 32, 38), accent_hue=48, dark=True),
-    "cool-mint": dict(label="冷薄荷", bg=(12, 26, 24), bg2=(20, 38, 35),
-                      surface=(30, 50, 46), accent_hue=168, dark=True),
-    "sand": dict(label="暖砂金", bg=(28, 23, 17), bg2=(40, 33, 24),
-                 surface=(52, 43, 32), accent_hue=32, dark=True),
-    "slate": dict(label="石青灰", bg=(28, 32, 40), bg2=(42, 48, 60),
-                  surface=(54, 62, 76), accent_hue=18, dark=True),
-    "forest": dict(label="深林绿", bg=(10, 22, 16), bg2=(18, 32, 24),
-                   surface=(26, 44, 34), accent_hue=96, dark=True),
-    "warm-paper": dict(label="暖纸白", bg=(243, 236, 224), bg2=(227, 216, 196),
-                       surface=(255, 252, 246), accent_hue=8, dark=False),
-    "ink-paper": dict(label="墨纸白", bg=(246, 246, 244), bg2=(222, 222, 220),
-                      surface=(255, 255, 255), accent_hue=0, dark=False),
+# 配色：**没有命名家族**（v1.0.1）。
+#
+# 决定这件事的依据很直白：本技能只提供"生成视频的技术"，不提供模板。既然没有模板，
+# 就不该存在"深蓝 / 近黑金 / 冷薄荷…"这样一份**可选清单** —— 有清单就意味着
+# 用户的片子只能在 8 个预设外观里挑，第 9 种永远不存在。
+#
+# 现在的模型是**连续色相空间**：
+#   · 底色 = (色相 h ∈ [0,360), 饱和度 s, 明度 v) 三个连续量 -> 直接算出 bg/bg2/surface；
+#   · 其余 8 个语义色（ink/muted/dim/accent/accent2/good/bad/rule）由对比度网格求解；
+#   · 全部通过 theme_lint 才算数（对比度不足就重采，绝不悄悄放行）。
+# 于是"第 9 种外观"不是新增模板，而是把 h 转到 200° 就自然得到的东西。
+_PALETTE_SPACE = {
+    True:  {"v": (0.030, 0.075), "s": (0.10, 0.55)},   # 暗色片：底子压很暗
+    False: {"v": (0.90, 0.985),  "s": (0.02, 0.28)},   # 亮色片：纸感底子
 }
+
+
+def _palette_from_hue(hue, sat, val, dark):
+    """(h,s,v) -> 底色三件套 bg/bg2/surface（连续量，无数值枚举）。"""
+    def hsv(h, s, v):
+        return ST.hsv_to_rgb(h % 360.0, _clamp(s, 0.0, 1.0), _clamp(v, 0.0, 1.0))
+    bg = hsv(hue, sat, val)
+    # bg2 更亮一档、surface 再亮一档：层次靠明度差，不靠换色相（换色相会变"两部片"）
+    step2 = 0.055 if dark else -0.045
+    step3 = 0.100 if dark else -0.075
+    bg2 = hsv(hue + 6.0, sat * 1.10, val + step2)
+    surface = hsv(hue + 10.0, sat * 1.18, val + step3)
+    return bg, bg2, surface
+
+
+# 兼容层：老代码/文档里还在用 family 名的地方，按名字反查一个"等效连续点"。
+# 注意它**不是**模板清单：采样器不再从这 8 个名字里挑，只是让旧输入还能被解释。
+_LEGACY_FAMILY_ANCHOR = {
+    "deep-blue": (210.0, 0.62, 0.075, True),
+    "near-black": (240.0, 0.18, 0.038, True),
+    "cool-mint": (168.0, 0.52, 0.085, True),
+    "sand": (36.0, 0.40, 0.105, True),
+    "slate": (215.0, 0.28, 0.145, True),
+    "forest": (150.0, 0.55, 0.075, True),
+    "warm-paper": (38.0, 0.14, 0.945, False),
+    "ink-paper": (60.0, 0.03, 0.965, False),
+}
+PALETTE_FAMILIES = _LEGACY_FAMILY_ANCHOR
 
 # 11 个颜色字段（theme_lint 检的就是这些；顺序固定，便于审计）
 PALETTE_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
@@ -151,12 +174,10 @@ _ROLE_HUE = {"ink": 0, "muted": 0, "dim": 0, "accent": 0, "accent2": 150}
 _GOOD_HUE = 135.0
 _BAD_HUE = 5.0
 
-# 情绪 -> 曲风（P0 桥：scorekit 仍是 9 套编曲参数；P2 会换成参数化编排器）
-_MUSIC_BY_MOOD = {
-    "calm": "lo-fi", "reflective": "magazine", "hopeful": "paper",
-    "steady": "tech-deep", "driving": "vivid", "tense": "cinema",
-    "uplifting": "epic",
-}
+# 情绪 -> BPM / 层门限。注意这里**没有"情绪 -> 曲风"的映射**：
+# v1.0 曾有一张 _MUSIC_BY_MOOD 把 7 种情绪映射到 7 套 scorekit 风格表，
+# 那是把"配乐模板"伪装成参数。v1.0.1 起配乐由 musicgen 现场编排，
+# 情绪只决定 BPM 与织体门限，不再指向任何现成风格。
 _MOOD_BPM = {
     "calm": 78, "reflective": 86, "hopeful": 92, "steady": 104,
     "driving": 124, "tense": 98, "uplifting": 118,
@@ -242,6 +263,37 @@ _INSETS = (0, 20, 40, 60)
 _TOP_KEYS = ("schema", "id", "label", "pitch", "structure", "visual", "audio", "pacing",
              "_unmatched_constraints")
 _STRUCT_KEYS = ("segments", "beats", "hold_policy", "target_sec")
+# 主题字典的字段清单（与 stylekit._theme 构造器的产出严格一致）。
+# 从构造器现场造一份样板再取键，而不是手抄一份常量 —— 手抄的清单会和构造器漂移。
+def _theme_field_keys():
+    """主题字段清单：从 _theme 构造器现场造一份样板再取键。
+
+    为什么不再从 ST.THEMES[某套内置主题] 取：v1.0.1 删光了内置主题，没有"参照物"了。
+    也不手抄一份常量 —— 手抄的清单一定会在某次改构造器时漂移，
+    然后表现成"某个颜色字段取不到"这种半夜才能查出来的 KeyError。
+    """
+    pal = {"bg": (0, 0, 0), "bg2": (16, 16, 16), "surface": (32, 32, 32),
+           "ink": (240, 240, 240), "muted": (180, 180, 180), "dim": (120, 120, 120),
+           "accent": (200, 160, 60), "accent2": (80, 140, 220), "good": (60, 180, 110),
+           "bad": (220, 70, 70), "rule": (60, 60, 60)}
+    mat = {"vignette": 0.2, "vignette_tint": (0, 0, 0), "grain": 0.02,
+           "grain_freq": 1.2, "texture": "none", "texture_alpha": 0.0}
+    typ = {"family": "sans", "scale": {}, "line_gap": 1.3, "tracking": 0.0}
+    lay = {"layout": "left-stack", "card": {}, "safe_bias": 0}
+    mo = {"ease": "out3", "entrance_dx": 0, "entrance_dy": 30,
+          "push": 0.04, "item_stagger": 0.3, "transition": "dip"}
+    hud = {"style": "chip-left"}
+    probe = ST._theme("probe", "探针", (), pal, mat, typ, lay, mo, hud,
+                      {"luma_max": 0.045})
+    return tuple(probe.keys())
+
+
+# 模块加载时立刻算出来：它只是把构造器跑一遍取键名，没有副作用。
+# （曾经写成空元组占位、忘了回填，于是所有 design 都报"主题字段集合不一致"——
+#   断言本身是对的，错在参照物是空的。）
+_THEME_FIELD_KEYS = _theme_field_keys()
+
+
 _VISUAL_KEYS = ("palette", "family", "typography", "motif", "transition", "motion",
                 "bias", "layout", "hud", "size", "fps")
 _TYPO_KEYS = ("tracking", "line_gap", "number", "ratio", "align")
@@ -342,18 +394,25 @@ def _solve_palette(family, hue_shift=0.0, target_shift=0.0):
     hue_shift / target_shift 是采样器给同族不同候选留的小扰动（确定性，幅度很小），
     让"同族不同设计"也有色相差异；扰动不会改变可行性（网格里始终有 v=0/v=1 的端点）。
     """
-    if family not in PALETTE_FAMILIES:
-        raise ValueError("未知配色族 %r；可用：%s"
-                         % (family, " / ".join(PALETTE_FAMILIES)))
-    fam = PALETTE_FAMILIES[family]
-    bg, bg2, surface = fam["bg"], fam["bg2"], fam["surface"]
-    dark = bool(fam["dark"])
+    # family 参数现在接受两种输入：
+    #   · 三元组/四元组 (hue, sat, val, dark) —— 采样器的正常路径，连续色相；
+    #   · 老的族名字符串 —— 只是让旧 design.json 还能被解释（见 _LEGACY_FAMILY_ANCHOR），
+    #     **不是**"可选清单"，采样器永远不会主动从这里挑。
+    if isinstance(family, (tuple, list)):
+        hue, sat, val = float(family[0]), float(family[1]), float(family[2])
+        dark = bool(family[3]) if len(family) > 3 else True
+    elif family in _LEGACY_FAMILY_ANCHOR:
+        hue, sat, val, dark = _LEGACY_FAMILY_ANCHOR[family]
+    else:
+        raise ValueError("配色必须是 (色相, 饱和度, 明度, 暗色) 四元组或老族名；收到 %r"
+                         % (family,))
+    bg, bg2, surface = _palette_from_hue(hue, sat, val, dark)
     refs = (bg, bg2)
     colors = {"bg": bg, "bg2": bg2, "surface": surface}
     lost = []
     for role in ("ink", "muted", "dim", "accent", "accent2"):
         s0, v0 = _ROLE_INTENT[dark][role]
-        c = _solve_role(fam["accent_hue"] + _ROLE_HUE[role] + hue_shift,
+        c = _solve_role(hue + _ROLE_HUE[role] + hue_shift,
                         _clamp(s0 + target_shift, 0.0, 1.0),
                         _clamp(v0 - target_shift, 0.0, 1.0),
                         ST.LINT_LIMITS[role], refs)
@@ -368,8 +427,8 @@ def _solve_palette(family, hue_shift=0.0, target_shift=0.0):
         else:
             colors[role] = c
     if lost:
-        raise ValueError("配色族 %s 下这些语义色无解（对比度不可达）：%s"
-                         % (family, "、".join(lost)))
+        raise ValueError("配色 (hue=%.1f sat=%.2f val=%.3f dark=%s) 下这些语义色无解"
+                         "（对比度不可达）：%s" % (hue, sat, val, dark, "、".join(lost)))
     colors["rule"] = (255, 255, 255) if dark else (16, 16, 16)
     return {k: colors[k] for k in PALETTE_KEYS}
 
@@ -459,7 +518,10 @@ def _theme_of_design(design):
         dict(style=vis["hud"]),
         qa,
     )
-    ref = set(ST.THEMES[ST.DEFAULT_STYLE].keys())
+    # 主题的字段清单：v1.0.1 起没有内置主题可参照，改成从构造器现场造一份样板取键。
+    # 为什么还要求"字段完全一致"：scenes.py 按固定键名取色，少一个键就是 KeyError，
+    # 多一个键则说明构造器与消费端脱节 —— 两边必须严丝合缝。
+    ref = set(_THEME_FIELD_KEYS)
     if set(th.keys()) != ref:
         raise ValueError("主题字段集合与 stylekit 不一致：缺 %s / 多 %s"
                          % (sorted(ref - set(th.keys())), sorted(set(th.keys()) - ref)))
@@ -501,21 +563,8 @@ _VISUAL_PROBE_ID = "__designkit_probe__"
 
 
 def _visual_lint_language(lang):
-    """用 stylekit.visual_lint 体检一份临时语言包（阈值同源，本文件不重写边界）。
-
-    做法：把语言包临时注册进 stylekit.VISUAL_LANGUAGES（同一个 dict 对象），跑完恢复。
-    这样 transition.dur / motif.density / push / ratio / tracking / line_gap / enter
-    的门槛全部来自 stylekit，不存在"两边各写一份、改一边忘另一边"。
-    """
-    old = ST.VISUAL_LANGUAGES.get(_VISUAL_PROBE_ID)
-    ST.VISUAL_LANGUAGES[_VISUAL_PROBE_ID] = lang
-    try:
-        return list(ST.visual_lint(_VISUAL_PROBE_ID))
-    finally:
-        if old is None:
-            ST.VISUAL_LANGUAGES.pop(_VISUAL_PROBE_ID, None)
-        else:
-            ST.VISUAL_LANGUAGES[_VISUAL_PROBE_ID] = old
+    """对任意 language 字典做体检（v1.0.1：直接调纯函数，不再往 stylekit 的表里临时注册）。"""
+    return ST.visual_lint_language(lang)
 
 
 # ============================================================================
@@ -633,9 +682,14 @@ def _validate_music(mu, bad):
     mode = mu.get("mode")
     if mode not in ("params", "file", "off"):
         bad.append("audio.music.mode=%r 必须是 params / file / off" % (mode,))
-    _need(mu, ("style", "scale", "bpm", "key", "mood", "seed"), "audio.music", bad)
-    if "style" in mu:
-        _enum_of(mu["style"], tuple(ST.STYLE_IDS), "audio.music.style", bad)
+    # v1.0.1：**不再要求 style**，也不再限定成 8 个内置名。
+    # 配乐由 musicgen 现场编排，它吃的是 bpm/key/scale/mood/seed + 可选的
+    # progressions/motif/drums/voices —— 没有"曲风"这个概念了。
+    # 老 design.json 里残留的 style 字段仍被接受（不校验取值），但不参与渲染，
+    # 避免"升级后老设计全部报错"。
+    _need(mu, ("scale", "bpm", "key", "mood", "seed"), "audio.music", bad)
+    if "style" in mu and not isinstance(mu["style"], str):
+        bad.append("audio.music.style 若存在必须是字符串（v1.0.1 起不参与渲染）")
     if "scale" in mu:
         _enum_of(mu["scale"], SCALES, "audio.music.scale", bad)
     if "mood" in mu:
@@ -982,7 +1036,8 @@ def design_to_plan(design):
         "layout_default": vis["layout"],
         "chapter_layout": {},
         "music": {
-            "style": mu["style"],
+            # v1.0.1：不再有 "style" 这个键 —— 配乐由 musicgen 现场编排，
+            # 没有"曲风表"可指向。老设计里残留的 style 字段被忽略。
             "scale": mu["scale"],
             "bpm": float(mu["bpm"]),
             "bpm_source": "design",
@@ -1353,15 +1408,17 @@ def _palette_family_of(design):
     if not isinstance(pal, dict):
         return None
     try:
-        got = tuple(tuple(ST._color_of(pal.get(k), "visual.palette." + k))
-                    for k in ("bg", "bg2", "surface"))
+        bg = tuple(ST._color_of(pal.get("bg"), "visual.palette.bg"))
     except Exception:                                     # noqa: BLE001
         return None
-    for name in PALETTE_FAMILIES:
-        fam = PALETTE_FAMILIES[name]
-        if got == (tuple(fam["bg"]), tuple(fam["bg2"]), tuple(fam["surface"])):
-            return name
-    return None
+    # "同一个配色"= 底色的**色相 + 明暗**落在同一档。量化到 24° 是为了让
+    # "差 3° 的两个色相"算同一种（人眼也分不出），而不是让每个颜色都算新配色。
+    try:
+        hue, _s, _v = ST.rgb_to_hsv(bg)
+    except Exception:                                     # noqa: BLE001
+        return None
+    return "%s-%02d" % ("dark" if ST.is_dark({"bg": bg}) else "light",
+                        int(round(hue / 24.0)) % 15)
 
 
 def _voice_ids_of(design):
@@ -1458,14 +1515,24 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     """
     cb = _brief_canon(brief)
     ctext = _canonical(cb)
-    tag = "" if seed is None else str(seed)
+    # nonce 是"这一次生成本身"的身份：默认每次调用新生成，传入 seed 时固定。
+    # 它必须参与哈希，否则同一 brief 的第二次生成与第一次逐位相同（v1.0 的 bug）。
+    nonce = brief.get("_nonce") if isinstance(brief, dict) else None
+    tag = "%s|%s" % ("" if seed is None else str(seed), nonce or "")
 
     def h(salt):
         return _digest(salt, ctext, tag, index, attempt)
 
     dom = domain or {}
-    fam_names = tuple(dom.get("palette") or PALETTE_FAMILIES.keys())
-    family = fam_names[(h("palette") + index) % len(fam_names)]
+    # 配色 = 连续色相空间里的一个点（不再是 8 个名字之一）。
+    # 色相按黄金角 137.5° 步进：相邻候选的色相必不接近（比固定步长更难撞色），
+    # 且整体分布均匀 —— 这就是"每条片底色都不同"的来源。
+    dark = h("dark") % 100 < 62                       # 约 62% 暗色片（贴合"工程技术片"气质）
+    sp = _PALETTE_SPACE[dark]
+    hue = (h("palette") + index * 137.508) % 360.0
+    sat = sp["s"][0] + (h("sat") % 100) / 100.0 * (sp["s"][1] - sp["s"][0])
+    val = sp["v"][0] + (h("val") % 100) / 100.0 * (sp["v"][1] - sp["v"][0])
+    family = (hue, sat, val, dark)
     motifs = tuple(dom.get("motif") or MOTIFS)
     motif = motifs[(h("motif") + 3 * index) % len(motifs)]
     transes = tuple(dom.get("transition") or TRANSITIONS)
@@ -1515,7 +1582,6 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     bpm = _MOOD_BPM[mood] + (h("bpm") % 9) - 4
     keys = ST.MINOR_KEYS if scale == "minor" else ST.MAJOR_KEYS
     key = keys[h("key") % len(keys)]
-    music_style = _MUSIC_BY_MOOD[mood]
     music_seed = h("mseed") % 100000
 
     vcount = 1 + h("vcount") % 3
@@ -1526,7 +1592,8 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     did = "design-" + hashlib.sha1(
         ("%s|%s|%s|%s" % (ctext, tag, index, attempt)).encode("utf-8")
     ).hexdigest()[:8]
-    fam_label = PALETTE_FAMILIES[family]["label"]
+    # 标签描述"这配色长什么样"，而不是"它属于哪一套"（没有套了）
+    fam_label = ("深" if dark else "浅") + "色 h%03d" % int(round(hue) % 360)
     label = "%s·%s" % (fam_label, _MOTIF_WORD[motif])
     pitch = "%s×%s：%s，%s转场，%s声线，%d BPM %s。" % (
         fam_label, _MOTIF_WORD[motif], _MOOD_WORD[mood], _TRANS_WORD[trans],
@@ -1562,7 +1629,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
         "audio": {
             "voice": {"mode": "edge_id", "id": picks[0], "map": vmap,
                       "jitter": jitter, "max_distinct": vcount},
-            "music": {"mode": "params", "style": music_style, "scale": scale,
+            "music": {"mode": "params", "scale": scale,
                       "bpm": int(bpm), "key": key, "mood": mood, "seed": int(music_seed)},
             "sfx": {"enabled": True,
                     "density": SFX_DENSITIES[1 + h("sfx") % 3],
@@ -1576,9 +1643,18 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
 
 
 def sample_designs(brief, n=3, seed=None):
-    """确定性采样 n 个两两可区分的 design（brief 的 must_have/avoid 在这里硬过滤）。
+    """现场采样 n 个两两可区分的 design（brief 的 must_have/avoid 在这里硬过滤）。
 
-    - 所有选择由 sha1(brief 规范 JSON + index + seed + attempt) 派生，禁 random；
+    **默认"每次都不一样"**（v1.0.1）：
+      - 不传 seed -> 每次调用都生成一个**新的 nonce**，同一 brief 跑两次得到不同设计；
+      - 传 seed   -> 固定 nonce，逐字节可复现（调试、回归、写文档示例时用）。
+    为什么把默认反过来：v1.0 的默认是"同一 brief 永远同一结果"，实测两次独立进程
+    产出的指纹完全相同（31f64edd34e502f9 / 52d385953835379e）——那等于把"没有模板"
+    做成了"模板藏在哈希里"，用户要新片子只能改 brief 措辞。这不满足"每条视频都不一样"。
+
+    其余行为不变：
+    - 所有选择由 sha1(非对称 nonce + brief 规范 JSON + index + seed + attempt) 派生，
+      全程禁 random / time / hash()（str hash 每进程带随机盐）；
     - must_have/avoid 先解析成"每类允许的取值"，下标步进在**允许集**上轮转：
       约束于是不靠重采样碰运气（声线池只有 3 个女声时，"碰 3 次全中"的概率低到不可用）；
     - 每个候选先过 validate_design，再按 brief 复核一遍约束（不信"域已经限住"）；
@@ -1591,6 +1667,15 @@ def sample_designs(brief, n=3, seed=None):
 
     must, avoid, domain, unmatched = _resolve_constraints(brief)
     hint = _narrow_hint(must, avoid)
+    # 显式 seed = 可复现（同 seed 同结果）；不给 seed = 每次新 nonce（同 brief 也不同片）。
+    # 随机源用 os.urandom 而不是 random：这里要的是"不可预测"，不是"伪随机序列"，
+    # 而且 nonce 只参与 sha1 输入，不参与任何需要序列性质的运算。
+    if seed is None:
+        brief = dict(brief)
+        brief["_nonce"] = os.urandom(8).hex()
+    elif "_nonce" not in brief:
+        brief = dict(brief)
+        brief["_nonce"] = ""
 
     out = []
     for i in range(n):

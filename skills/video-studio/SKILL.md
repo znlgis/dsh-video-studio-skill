@@ -48,8 +48,9 @@ python propose.py --brief "<题材/受众/时长/语气>" --script film.json --n
 1. `propose.py --confirm` 之前，`render.py` 的 `frames`/`all` 会被提案闸拦下（默认警告，`--require-proposal` 失败）。
 2. 候选必须**两两在 ≥2 个设计维度上不同**（配色族/母题/转场/缓动/编号/配乐/声线）。只换颜色不算多方案，`diversity.vs[].n < 2` 会被标出来。
 3. 每个候选必须有一句中文**立意**（`pitch`），说清"这个方案想干成什么样"——不是"方案 A/方案 B"。
-4. **方案不限于内置模板**：`design.json` 的字段是全开放的（35 字段主题 + 五组视觉语言签名 + 声音/配乐/节奏），
-   可以写出现有 8 套之外的全新设计；`presets/` 只是可选起点，不是天花板。
+4. **没有内置模板可套**（v1.0.1）：`design.json` 的所有字段都开放（35 字段主题 + 五组视觉语言签名 +
+   声音/配乐/节奏），配色是**连续色相空间**里的任意一点，不是从若干套现成外观里挑。
+   每次提案都是现场生成——同一个 brief 连拍两次会得到不同设计（要复现就传 `--seed`）。
 
 **只有一种情况可以跳过提案**：纯修复 / 纯重渲（不改内容、不改设计，只修音画不同步或重出片）。
 这种情况下用 `--require-proposal` 之外的方式跑，并在回复里说明"本次未提案，因为…"。
@@ -60,15 +61,19 @@ python propose.py --brief "<题材/受众/时长/语气>" --script film.json --n
 |---|---|
 | 不写 `style` → 静默走 v0.4 老外观（固定皮肤 + 120BPM/Dm） | **报错**，并给两步迁移指引（先 `propose.py` 再 `--confirm`） |
 | `style: "legacy"` 是合法值 | **报错**（同一个坑的另一种写法） |
-| `style: "auto"` 自动挑一套内置风格 | **已弃用**：仍然工作，但每次运行打一条 deprecation 警告；主路径是 `work/design.json` |
-| 8 套风格写死在 `stylekit.py` 里 | 下沉成 `presets/*.json`（**数据**，可读可改可删可加；全部 `auto:false`，不参与自动选型） |
+| `style: "auto"` 自动挑一套内置风格 | **已删除**（v1.0.1）：内置风格表已清空，任何 style 值都会报错 |
+| 8 套风格写死在 `stylekit.py` 里 | **全部删除**：没有 `THEMES`/`STYLES`/`VISUAL_LANGUAGES`，也没有 `presets/` |
+| 8 套配乐风格表在 `scorekit.py` | **已删除**：配乐由 `musicgen.py` 按参数现场编排 |
 | `scenes.draw_frame` 有 legacy 分支 | 已删（不可达的死分支） |
 
-以预设为起点而不是从白纸开始：
+**没有"以某套预设为起点"这回事了**（v1.0.1）。要特定外观只有两条路：
 
 ```bash
-python presetkit.py                                   # 列出 8 套预设
-python propose.py --preset cinema --script film.json  # 以"电影青橙"为起点，配色保持不变、只扰动结构签名
+# ① 自然语言提要求（认得 must_have/avoid 里的关键词）
+python propose.py --brief "科技发布会，深蓝，要遮幅" --script film.json
+
+# ② 直接手写 design.json（字段全开放，配色是任意 RGB）
+python render.py --script film.json --stage all     # 前提：work/design.json 已存在
 ```
 
 详细契约见 [references/proposal.md](references/proposal.md) 与 `schemas/design.schema.json`。
@@ -94,8 +99,10 @@ cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
 #    v0.6.0 起 gates.py（门禁账本）与 stagewatch.py（阶段新鲜度）是**必需**的：
 #    render.py 直接 import 它们，少一个就是 ModuleNotFoundError。
 cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,stagewatch.py} .
-# 可选（v0.3）：要程序化音效/配乐就一并拷；要走浏览器渲染再拷 webengine.py + assets/web/
-cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
+# 可选（v0.3）：要程序化音效就拷 sfxkit；要走浏览器渲染再拷 webengine.py + assets/web/
+cp <SKILL_DIR>/scripts/{sfxkit.py,voicekit.py,qa_frames.py,musicgen.py} .
+#    musicgen.py 是配乐编排器（v1.0.1：没有风格表，按参数现场生成）；scorekit.py 只是
+#    它的合成原语库（和声/律动/混音/落盘），不参与「选曲风」，不拷它 musicgen 照样出配乐。
 #    v0.8.0 起渲染前预检 / 全片 VMAF / ASR 回读是三个**可选模块**：
 #    拷了才有对应门禁（G0 / G11 / G12）；不拷就记 skipped 并写明原因，不会让渲染失败。
 #    但"skipped != 通过"——交付前请确认这三项是被你**主动**跳过的。
@@ -170,7 +177,7 @@ python render.py ... --stage style    # 只解析风格 -> work/style.json（画
 python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
 python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口；v0.9 还选构图、打印分镜、落 work/storyboard.json）
 python render.py ... --stage cues     # 只出提示点 -> work/cues.json（声音跟着画面走）
-python render.py ... --stage score    # 只出配乐 -> work/music.wav（scorekit）
+python render.py ... --stage score    # 只出配乐 -> work/music.wav（musicgen 现场编排）
 python render.py ... --stage sfx      # 只出音效轨 -> work/sfx.wav（sfxkit，按 cues.json）
 python render.py ... --stage audio    # 只混音 -> audio.wav（旁白+配乐+音效，音效响时配乐让位）
 python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--engine pil|web，--jobs N 分块并行）
@@ -288,7 +295,7 @@ python webengine.py textqa ./web/index.html            # 文字重叠/出画/一
 | 层 | 谁做 | 落盘 | 说明 |
 |---|---|---|---|
 | 旁白 | `filmkit.tts`（edge-tts） | `work/tts/*.mp3` | **唯一的时长权威**：时间轴由它反推 |
-| 配乐 | `scorekit.py`（程序化） | `work/music.wav` | 和弦表 + 律动层 + 分段能量；段落边界对齐小节线 |
+| 配乐 | `musicgen.py`（参数化编排） | `work/music.wav` | 按设计里的 bpm/key/scale/mood/seed + 编排参数现场生成；**没有现成曲风可挑** |
 | 音效 | `sfxkit.py`（物理建模） | `work/sfx.wav` | 按 `cues.json` 里登记的提示点逐条合成 |
 
 三条总线在 `--stage audio` 里合成：**音效响起时配乐自动让位**（`duck_db`，v0.7 默认 4 dB，
@@ -296,7 +303,7 @@ cinema/epic 5.5 dB；旧版 3 dB 在段落过门时配乐几乎与音效等高�
 最后交给 ffmpeg 两遍 loudnorm 到 -16 LUFS / 真峰 ≤ -1 dBTP。**不要**自己在 numpy 里做最终响度标准化——
 你有 `loudnorm`，它比手写归一化准得多，而且真峰才是门禁。
 
-> **v0.7 片内分离**：配乐在段落交界本来就有过门（scorekit 的 swell/riser/sub_boom），
+> **v0.7 片内分离**：配乐在段落交界本来就有过门（编排器写的 swell / riser / sub_boom），
 > sfx 轨不再在同一个边界重复放 whoosh/riser——`--stage sfx` 会对落在
 > [边界 - 2.2 s, 边界] 内的转场类 cue 自动 -3 dB（`sfx.duck_transitions=false` 可关）。
 > 提示音的音高现在跟随配乐调性（`in_key(freq, key)`），不再硬编码 D 小调五声。
@@ -444,7 +451,7 @@ v0.9 把这件事拆成三层**正交**的：
 
 | 层 | 决定什么 | 谁读它 | 产物 |
 |---|---|---|---|
-| 叙事 `kind` | 声线、语气、配乐能量 | voicekit / scorekit | 本版**没有新增 kind 值** |
+| 叙事 `kind` | 声线、语气、配乐能量 | voicekit / musicgen | 本版**没有新增 kind 值** |
 | 场景 `type`（10 类构图） | 这段画面长什么样 | `assets/scenes.py` 的 10 个绘制器（`_DRAWERS`） | timeline 的 `scene_type`、`work/storyboard.json` |
 | 视觉语言（风格 id） | 这套风格怎么画（母题/转场/字距/重心） | `stylekit.VISUAL_LANGUAGES` | `work/style.json` 的 `language` |
 
@@ -527,7 +534,7 @@ v0.7 把指纹推进到**结构层**（详见 **references/audio-variation.md**�
 | 配乐进行 | 风格固定一套进行 | 指纹在风格自带的 calm/body/drive 三档里选一档（同风格素材，只换功能顺序） |
 | 配乐动机 | 风格固定动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
 | 配乐鼓型 | 固定落点 | 指纹加 ghost kick（不与现有落点重复），clap 位置 ±0.5 拍 |
-| 出片接线 | 指纹只进 seed | `render.py` 的 `st_score` 把 `fingerprint.full` 传进 `scorekit.render()`；legacy 不传 |
+| 出片接线 | 指纹只进 seed | `render.py` 的 `st_score` 把 `seed_effective`（含指纹）传给 `musicgen.render()`；v1.0.1 起没有 scorekit 风格路径 |
 | 音效 seed | `seed_base + i`（只跟 cue 顺序） | `content_seed(seed_base, style, content_fp, type, t)`（跟内容走） |
 | 提示音音高 | 硬编码 D 小调五声 | `in_key(freq, key)` 跟随配乐调性 |
 | 段落边界 | 配乐过门 + sfx 转场各响各的 | 边界前 2.2 s 内的 whoosh/riser **自动 -3 dB**（不与过门撞车） |
@@ -954,7 +961,8 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
-| `scripts/scorekit.py` | **（v0.3）程序化配乐**：和弦表/分段能量/律动层/吸气/自动电平，输出 `music.wav` |
+| `scripts/musicgen.py` | **（v1.0.1）参数化配乐编排器**：和弦进行/动机/鼓型/音色全可传参，现场生成 `music.wav`（没有风格表） |
+| `scripts/scorekit.py` | **配乐合成原语**：和声/律动/吸气/自动电平/混音/响度测量/24-bit 落盘。v1.0.1 删掉了 9 套 `MUSIC_STYLES` 风格表（模板），留下的只是可复用的底层技术 |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
 | `scripts/qa_frames.py` | **（v0.3）帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
 | `assets/scenes.py` | 场景模板（开场/正文卡片/收尾 + **`cues()` 提示点钩子示范**），含缓存排版与预烘焙背景的正确写法 |
@@ -1046,7 +1054,8 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 模块 | 实测数据 |
 |---|---|
 | `sfxkit` | 24 配方单次渲染 ≤ 1.5 s（**selftest 断言的门槛**；空载最慢 wind ≈0.8 s，并发负载下 ~1.3 s）；**389 s 长环境声** wind 5.7–7.8 / rain 7.3–7.9 / campfire 6.3–6.7 s（预算 8 s，随负载浮动）；真峰与 ffmpeg 差 **0.05 dB**；响度与 ebur128 差 **0.01 LU** |
-| `scorekit` | 389 s 全片 **4–8 s**（v0.3 首测 6.7–8.2 s，v0.4 复测 3.9–5.8 s，随负载）；60 s 实测 2–4 s；输出 -18.5 LUFS / -1.44 dBTP（母带交给 loudnorm）。**selftest 会打印当下实测**，以那个为准 |
+| `musicgen` | 12 s 合成 **0.30 s**、30 s **0.78 s**（v1.0.1 实测）；输出峰值 -6 dBFS（母带交给 loudnorm）。参数全部参与编排（seed/mood/voices/progressions 相关性均 < 0.95） |
+| `scorekit` | 作为合成原语：389 s 全片 **4–8 s**（v0.3 实测）、60 s 2–4 s；24-bit 落盘与响度测量仍被复用。**它不再是配乐引擎**，`--selftest` 只验原语与 legacy 逐样本兼容 |
 | `webengine` | **80–130 ms/帧**（1080p30，Edge 无头，PNG 截图）；12 s / 360 帧 **28–30 s**（2 workers，含启动）；**同一页面会话内**同帧两次截图 byte 完全一致（跨会话默认 GPU 光栅有 ≤4 像素、±1 级抗锯齿差异，要跨会话字节级一致请开 `--deterministic`，代价约 +22%/帧） |
 | `qa_frames` | 30 s 片全量深检 **约 1 s**（160×90 流式解码 903 帧）；闪烁/空窗/静止/同步 |
 | 端到端 | 30.10 s 模板片：TTS 4 句 → cues 由 scenes.py 按 kind 生成（v0.7，模板片 17 条）→ 配乐 3.3 s → 音效逐条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
@@ -1118,14 +1127,14 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 |---|---|---|---|
 | stage 列表 | 7 个 | **10 个**（+cues/score/sfx） | `--stage all` 顺序变了；单独跑多阶段时补 `--stage cues sfx` |
 | 渲染引擎 | 只有 PIL | `--engine pil\|web` | 想用浏览器就拷 `assets/web/` 并装 playwright |
-| 配乐 | 只有和弦床 | 有 `bpm` 时用 scorekit | 想保留旧声音：`"music": {"mode": "bed"}` 或不写 `bpm` |
+| 配乐 | 只有和弦床 | 有 `bpm` 时由 musicgen 现场编排 | 想保留旧声音：`"music": {"mode": "bed"}` 或不写 `bpm` |
 | 音效 | 每段一声 whoosh | 按 `cues.json` 合成 | 想保留旧行为：不写 `sfx.cues`、不写 `scenes.cues()`，且不跑 `--stage cues` |
 | 混音 | 旁白+配乐两路 | 旁白+配乐+音效三路（带 duck） | 无（自动） |
 | 时间轴 | lead/tail/min_dur | + `hold` / `bar` | 想加停留就写 `hold` |
 | 质检 | 成片级 | + 帧级深检（有 `qa_frames.py` 时） | 无（自动；没这个文件就跳过） |
 | qa 退出码 | 恒 0 | **有 FAIL 就返回 1** | CI 里会开始真的失败——这是故意的 |
 
-**新增文件**：`sfxkit.py` / `scorekit.py` / `webengine.py` / `qa_frames.py` / `assets/web/`（都是可选，缺失时对应能力自动降级并打印 WARN）。
+**新增文件**：`sfxkit.py` / `scorekit.py` / `webengine.py` / `qa_frames.py` / `assets/web/`（都是可选，缺失时对应能力自动降级并打印 WARN）。**v1.0.1 起配乐改由 `musicgen.py` 现场编排**，scorekit 只作为它的合成原语库保留。
 
 ### 13.3 v0.1 → v0.2（历史）
 
@@ -1147,7 +1156,8 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 cd <SKILL_DIR>/scripts
 python selfcheck.py                  # 58 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
-python scorekit.py --selftest        # 配乐
+python musicgen.py --selftest        # 配乐编排器（参数化）
+python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）
 python webengine.py --selftest       # 浏览器引擎（35 项，会真起无头浏览器，约 60 秒）
 python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
 ```

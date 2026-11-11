@@ -40,7 +40,7 @@ v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选
 
 | 层 | 由谁决定 | 落在哪 | 改它会怎样 |
 |---|---|---|---|
-| 叙事 kind | 作者写 `lines[].kind` | hook / body / quote / outro / emphasis / calm | 换旁白语气与配乐能量（voicekit / scorekit 读它） |
+| 叙事 kind | 作者写 `lines[].kind` | hook / body / quote / outro / emphasis / calm | 换旁白语气与配乐能量（voicekit / musicgen 读它） |
 | 场景 type | grammar 按内容打分，或作者显式写 `lines[].type` | `work/storyboard.json`、timeline 的 `scene_type` | 换构图（10 个绘制器之一） |
 | 视觉语言 | 风格 id（`style`） | `work/style.json` 的 `language` | 换这套风格的骨架参数（母题 / 转场 / 字距 / 重心） |
 

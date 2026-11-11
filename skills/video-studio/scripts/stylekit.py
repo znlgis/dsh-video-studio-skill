@@ -45,6 +45,50 @@ import sys
 # ============================================================================
 
 
+def hsv_to_rgb(h, s, v):
+    """HSV(0..360, 0..1, 0..1) -> (r,g,b) 整数 0..255。
+
+    技术原语：让"配色"可以是一个**连续空间**而不是一份命名清单。
+    有了它，第 9 种外观 = 把色相转到 200°，不需要有人先写一个模板文件。
+    """
+    h = float(h) % 360.0
+    s = max(0.0, min(1.0, float(s)))
+    v = max(0.0, min(1.0, float(v)))
+    c = v * s
+    x = c * (1.0 - abs((h / 60.0) % 2.0 - 1.0))
+    m = v - c
+    if h < 60:
+        rgb = (c, x, 0.0)
+    elif h < 120:
+        rgb = (x, c, 0.0)
+    elif h < 180:
+        rgb = (0.0, c, x)
+    elif h < 240:
+        rgb = (0.0, x, c)
+    elif h < 300:
+        rgb = (x, 0.0, c)
+    else:
+        rgb = (c, 0.0, x)
+    return tuple(int(round(max(0.0, min(1.0, ch + m)) * 255.0)) for ch in rgb)
+
+
+def rgb_to_hsv(rgb):
+    """(r,g,b) 0..255 -> (h 0..360, s 0..1, v 0..1)。与 hsv_to_rgb 互逆。"""
+    r, g, b = (max(0.0, min(1.0, float(c) / 255.0)) for c in tuple(rgb)[:3])
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    if d < 1e-12:
+        return 0.0, 0.0, mx
+    if mx == r:
+        h = (60.0 * ((g - b) / d)) % 360.0
+    elif mx == g:
+        h = 60.0 * ((b - r) / d) + 120.0
+    else:
+        h = 60.0 * ((r - g) / d) + 240.0
+    s = 0.0 if mx < 1e-12 else d / mx
+    return h, s, mx
+
+
 def _srgb_to_lin(v):
     """sRGB 通道（0..255）-> 线性光。"""
     c = float(v) / 255.0
@@ -206,172 +250,24 @@ def _theme(style_id, label, keywords, palette, material, typ, layout, motion, hu
     }
 
 
-THEMES = {}
-
-THEMES["tech-deep"] = _theme(
-    "tech-deep", "科技深蓝",
-    ("AI", "算法", "代码", "模型", "系统", "数据", "架构", "开源", "编程", "大模型"),
-    dict(bg=(7, 14, 26), bg2=(17, 33, 54), surface=(26, 42, 64),
-         ink=(240, 245, 252), muted=(150, 174, 200), dim=(120, 142, 168),
-         accent=(243, 132, 60), accent2=(86, 170, 232),
-         good=(108, 178, 110), bad=(226, 96, 92), rule=(255, 255, 255)),
-    dict(vignette=0.40, vignette_tint=(0, 0, 0), grain=5.0, grain_freq=0.31,
-         texture="dots", texture_alpha=0.045),
-    dict(family="sans", scale={"display": (96, "bold"), "heading": (64, "bold"),
-                               "sub": (38, "light"), "body": (34, "reg"),
-                               "kicker": (28, "bold"), "chip": (27, "reg"),
-                               "brand": (23, "reg")}),
-    dict(layout="left-stack",
-         card={"radius": 14, "fill_a": 16, "outline_a": 28, "pad": 34, "h": 96, "gap": 118}),
-    dict(ease="out3", entrance_dx=0, entrance_dy=26, push=0.04, item_stagger=0.32, transition="black"),
-    dict(style="chip-left"),
-    dict(luma_max=0.030, flicker_thresh=6.0, dark=True),
-)
-
-THEMES["magazine"] = _theme(
-    "magazine", "杂志暖白",
-    ("报告", "复盘", "年度", "总结", "研究", "分析", "调研", "白皮书", "趋势", "发布"),
-    dict(bg=(250, 246, 238), bg2=(236, 228, 214), surface=(255, 252, 246),
-         ink=(28, 26, 24), muted=(88, 82, 74), dim=(112, 104, 94),
-         accent=(176, 48, 40), accent2=(38, 86, 128),
-         good=(30, 110, 72), bad=(160, 36, 32), rule=(28, 26, 24)),
-    dict(vignette=0.10, vignette_tint=(214, 204, 186), grain=3.0, grain_freq=0.27,
-         texture="paper", texture_alpha=0.030),
-    dict(family="serif", scale={"display": (92, "bold"), "heading": (60, "bold"),
-                                "sub": (36, "light"), "body": (33, "reg"),
-                                "kicker": (27, "bold"), "chip": (26, "reg"),
-                                "brand": (22, "reg")}, line_gap=1.34, tracking=2.0),
-    dict(layout="split-right",
-         card={"radius": 8, "fill_a": 26, "outline_a": 40, "pad": 30, "h": 92, "gap": 112},
-         safe_bias=-8),
-    dict(ease="out5", entrance_dx=18, entrance_dy=20, push=0.06, item_stagger=0.38, transition="wash"),
-    dict(style="corner-line"),
-    dict(luma_max=0.045, flicker_thresh=6.0, dark=False),
-)
-
-THEMES["paper"] = _theme(
-    "paper", "手绘纸感",
-    ("手工", "自然", "历史", "传统", "木", "田野", "匠", "古", "茶", "手艺", "山河"),
-    dict(bg=(240, 232, 212), bg2=(222, 210, 186), surface=(249, 244, 232),
-         ink=(46, 38, 30), muted=(92, 80, 64), dim=(112, 98, 80),
-         accent=(42, 72, 116), accent2=(124, 72, 32),
-         good=(48, 98, 60), bad=(150, 48, 40), rule=(46, 38, 30)),
-    dict(vignette=0.14, vignette_tint=(198, 184, 158), grain=9.0, grain_freq=0.22,
-         texture="paper", texture_alpha=0.055),
-    dict(family="kai", scale={"display": (92, "bold"), "heading": (60, "bold"),
-                              "sub": (36, "light"), "body": (33, "reg"),
-                              "kicker": (27, "bold"), "chip": (26, "reg"),
-                              "brand": (22, "reg")}, line_gap=1.36, tracking=1.0),
-    dict(layout="left-stack",
-         card={"radius": 4, "fill_a": 30, "outline_a": 52, "pad": 32, "h": 94, "gap": 116}),
-    dict(ease="inOut3", entrance_dx=0, entrance_dy=18, push=0.03, item_stagger=0.42, transition="wash"),
-    dict(style="corner-line"),
-    dict(luma_max=0.045, flicker_thresh=6.0, dark=False),
-)
-
-THEMES["vivid"] = _theme(
-    "vivid", "活力撞色",
-    ("活动", "上新", "招募", "挑战", "年轻", "潮流", "种草", "福利", "开箱", "限量"),
-    dict(bg=(20, 18, 34), bg2=(38, 26, 58), surface=(46, 34, 70),
-         ink=(255, 252, 246), muted=(206, 196, 224), dim=(168, 158, 190),
-         accent=(255, 214, 64), accent2=(120, 224, 255),
-         good=(120, 230, 150), bad=(255, 120, 150), rule=(255, 255, 255)),
-    dict(vignette=0.24, vignette_tint=(12, 10, 22), grain=4.0, grain_freq=0.35,
-         texture="grid", texture_alpha=0.060),
-    dict(family="sans", scale={"display": (104, "bold"), "heading": (68, "bold"),
-                               "sub": (39, "reg"), "body": (35, "reg"),
-                               "kicker": (30, "bold"), "chip": (27, "reg"),
-                               "brand": (23, "reg")}, line_gap=1.26, tracking=1.0),
-    dict(layout="center-stack",
-         card={"radius": 22, "fill_a": 30, "outline_a": 56, "pad": 32, "h": 100, "gap": 122}),
-    dict(ease="outBack", entrance_dx=0, entrance_dy=34, push=0.10, item_stagger=0.26, transition="black"),
-    dict(style="chip-left"),
-    dict(luma_max=0.030, flicker_thresh=8.0, dark=True),
-)
-
-THEMES["mono"] = _theme(
-    "mono", "极简黑白",
-    ("观点", "为什么", "本质", "真相", "极简", "反思", "边界", "定义", "取舍"),
-    dict(bg=(246, 246, 244), bg2=(222, 222, 220), surface=(255, 255, 255),
-         ink=(16, 16, 16), muted=(68, 68, 68), dim=(104, 104, 104),
-         accent=(16, 16, 16), accent2=(80, 80, 80),
-         good=(38, 92, 52), bad=(150, 36, 36), rule=(16, 16, 16)),
-    dict(vignette=0.06, vignette_tint=(214, 214, 212), grain=0.0, grain_freq=0.30,
-         texture="none", texture_alpha=0.0),
-    dict(family="sans", scale={"display": (104, "bold"), "heading": (66, "bold"),
-                               "sub": (36, "light"), "body": (33, "reg"),
-                               "kicker": (26, "bold"), "chip": (25, "reg"),
-                               "brand": (21, "reg")}, line_gap=1.40, tracking=6.0),
-    dict(layout="center-stack",
-         card={"radius": 0, "fill_a": 0, "outline_a": 70, "pad": 28, "h": 90, "gap": 108}),
-    dict(ease="inOut3", entrance_dx=0, entrance_dy=12, push=0.02, item_stagger=0.55, transition="none"),
-    dict(style="corner-line"),
-    dict(luma_max=0.045, flicker_thresh=6.0, dark=False),
-)
-
-THEMES["cinema"] = _theme(
-    "cinema", "电影青橙",
-    ("故事", "记忆", "城市", "深夜", "旅行", "纪实", "情绪", "时代", "变迁", "命运"),
-    dict(bg=(8, 14, 16), bg2=(20, 32, 34), surface=(26, 40, 42),
-         ink=(238, 234, 226), muted=(164, 176, 170), dim=(128, 140, 136),
-         accent=(232, 126, 58), accent2=(104, 196, 190),
-         good=(116, 196, 140), bad=(214, 92, 84), rule=(255, 255, 255)),
-    dict(vignette=0.55, vignette_tint=(0, 0, 0), grain=6.0, grain_freq=0.29,
-         texture="scanlines", texture_alpha=0.035),
-    dict(family="sans", scale={"display": (94, "bold"), "heading": (58, "bold"),
-                               "sub": (36, "light"), "body": (33, "reg"),
-                               "kicker": (27, "bold"), "chip": (26, "reg"),
-                               "brand": (22, "reg")}, line_gap=1.38, tracking=3.0),
-    dict(layout="center-stack",
-         card={"radius": 2, "fill_a": 14, "outline_a": 30, "pad": 30, "h": 92, "gap": 114}),
-    dict(ease="inOut3", entrance_dx=0, entrance_dy=16, push=0.12, item_stagger=0.46, transition="black"),
-    dict(style="corner-line"),
-    dict(luma_max=0.020, flicker_thresh=6.0, dark=True),
-)
-
-THEMES["lo-fi"] = _theme(
-    "lo-fi", "暖灰薄荷",
-    ("深夜", "学习", "效率", "专注", "写作", "整理", "笔记", "书", "日常", "房间"),
-    # 冷调灰绿：和 paper（暖牛皮纸）在色相上分开，不靠"亮度差不多"硬撑
-    dict(bg=(232, 238, 236), bg2=(210, 220, 216), surface=(244, 248, 246),
-         ink=(44, 52, 50), muted=(84, 98, 94), dim=(112, 126, 122),
-         accent=(20, 86, 84), accent2=(104, 72, 96),
-         good=(40, 100, 72), bad=(146, 52, 50), rule=(44, 52, 50)),
-    dict(vignette=0.12, vignette_tint=(206, 200, 190), grain=7.0, grain_freq=0.24,
-         texture="paper", texture_alpha=0.048),
-    dict(family="sans", scale={"display": (86, "bold"), "heading": (58, "bold"),
-                               "sub": (35, "light"), "body": (32, "reg"),
-                               "kicker": (26, "bold"), "chip": (25, "reg"),
-                               "brand": (21, "reg")}, line_gap=1.36, tracking=1.0),
-    dict(layout="left-stack",
-         card={"radius": 18, "fill_a": 40, "outline_a": 26, "pad": 34, "h": 98, "gap": 120},
-         safe_bias=6),
-    dict(ease="out3", entrance_dx=0, entrance_dy=22, push=0.05, item_stagger=0.44, transition="wash"),
-    dict(style="chip-left"),
-    dict(luma_max=0.045, flicker_thresh=6.0, dark=False),
-)
-
-THEMES["epic"] = _theme(
-    "epic", "深黑鎏金",
-    ("史诗", "爆发", "冲击", "巅峰", "决战", "荣耀", "震撼", "传奇", "极限", "突破"),
-    dict(bg=(9, 9, 12), bg2=(24, 20, 16), surface=(32, 28, 22),
-         ink=(248, 242, 228), muted=(186, 176, 158), dim=(142, 134, 120),
-         accent=(222, 178, 84), accent2=(206, 116, 92),
-         good=(140, 200, 140), bad=(222, 96, 84), rule=(255, 255, 255)),
-    dict(vignette=0.62, vignette_tint=(0, 0, 0), grain=5.0, grain_freq=0.26,
-         texture="scanlines", texture_alpha=0.028),
-    dict(family="serif", scale={"display": (108, "bold"), "heading": (70, "bold"),
-                                "sub": (38, "light"), "body": (34, "reg"),
-                                "kicker": (29, "bold"), "chip": (27, "reg"),
-                                "brand": (23, "reg")}, line_gap=1.32, tracking=4.0),
-    dict(layout="center-stack",
-         card={"radius": 6, "fill_a": 20, "outline_a": 44, "pad": 32, "h": 98, "gap": 120}),
-    dict(ease="out5", entrance_dx=0, entrance_dy=24, push=0.14, item_stagger=0.34, transition="black"),
-    dict(style="corner-line"),
-    dict(luma_max=0.018, flicker_thresh=6.0, dark=True),
-)
-
 # ============================================================================
+# 二、主题（已删除：v1.0.1 起本技能不提供任何模板）
+# ============================================================================
+#
+# 这里曾有 8 套命名主题（THEMES：科技深蓝 / 近黑金 / 冷薄荷 / 暖砂金 / 石青灰 /
+# 深林绿 / 暖纸白 / 墨纸白）。它们是**模板**：用户只能在这 8 种外观里选，
+# 第 9 种永远不会出现。
+#
+# 现在主题由 designkit 从连续空间现场构造：
+#   · 底色 = (色相 h∈[0,360), 饱和 s, 明度 v) 连续取值，经 _palette_from_hue 算出三段底色；
+#   · 其余 8 个语义色由对比度网格求解（每套都必须过 theme_lint）；
+#   · 产出仍是同形的 35 字段主题字典，scenes.py 不需要知道它从哪来。
+#
+# 保留的**技术原语**（这些不是模板，是造东西的工具）：
+#   luminance / contrast / midpoint / _rgb / _color_of / apply_theme_overrides /
+#   _theme(构造器) / hsv_to_rgb / rgb_to_hsv / LINT_LIMITS / theme_lint / is_dark /
+#   blend_theme / family_compatible / LAYOUTS(几何参数，不是外观目录)
+THEMES = {}
 # 三、版式骨架（LAYOUTS）：3 种，scenes.py 按名字取几何参数
 # ============================================================================
 #
@@ -419,272 +315,93 @@ def layout(name):
 # music 字段只放「策展层」（BPM 梯度 / 调池 / 情绪 / 音色组偏好），
 # 具体的和弦进行、鼓型、乐器合成在 scorekit 里（合成层）。两边用同一个 style id 对齐。
 
-STYLE_IDS = ("tech-deep", "magazine", "paper", "vivid", "mono", "cinema", "lo-fi", "epic")
-DEFAULT_STYLE = "tech-deep"
-LEGACY_STYLE = "legacy"          # 显式老行为：v0.4 的画风 + 配乐 + 单一旁白
+# ============================================================================
+# 四、风格包（已删除：v1.0.1 起不提供任何模板）
+# ============================================================================
+#
+# 这里曾有 STYLES：一个 style id = 主题 + 配乐 + 旁白 + 节奏的整套模板，
+# 外加 pick_style 按关键词/指纹**自动挑一套**。那是本技能最像"模板库"的部分。
+#
+# 现在没有任何 style id：一个设计从哪来只有一条路——work/design.json，
+# 由 propose.py 按 brief 现场采样、人确认后冻结。
+#
+# 保留的：LEGACY_STYLE 常量（只为了让"写 style=legacy"能被明确拒绝并给迁移指引，
+# 而不是抛 AttributeError）。
+STYLE_IDS = ()
+DEFAULT_STYLE = None
+LEGACY_STYLE = "legacy"          # 只为让老剧本被**明确拒绝**时能报出可读的迁移信息
+STYLES = {}
 
+# ---- 调式池：技术原语，不是模板 ----
+# 项目只支持中文口播常见的 4 个小调主音与 6 个大调主音。列出来是**约束**
+# （musicgen 与 designkit 都按它校验"调性是否可实现"），不是"给你 10 套现成配色"。
 MINOR_KEYS = ("Dm", "Am", "Em", "Cm")
 MAJOR_KEYS = ("C", "G", "D", "F", "A", "Bb")
 
-STYLES = {
-    "tech-deep": {
-        "name": "科技深蓝",
-        "tags": ("AI", "工程", "数据", "科普"),
-        "theme": "tech-deep",
-        "layouts": ("left-stack", "split-right"),
-        "music": {"keys": ("Dm", "Am", "Em", "Cm"), "scale": "minor",
-                  "bpm_ladder": (100, 108, 116, 124), "mood": "steady"},
-        "voice": {"body": "narrator_male", "hook": "young_male",
-                  "quote": "narrator_female", "outro": "narrator_male"},
-        "pacing": {"lead": 0.58, "tail": 0.88, "min_dur": 3.0, "hold": 0.0},
-    },
-    "magazine": {
-        "name": "杂志暖白",
-        "tags": ("报告", "复盘", "研究", "出版物"),
-        "theme": "magazine",
-        "layouts": ("left-stack", "split-right"),
-        "music": {"keys": ("C", "G", "D", "F"), "scale": "major",
-                  "bpm_ladder": (88, 92, 96, 100), "mood": "reflective"},
-        "voice": {"body": "narrator_female", "hook": "narrator_female",
-                  "quote": "authority_male", "outro": "narrator_female"},
-        "pacing": {"lead": 0.64, "tail": 0.94, "min_dur": 3.2, "hold": 0.2},
-    },
-    "paper": {
-        "name": "手绘纸感",
-        "tags": ("手工", "自然", "历史", "人文"),
-        "theme": "paper",
-        "layouts": ("left-stack", "center-stack"),
-        "music": {"keys": ("G", "D", "C"), "scale": "major",
-                  "bpm_ladder": (84, 88, 92), "mood": "hopeful"},
-        "voice": {"body": "warm_female", "hook": "narrator_female",
-                  "quote": "narrator_male", "outro": "warm_female"},
-        "pacing": {"lead": 0.68, "tail": 1.00, "min_dur": 3.4, "hold": 0.3},
-    },
-    "vivid": {
-        "name": "活力撞色",
-        "tags": ("活动", "营销", "年轻", "上新"),
-        "theme": "vivid",
-        "layouts": ("center-stack", "left-stack"),
-        "music": {"keys": ("D", "G", "A"), "scale": "major",
-                  "bpm_ladder": (120, 126, 132), "mood": "uplifting"},
-        "voice": {"body": "narrator_female", "hook": "bright_female",
-                  "quote": "young_male", "outro": "bright_female"},
-        "pacing": {"lead": 0.46, "tail": 0.76, "min_dur": 2.8, "hold": 0.0},
-    },
-    "mono": {
-        "name": "极简黑白",
-        "tags": ("观点", "演讲", "思辨", "极简"),
-        "theme": "mono",
-        "layouts": ("center-stack",),
-        "music": {"keys": ("C", "F", "Am"), "scale": "major",
-                  "bpm_ladder": (60, 64, 68), "mood": "calm"},
-        "voice": {"body": "narrator_male", "hook": "authority_male",
-                  "quote": "narrator_female", "outro": "authority_male"},
-        "pacing": {"lead": 0.86, "tail": 1.24, "min_dur": 4.0, "hold": 0.6},
-    },
-    "cinema": {
-        "name": "电影青橙",
-        "tags": ("纪录", "叙事", "散文", "城市"),
-        "theme": "cinema",
-        "layouts": ("center-stack", "left-stack"),
-        "music": {"keys": ("Dm", "Am"), "scale": "minor",
-                  "bpm_ladder": (76, 80, 84), "mood": "reflective"},
-        "voice": {"body": "narrator_male", "hook": "authority_male",
-                  "quote": "narrator_female", "outro": "narrator_male"},
-        "pacing": {"lead": 0.76, "tail": 1.10, "min_dur": 3.6, "hold": 0.4},
-    },
-    "lo-fi": {
-        "name": "暖灰薄荷",
-        "tags": ("日常", "学习", "专注", "深夜"),
-        "theme": "lo-fi",
-        "layouts": ("left-stack", "split-right"),
-        "music": {"keys": ("C", "F", "G"), "scale": "major",
-                  "bpm_ladder": (72, 78, 84), "mood": "calm"},
-        "voice": {"body": "narrator_female", "hook": "warm_female",
-                  "quote": "narrator_male", "outro": "narrator_female"},
-        "pacing": {"lead": 0.72, "tail": 1.06, "min_dur": 3.4, "hold": 0.4},
-    },
-    "epic": {
-        "name": "深黑鎏金",
-        "tags": ("史诗", "宣传", "高潮", "荣耀"),
-        "theme": "epic",
-        "layouts": ("center-stack",),
-        "music": {"keys": ("Cm", "Dm"), "scale": "minor",
-                  "bpm_ladder": (88, 92, 96), "mood": "driving"},
-        "voice": {"body": "authority_male", "hook": "narrator_male",
-                  "quote": "narrator_female", "outro": "authority_male"},
-        "pacing": {"lead": 0.62, "tail": 0.96, "min_dur": 3.2, "hold": 0.2},
-    },
-}
 
-# 老行为（不写 style 时）：画风 = v0.4 的深蓝橙，配乐 = v0.4 的 Dm/120/seed7，旁白 = script.voice
-STYLES[LEGACY_STYLE] = {
-    "name": "v0.4 兼容",
-    "tags": ("兼容", "老项目"),
-    "theme": "tech-deep",
-    "layouts": ("left-stack",),
-    "music": {"keys": ("Dm", "Am", "Cm", "Em"), "scale": "minor",
-              "bpm_ladder": (120,), "mood": "steady", "legacy": True},
-    "voice": {"body": None, "hook": None, "quote": None, "outro": None},
-    # 必须是 render.py v0.4 的函数默认值（lead=0.55 / tail=0.85 / min_dur=3.0），
-    # 否则"没写 lead 字段的老剧本"会悄悄换掉节奏 —— legacy 的含义就是一个字节都不变。
-    "pacing": {"lead": 0.55, "tail": 0.85, "min_dur": 3.0, "hold": 0.0},
-}
+# ---- 兼容壳：模板表删掉后，老调用点不该 AttributeError ----
+# 这些函数在 v1.0.1 之前用于"按 style id 取模板"。现在没有模板，它们**必须明确报错**，
+# 而不是返回一个假的默认值（那等于偷偷恢复模板）。
+def style_ids(include_legacy=True):
+    return []
 
-# ============================================================================
-# 四、视觉语言包（VISUAL_LANGUAGES）：v0.9
-# ============================================================================
-#
-# 为什么还要一层
-# -------------
-# v0.5 的 THEMES 只管"皮肤"：配色、字体族、纹理、颗粒、字距、缓动、HUD、3 种版式几何。
-# 8 套风格共用同一批版式与同一套装饰（开场放射线 + 收尾光点环），所以换风格只是换色，
-# 构图骨架（剪影）没变 —— 这正是"每个视频都差不多"的根因。
-#
-# 这一层补的是**结构签名**，四组：
-#   motion     入场怎么进、镜头怎么推、呼吸元素多快
-#   motif      这套风格独有的装饰图形语言（直角括角 / 手绘内框 / letterbox / 信号条 …）
-#   transition 段与段之间怎么过（dip / wash / 纸卷 / 斜擦 / 硬切 / 放射环）
-#   typography 字距、行高、对齐、编号写法、display:body 字号比
-#
-# 设计原则（与 THEMES 一致）
-#   1. 纯数据：不 import PIL / filmkit，scenes.py 反过来读我，成环就炸。
-#   2. 只追加不改顺序：新风格往 STYLE_IDS 末尾追加，老风格的指纹映射不漂。
-#   3. 每条签名都必须"能被剪影看出差别"：只改颜色/字重的项不算签名。
-#   4. 全部受 PIL 预算约束：装饰要么预烘焙成静态层，要么是 O(几) 次 ImageDraw 调用；
-#      禁每帧全屏 GaussianBlur（实测 30–60ms）与全屏双线性 resize（29ms），预算 25ms。
-#
-# 剪影判据（tools/silhouette_qa.py 用的口径，也是 P1 的验收标准）
-#   同一段内容在两种风格下渲 3 帧 → 灰度 → 以四角亮度中位数为基准三值化 →
-#   比较 前景占比 F / 前景质心 (Cx,Cy) / 四边覆盖率 B / 左右对称度 S。
-#   五项里至少一项达标才算"这套风格真的不一样"：
-#     ΔF ≥ 6pp、|ΔCx| ≥ 8pp、|ΔCy| ≥ 8pp、ΔB ≥ 14pp、ΔS ≥ 0.20
 
+def get(style_id):
+    raise KeyError(
+        "没有风格 %r：v1.0.1 起本技能不提供内置风格（模板已删除）。\n"
+        "  每一版外观都必须现场生成：python propose.py --brief \"题材\" --script film.json\n"
+        "  再用 --confirm 冻结 design.json" % (style_id,))
+
+
+def theme_of(style_id):
+    raise KeyError(
+        "没有主题 %r：v1.0.1 起没有内置主题表（模板已删除）。\n"
+        "  主题由 designkit 从 (色相,饱和,明度) 连续空间现场构造，见 work/design.json"
+        % (style_id,))
+
+
+def is_legacy(style_id):
+    return str(style_id or "") == LEGACY_STYLE
 VISUAL_MOTIFS = ("brackets", "hairlines", "handdrawn", "slabs",
                  "minimal", "letterbox", "signal", "rays")
 VISUAL_TRANSITIONS = ("dip", "wash", "paper", "wipe", "cut", "iris")
 NUMBER_STYLES = ("dim", "serif", "cn", "block", "roman", "timecode", "dot", "gilt")
 
+# ============================================================================
+# 五、视觉语言包（已删除：v1.0.1 起不提供任何模板）
+# ============================================================================
+#
+# 这里曾有 VISUAL_LANGUAGES：8 套命名结构签名（母题/转场/字距/缓动/重心/layout_cycle）。
+# 它们是另一种模板——换风格时用户只能在这 8 组里挑。
+#
+# 现在视觉语言由 designkit._language_of(design) 从设计字段直接拼出来（同形五组），
+# 再交给 _visual_lint_language 做同一条体检。
+#
+# 保留的：VISUAL_MOTIFS / VISUAL_TRANSITIONS / NUMBER_STYLES（**绘制原语的名字**，
+# scenes.py 按名字分发到具体画法；这是"能画什么"，不是"长什么样"）、
+# visual_lint_language(lang)（对任意 language 字典做体检的纯函数）。
 VISUAL_LANGUAGES = {}
 
-VISUAL_LANGUAGES["tech-deep"] = {
-    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
-    "motif": {"kind": "brackets", "density": 1.0,
-              "detail": {"corner": 24, "rule_step": 120, "scan": True}},
-    "transition": {"kind": "dip", "dur": 0.28},
-    "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
-                   "number": "dim", "ratio": 1.50},
-    "bias": {"x": 0, "y": 0, "inset": 0},
-    "layout_cycle": ("left-stack", "split-right", "center-stack"),
-}
 
-VISUAL_LANGUAGES["magazine"] = {
-    "motion": {"ease": "out5", "enter": (0.60, 1.10), "push": 0.001, "breathe_hz": 0.50},
-    "motif": {"kind": "hairlines", "density": 0.85,
-              "detail": {"header_rule": True, "column_rule": True, "pageno": True}},
-    "transition": {"kind": "wash", "dur": 0.35},
-    "typography": {"tracking": 2.0, "line_gap": 1.34, "align": "right",
-                   "number": "serif", "ratio": 1.53},
-    "bias": {"x": 60, "y": -20, "inset": 0},
-    "layout_cycle": ("split-right", "left-stack", "center-stack"),
-}
+def visual_language(lang=None):
+    """兼容壳：v1.0.1 起没有命名视觉语言，传什么返回什么；传 None 返回空壳。
 
-VISUAL_LANGUAGES["paper"] = {
-    "motion": {"ease": "inOut3", "enter": (0.55, 1.00), "push": 0.03, "breathe_hz": 0.42},
-    "motif": {"kind": "handdrawn", "density": 1.0,
-              "detail": {"wobble": 3.0, "seal": True, "tape": True}},
-    "transition": {"kind": "paper", "dur": 0.35},
-    "typography": {"tracking": 1.0, "line_gap": 1.36, "align": "left",
-                   "number": "cn", "ratio": 1.53},
-    # 重心偏移（px）：paper 是"手账"气质——内容整体压在左下、右侧留出大片空白给框与胶带；
-    # 这不是配色能表达的差异，是构图差异（剪影 Cx/Cy 直接反映它）。
-    "bias": {"x": -150, "y": 80, "inset": 40},
-    "layout_cycle": ("left-stack", "center-stack", "split-right"),
-}
-
-VISUAL_LANGUAGES["vivid"] = {
-    "motion": {"ease": "outBack", "enter": (0.35, 0.70), "push": 0.10, "breathe_hz": 1.10},
-    "motif": {"kind": "slabs", "density": 1.0,
-              "detail": {"bar_h": 24, "slant": 18, "sticker": True}},
-    "transition": {"kind": "wipe", "dur": 0.20},
-    "typography": {"tracking": 1.0, "line_gap": 1.26, "align": "center",
-                   "number": "block", "ratio": 2.97},
-    "bias": {"x": 0, "y": 40, "inset": 0},
-    "layout_cycle": ("center-stack", "left-stack", "split-right"),
-}
-
-VISUAL_LANGUAGES["mono"] = {
-    "motion": {"ease": "inOut3", "enter": (0.50, 0.90), "push": 0.02, "breathe_hz": 0.35},
-    "motif": {"kind": "minimal", "density": 0.55,
-              "detail": {"rule_h": 2, "box_radius": 0}},
-    "transition": {"kind": "cut", "dur": 0.0},
-    "typography": {"tracking": 6.0, "line_gap": 1.40, "align": "center",
-                   "number": "roman", "ratio": 3.15},
-    "bias": {"x": 0, "y": 0, "inset": 0},
-    "layout_cycle": ("center-stack", "center-stack", "center-stack"),
-}
-
-VISUAL_LANGUAGES["cinema"] = {
-    "motion": {"ease": "inOut3", "enter": (0.70, 1.20), "push": 0.12, "breathe_hz": 0.30},
-    "motif": {"kind": "letterbox", "density": 1.0,
-              "detail": {"top": 40, "bottom": 44, "flares": True}},
-    "transition": {"kind": "dip", "dur": 0.45},
-    "typography": {"tracking": 3.0, "line_gap": 1.38, "align": "center",
-                   "number": "timecode", "ratio": 1.62},
-    "bias": {"x": 0, "y": 30, "inset": 0},
-    "layout_cycle": ("center-stack", "left-stack", "split-right"),
-}
-
-VISUAL_LANGUAGES["lo-fi"] = {
-    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.05, "breathe_hz": 0.60},
-    "motif": {"kind": "signal", "density": 0.90,
-              "detail": {"bars": 12, "radius": 18, "note": True}},
-    "transition": {"kind": "wash", "dur": 0.30},
-    "typography": {"tracking": 1.0, "line_gap": 1.36, "align": "left",
-                   "number": "dot", "ratio": 1.48},
-    # lo-fi 是"桌面便签"气质：整体右移、内容偏上，底部留给信号条与时间戳。
-    "bias": {"x": 60, "y": -70, "inset": 0},
-    "layout_cycle": ("left-stack", "split-right", "center-stack"),
-}
-
-VISUAL_LANGUAGES["epic"] = {
-    "motion": {"ease": "out5", "enter": (0.70, 1.20), "push": 0.14, "breathe_hz": 0.28},
-    "motif": {"kind": "rays", "density": 1.0,
-              "detail": {"rays": 18, "rule_gap": 26, "frame": True}},
-    "transition": {"kind": "iris", "dur": 0.40},
-    "typography": {"tracking": 4.0, "line_gap": 1.32, "align": "center",
-                   "number": "gilt", "ratio": 3.18},
-    "bias": {"x": 0, "y": -30, "inset": 0},
-    "layout_cycle": ("center-stack", "center-stack", "center-stack"),
-}
-
-# legacy：v0.4 行为，没有视觉语言（scenes.py 走 _LEGACY_DRAWERS，不会读到这张表）
-VISUAL_LANGUAGES[LEGACY_STYLE] = {
-    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
-    "motif": {"kind": "brackets", "density": 1.0, "detail": {}},
-    "transition": {"kind": "cut", "dur": 0.0},
-    "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
-                   "number": "dim", "ratio": 1.50},
-    "layout_cycle": ("left-stack",),
-}
+    保留这个函数只是为了让 `plan["language"] = ST.visual_language(...)` 这类老调用点
+    不至于 AttributeError —— 真正的语言包由 designkit 提供。"""
+    return lang if isinstance(lang, dict) else {}
 
 
-def visual_language(style_id):
-    """取风格的结构签名；未知 id 退到默认风格（不让拼写错误炸掉渲染）。"""
-    sid = str(style_id or "").strip()
-    got = VISUAL_LANGUAGES.get(sid)
-    if got is not None:
-        return got
-    return VISUAL_LANGUAGES[DEFAULT_STYLE]
+def visual_lint_language(vl):
+    """结构签名体检：对**任意** language 字典，不要求它属于某个命名风格。
 
-
-def visual_lint(style_id):
-    """结构签名体检（--stage style 就拦，不等到渲完 300 帧）。返回问题列表，空 = 过。"""
+    这是从 v0.9 的 visual_lint(style_id) 里抽出来的核心——原来它先查
+    VISUAL_LANGUAGES[style_id] 再体检，模板删掉后没有 style_id 可查了，
+    但仍然需要"这套语言参数越界没有"的检查（否则转场 1 秒、push 0.3 这类
+    会让整片观感崩掉的错误要等渲完 300 帧才发现）。
+    """
     bad = []
-    sid = str(style_id or "")
-    if sid not in VISUAL_LANGUAGES:
-        return ["风格 %r 没有视觉语言包" % sid]
-    vl = VISUAL_LANGUAGES[sid]
+    if not isinstance(vl, dict) or not vl:
+        return ["视觉语言包缺失或不是字典"]
     mo = vl.get("motion") or {}
     mf = vl.get("motif") or {}          # 注意：mo = motion，mf = motif，别混用
     tr = vl.get("transition") or {}
@@ -694,66 +411,62 @@ def visual_lint(style_id):
     if str(tr.get("kind")) not in VISUAL_TRANSITIONS:
         bad.append("transition.kind=%r 不在 %s 里"
                    % (tr.get("kind"), " / ".join(VISUAL_TRANSITIONS)))
-    if not 0.0 <= float(tr.get("dur") or 0.0) <= 0.60:
+    try:
+        _d = float(tr.get("dur") or 0.0)
+    except (TypeError, ValueError):
+        _d = -1.0
+    if not 0.0 <= _d <= 0.60:
         # 段界 veil 超过 0.6s 会吃掉 3–6s 节奏下限，也会把两段内容糊在一起
         bad.append("transition.dur=%r 必须在 0~0.60s（段界 veil 上限）" % tr.get("dur"))
     if str(ty.get("number")) not in NUMBER_STYLES:
         bad.append("typography.number=%r 不在 %s 里"
                    % (ty.get("number"), " / ".join(NUMBER_STYLES)))
-    if not 1.0 <= float(ty.get("ratio") or 0.0) <= 3.6:
-        bad.append("typography.ratio=%r 必须在 1.0~3.6（display:body 字号比）" % ty.get("ratio"))
-    if not 0.0 <= float(ty.get("tracking") or 0.0) <= 8.0:
-        bad.append("typography.tracking=%r 必须在 0~8px" % ty.get("tracking"))
-    if not 1.15 <= float(ty.get("line_gap") or 0.0) <= 1.55:
-        bad.append("typography.line_gap=%r 必须在 1.15~1.55" % ty.get("line_gap"))
-    if not 0.0 <= float(mf.get("density") or 0.0) <= 1.0:
+    for key, lo, hi in (("ratio", 1.0, 3.6), ("tracking", 0.0, 8.0),
+                        ("line_gap", 1.15, 1.55), ("push", 0.0, 0.16)):
+        try:
+            v = float((ty if key != "push" else mo).get(key) or 0.0)
+        except (TypeError, ValueError):
+            bad.append("typography/motion.%s=%r 不是数字" % (key, (ty if key != "push" else mo).get(key)))
+            continue
+        if key == "ratio" and not lo <= v <= hi:
+            bad.append("typography.ratio=%r 必须在 1.0~3.6（display:body 字号比）" % v)
+        elif key == "tracking" and not lo <= v <= hi:
+            bad.append("typography.tracking=%r 必须在 0~8px" % v)
+        elif key == "line_gap" and not lo <= v <= hi:
+            bad.append("typography.line_gap=%r 必须在 1.15~1.55" % v)
+        elif key == "push" and not lo <= v <= hi:
+            # push > 0.16 时背景层放大后内容会被推出 SAFE（_bg_plate 只裁不缩）
+            bad.append("motion.push=%r 必须在 0~0.16（超过会把内容推出安全区）" % v)
+    try:
+        dens = float(mf.get("density") or 0.0)
+    except (TypeError, ValueError):
+        dens = -1.0
+    if not 0.0 <= dens <= 1.0:
         bad.append("motif.density=%r 必须在 0~1" % mf.get("density"))
-    if float(mf.get("density") or 0.0) <= 0.0 and str(mf.get("kind")) != "minimal":
+    elif dens <= 0.0 and str(mf.get("kind")) != "minimal":
         bad.append("motif.density=0 只允许用于 minimal（否则等于没有装饰语言）")
     enter = mo.get("enter") or (0.45, 0.85)
-    if (not isinstance(enter, (list, tuple)) or len(enter) != 2
-            or not 0.0 < float(enter[0]) <= float(enter[1]) <= 1.6):
+    try:
+        ok_enter = (isinstance(enter, (list, tuple)) and len(enter) == 2
+                    and 0.0 < float(enter[0]) <= float(enter[1]) <= 1.6)
+    except (TypeError, ValueError):
+        ok_enter = False
+    if not ok_enter:
         bad.append("motion.enter=%r 必须是 (起, 止) 且 0 < 起 <= 止 <= 1.6 秒" % (enter,))
-    if not 0.0 <= float(mo.get("push") or 0.0) <= 0.16:
-        # push > 0.16 时背景层放大后内容会被推出 SAFE（_bg_plate 只裁不缩）
-        bad.append("motion.push=%r 必须在 0~0.16（超过会把内容推出安全区）" % mo.get("push"))
     return bad
 
 
+def visual_lint(lang=None):
+    """对**任意** language 字典做体检（不再是"某个 style id 的体检"）。"""
+    if isinstance(lang, str):
+        # 老的 visual_lint("cinema") 调用：没有命名语言了，明确报错而不是静默通过
+        return ["没有命名视觉语言 %r（v1.0.1 起视觉语言由 design 现场生成）" % lang]
+    return visual_lint_language(lang or {})
+
+
 def visual_lint_all():
-    """全部内置风格的视觉语言体检，返回 {style_id: [问题]}（只有有问题的才在里面）。"""
-    out = {}
-    for sid in STYLE_IDS:
-        bad = visual_lint(sid)
-        if bad:
-            out[sid] = bad
-    return out
-
-
-ALL_STYLE_IDS = (LEGACY_STYLE,) + STYLE_IDS
-
-
-def style_ids(include_legacy=True):
-    return list(ALL_STYLE_IDS) if include_legacy else list(STYLE_IDS)
-
-
-def get(style_id):
-    """取风格包；未知 id 报错并列出可用值（不静默回落，v0.4 的教训）。"""
-    sid = str(style_id or "").strip()
-    if sid not in STYLES:
-        raise KeyError("未知风格 %r；可用：%s" % (style_id, " / ".join(ALL_STYLE_IDS)))
-    return STYLES[sid]
-
-
-def theme_of(style_id):
-    """取风格对应的主题字典（元组颜色原样返回，给 PIL 直接下标）。"""
-    return THEMES[get(style_id)["theme"]]
-
-
-def is_legacy(style_id):
-    return str(style_id or LEGACY_STYLE) == LEGACY_STYLE
-
-
+    """v1.0.1 起没有内置语言可逐一检查，保留空实现只为兼容。"""
+    return {}
 # ============================================================================
 # 五、内容指纹与自动选风格
 # ============================================================================
@@ -957,7 +670,7 @@ def resolve_script_style(script):
             '    1) python propose.py --brief "题材/要求" --script <film.json> --n 3\n'
             '    2) python propose.py --confirm --candidate A      # 冻结成 work/design.json\n'
             '  想以出厂预设为起点：python propose.py --preset tech-deep --script <film.json>\n'
-            '  （预设见：python presetkit.py）')
+            '  （没有预设：v1.0.1 起不提供任何模板）')
     elif raw_s in ("", "auto", "default"):
         if vis.get("theme"):
             sid = str(vis["theme"])

@@ -1,7 +1,10 @@
-# 风格包（Style Packs）：让每部片的画风 / 配乐 / 旁白都不一样
+# 风格包（Style Packs）——**v1.0.1 已删除，本文仅存档**
 
-> v0.5.0 新增。读这一篇之前先读 SKILL.md 的 §5.6。
-> 一句话：**一个 style id 同时决定画风、配乐、旁白声音和节奏**，不能三样各自乱配。
+> **现在没有「风格包」了。** v0.5 的 `stylekit.THEMES/STYLES/VISUAL_LANGUAGES` 八套命名风格、
+> `presets/*.json` 预设定档、scorekit 的 9 套 `MUSIC_STYLES` 配乐风格表**全部删除**。
+> 本技能不提供模板：外观由 `propose.py` 按 brief 现场采样出 `design.json`，配乐由
+> `musicgen.py` 按参数现场编排。下面保留的是 v0.5–v0.9 的实现记录，只用于理解历史；
+> 照着做会报错（`style` 字段现在会被明确拒绝）。
 
 ## 0. 为什么需要它（v0.4 的病）
 
@@ -10,7 +13,7 @@ v0.4 及以前，所有"身份参数"都是模块级常量：
 | 层 | 被写死的地方 | 结果 |
 |---|---|---|
 | 画风 | assets/scenes.py 的 THEME 字典 + 3 个绘制函数 | 每部片都是深蓝底 + 橙强调 |
-| 配乐 | scorekit 的 4 个小调 + 3 套和弦进行 + 固定动机 | 每部片都是 Dm / 120BPM 那一套 |
+| 配乐 | 当时 scorekit 的 4 个小调 + 3 套和弦进行 + 固定动机（**该风格层 v1.0.1 已删除**） | 每部片都是 Dm / 120BPM 那一套 |
 | 旁白 | render.py 的单个 voice/rate/pitch | 每部片都是同一个声音、同一语速 |
 | 流程 | SKILL.md 教的是 "cp 模板 -> 改 lines[].text" | 模型自然只会改文案 |
 
@@ -32,7 +35,7 @@ v0.4 及以前，所有"身份参数"都是模块级常量：
         |  +- voice{map,policy}
         |  +- pacing{lead,tail,min_dur,item_stagger}
         v
-    画面（scenes.py 读主题）    配乐（scorekit 读风格）    旁白（voicekit 读 persona/tone）
+    画面（scenes.py 读主题）    配乐（当时由 scorekit 读风格；v1.0.1 起改为 musicgen 参数）    旁白（voicekit 读 persona/tone）
 
 ## 2. 8 套内置风格
 
@@ -126,8 +129,9 @@ v0.4 及以前，所有"身份参数"都是模块级常量：
 
 所以：改一个错别字 -> full 变（音色纹理微变），tempo/style 不变（还是同一首曲子、同一个调）；
 换一部片 -> 三个都变。`music.seed_from_content: false` 只锁住 **seed 派生**（音色细节）；
-`full` 指纹仍会传给 scorekit 参与结构变奏（和弦替换/动机偏移/鼓型 ghost，见
-[audio-variation.md](audio-variation.md) §3.3）。要把声音完全锁回 v0.4 行为，只能不写 `style`（legacy）。
+v0.7 时代 `full` 指纹会传给 scorekit 参与结构变奏（和弦替换/动机偏移/鼓型 ghost，见
+[audio-variation.md](audio-variation.md) §3.3）。**v1.0.1 起这条链路已删除**：没有 `style` 字段，
+也就没有「legacy」可回去——外观与配乐都必须来自 `design.json`。
 
 ## 5. 片内变化：整体是一套，但每段有呼吸
 
@@ -163,21 +167,24 @@ stylekit.theme_lint(theme) 在 --stage style 就拦，不用等渲完 300 帧：
 
 加第 9 套风格时：先写 _theme(...)，再跑 python stylekit.py --lint，过了再进 STYLES。
 
-## 7. 加一套自己的风格（5 步）
+## 7. 想要一套新外观怎么办（v1.0.1 的做法）
 
-1. stylekit.THEMES["my-style"] = _theme(...)（配色 + 材质 + 排版 + 版式 + 动态 + HUD）
-2. stylekit.STYLES["my-style"] = {...}（theme / layouts / music{bpm_ladder,keys,mood} / voice / pacing）
-3. STYLE_IDS 元组末尾追加（只追加不改顺序，否则指纹映射会漂）
-4. python stylekit.py --lint 全绿；配乐侧在 scorekit.MUSIC_STYLES 里加同名条目
-5. 用 3 段样片跑 --stage stills 亲眼看（铁律 6：能出图 != 没问题）
+再也不能「加一套风格」了——没有风格表可加。正确做法是**让采样器按你的要求现场生成**：
+
+1. `python propose.py --brief "题材/要求" --script film.json` 出 3 个候选；
+2. 不满意就 `--revise "更冷一点 / 更亮一点"` 重出，旧候选可 `--diff` 对比；
+3. `--confirm --candidate A` 冻结成 `work/design.json`，此后出片都用它；
+4. 想固定到回归里：把 `design.json` 存档，`--seed` 可复现同一份设计。
+
+第 9 种外观不是「新增模板」，而是把 brief 或色相参数改一下自然得到的东西。
 
 ## 8. 常见误用
 
 | 现象 | 原因 | 修法 |
 |---|---|---|
-| 画面换了、配乐还是老的 | 只改了 visual.theme 没改 music.style | 直接改 style，或两个都写 |
-| 同一部片前后像两部片 | 段界跨了明暗族 | 用同族主题；或拆成两部 |
-| 改台词后配乐变了 | 改了标题或 kind 结构 -> tempo 指纹变（BPM/调性跟着换） | 写死 music.key / music.bpm（`seed_from_content:false` 只管音色 seed，压不住 BPM/调性变化） |
+| 画面换了、配乐还是老的 | 只改了 visual.theme 没改 music 参数 | 改 design.json 的 audio.music（bpm/mood/sections），或重新 `propose.py --revise` |
+| 同一部片前后像两部片 | 候选设计里明暗族/色相跨度过大 | 换一个更收敛的候选，或 `--revise "统一暗底"` |
+| 改台词后配乐变了 | `seed_from_content` 把指纹掺进了 seed | 写死 `music.seed` 或设 `seed_from_content: false` |
 | 旁白听感像广播剧 | max_distinct 太大 / 相邻句频繁换人 | 降到 2，靠 tone 而不是换人做变化 |
 | 字幕在浅色主题上看不清 | 用了 v0.4 的黑底白字 | 传 theme= 给 draw_subtitle（render.py 已自动传） |
 

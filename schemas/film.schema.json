@@ -540,7 +540,7 @@
     "music": {
       "type": "object",
       "additionalProperties": true,
-      "description": "配乐：scorekit 程序化生成 / v0.2 和弦床 / 外部 wav / 关掉。不写 mode 时走 v0.2 兼容链（有 bpm 就生成，没有就沿用）",
+      "description": "配乐：musicgen 按参数现场编排 / v0.2 和弦床 / 外部 wav / 关掉。不写 mode 时走兼容链（有 bpm 就生成，没有就沿用）。v1.0.1 起没有配乐风格表，不要指望选一个 id 得到一种现成配乐",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -554,11 +554,11 @@
             "file",
             "off"
           ],
-          "description": "score = scorekit 程序化配乐；bed = v0.2 和弦床；file = 用外部 work/music.wav；off = 不要配乐（不读也不删 music.wav）"
+          "description": "score = musicgen 参数化编排（bpm/key/scale/mood/sections 全可写）；bed = v0.2 和弦床；file = 用外部 work/music.wav；off = 不要配乐（不读也不删 music.wav）"
         },
         "style": {
           "type": "string",
-          "description": "\"auto\" 或风格 id：配乐风格（缺省跟随全片 style）"
+          "description": "已废弃：v1.0.1 删除了配乐风格表，写风格 id 没有意义（保留字段只为老剧本校验不失败）"
         },
         "mood": {
           "type": "string",

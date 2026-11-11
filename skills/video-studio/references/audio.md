@@ -1,7 +1,7 @@
 # 音频：采样级混音、配乐与音效
 
 > **v0.3.0 新增三节**（§10–§12 是新的推荐做法，§1–§9.5 是底层原理与手写示例，仍然有效）：
-> §10 提示点系统（声音跟着画面走）、§11 程序化配乐（scorekit）、§12 程序化音效（sfxkit）。
+> §10 提示点系统（声音跟着画面走）、§11 程序化配乐（musicgen 参数化编排）、§12 程序化音效（sfxkit）。
 > 先读 §10——它决定了另外两节怎么用。
 
 ## 1. 为什么不用 ffmpeg 混音
@@ -306,25 +306,27 @@ python qa_frames.py out/film.mp4 --cues work/cues.json   # 看音画同步 dt
 **音画同步 dt > 60 ms 就是错**：人眼/耳对 40–60 ms 以内的错位不敏感，超过就会"感觉哪里不对但说不出来"。
 dt 大的典型原因：cue 挂在字幕出现的时刻上，而画面重击晚 100 ms——应该挂在动画时刻上。
 
-## 11. 程序化配乐（scorekit，v0.3.0）
+## 11. 程序化配乐（musicgen，v1.0.1）
+
+> **v1.0.1 起没有「配乐模板」了。** 以前这一节讲的是 scorekit 的 9 套 `MUSIC_STYLES`
+> 风格表（选一个 id 得到一种配乐性格）——那套表已删除。现在配乐由 `musicgen.py`
+> 按参数**现场编排**：没有可选曲风，只有参数。下面仍然是「一张和弦表贯穿全片」的技术思路，
+> 实现落到了参数化编排器上。
 
 ```python
-import scorekit as sk
-samples, report = sk.render(389.0, bpm=120, key="Dm",
-                            anchors=timeline["scenes"],   # [{id,kind,start,end}]
-                            seed=7)                       # 同 seed 逐采样一致
-sk.save("work/music.wav", samples)
+import musicgen as MG
+# 参数就是「设计」：bpm / key / scale / mood / seed，加可选的编排参数
+samples, report = MG.render(389.0, bpm=120, key="Dm", scale="minor",
+                            mood="steady", seed=7)   # 同参数逐采样一致
+MG.save("work/music.wav", samples)
 ```
 
-或者用面向对象的写法（要更细的控制时）：
+要更细的控制就传 `sections` / `progressions` / `motif` / `drums` / `voices` ——
+它们真的参与事件展开，不是死旋钮（接口见 `musicgen.py` 模块 docstring）。
 
-```python
-sc = sk.Score(389.0, bpm=120, key="Dm", seed=7)
-sc.plan_from_anchors(timeline["scenes"], default_energy=0.5)   # 自动分段，边界对齐小节
-sc.section("finale", 360.0, 389.0, energy=0.95)
-sc.suck(360.0, db=-6, dur=0.22)                                # 最终重击前"吸一口气"
-samples = sc.render()
-```
+底层原语（吸气、分段能量、过门）仍在 `scorekit.py` 里，但**它不是配乐引擎**：
+它只提供和声表 / 律动层 / 混音 / 响度测量这些可复用件。要自己拼一条非常规配乐可以直接
+调它的 `Score` 再用 `scorekit.save()` 落盘；成片链路用的是 musicgen。
 
 ### 11.1 为什么"一张和弦表贯穿全片"
 
@@ -439,7 +441,7 @@ v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具�
 
 | 层 | 行为 | 开关 |
 |---|---|---|
-| 配乐和声/动机/鼓型 | 内容指纹做稳定局部替换（每两小节、±1 级数、ghost 击） | `style: auto`（默认）；`seed_from_content: false` **只关 seed 派生**（音符细节不再随内容变），结构变奏照旧——`render.py` 只要不是 legacy 就把 `fingerprint` 传给 scorekit（`st_score` 里 `fp_hex` 那段）。想连结构一起回到旧行为只有不写 `style`（legacy） |
+| 配乐和声/动机/鼓型 | v0.7 时代由内容指纹驱动结构变奏（每两小节、±1 级数、ghost 击）；**v1.0.1 起改由 musicgen 的编排参数直接决定**（没有可挑的曲风表） | `music.seed_from_content` 仍控制 seed 是否掺指纹；结构差来自 `music.sections` / `music.progressions` 等参数，而不是「换一套风格」 |
 | 音效 seed | `content_seed(base, style, fp, type, t)`，随内容变 | `sfx.content_seed`（默认 true；false = 旧 seed_base+i） |
 | 提示音调性 | `in_key(freq, key)` 跟随配乐调性 | `CueBus.build_audio(key=...)`，render.py 自动传 |
 | 段落边界 | [边界-2.2s, 边界] 内的 whoosh/riser 自动 -3 dB | `sfx.duck_transitions`（默认 true） |
@@ -478,5 +480,5 @@ D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何
 
 1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C 三组达标（在包根执行）。
 2. `python selfcheck.py` —— 55 条全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先，第 39 条盯音频边界）。
-3. `python scorekit.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS。
+3. `python musicgen.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS（musicgen 的 26 项覆盖编排与确定性）。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

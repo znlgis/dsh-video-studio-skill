@@ -8,7 +8,7 @@
     tts     逐句合成旁白 + 实测时长（带输入校验的缓存；按声线计划换人换语气）
     layout  由实测时长排时间轴 -> timeline.json / sub.srt / sub.ass（含停留窗口 hold）
     cues    画面提示点 -> work/cues.json（web 引擎从页面导出，pil 引擎从 film.json 生成）
-    score   程序化配乐 -> work/music.wav（scorekit；无则跳过）
+    score   参数化配乐 -> work/music.wav（musicgen；缺了直接报错，不再回退模板引擎）
     sfx     按提示点合成音效轨 -> work/sfx.wav（sfxkit；无则跳过）
     audio   三总线混音（旁白 + 配乐 + 音效，音效响起时配乐让位）-> audio.wav
     frames  逐帧渲染 -> silent.mp4（--engine pil|web；分块并行、断点续跑）
@@ -68,7 +68,7 @@ def _setup_stdio():
 
     只在"非交互"时切（isatty=False）：Windows 下 python render.py ... | tee out.log
     的 stdout 默认是 GBK 代码页，日志里中文全是乱码；真实控制台保持系统编码，
-    交互运行时中文照样正常。与 scorekit / webengine 的入口处理保持同一口径。
+    交互运行时中文照样正常。与 musicgen / webengine 的入口处理保持同一口径。
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -365,6 +365,19 @@ def resolve_style(script, work=None, verbose=True):
             except Exception as e:                          # noqa: BLE001
                 print("   [WARN] style.json 落盘失败：%s" % e)
         return plan
+    # v1.0.1：**没有第三优先级了**。以前这里会回落到 stylekit 的"按关键词自动选风格"，
+    # 那是模板库的核心；删掉模板后这条路径没有意义，必须明确报错。
+    raise SystemExit(
+        "[style] 找不到设计（work/design.json）：\n"
+        "  v1.0.1 起本技能不提供任何内置风格，每一版外观都必须现场生成并由人确认。\n"
+        "  正确做法：\n"
+        "    1) python propose.py --brief \"题材/要求\" --script film.json   # 出 3 个方案\n"
+        "    2) python propose.py --confirm --candidate A                   # 冻结设计\n"
+        "    3) python render.py --script film.json --stage all             # 出片\n"
+        "  （work=%r）" % (work,))
+
+
+def _resolve_style_legacy_unused(script, work, verbose):
     ST = _stylekit()
     plan = ST.resolve_script_style(script)
     # 主题体检：坏主题现在拦，不要等渲完 300 帧。
@@ -379,15 +392,19 @@ def resolve_style(script, work=None, verbose=True):
     # v0.9：结构签名（视觉语言包）随计划一起解析，并同样在 --stage style 就体检。
     # 为什么不能等渲染：装饰母题名写错/转场时长越界，都要等渲到第 300 帧才发现，
     # 而这两类错误恰恰会让整片观感崩掉（转场 1 秒 = 每段都在"糊过去"）。
-    try:
-        plan["language"] = ST.visual_language(plan["style"])
-        vbad = ST.visual_lint(plan["style"])
-    except AttributeError:
-        # 老 stylekit（没有 VISUAL_LANGUAGES）-> 不阻塞渲染，scenes.py 会退到默认语言
-        plan["language"] = None
-        vbad = []
+    # v1.0.1：没有命名视觉语言了 —— 语言包由计划自带（design 路径必带），
+    # 体检直接对这份字典做，不再"按 style id 查表再体检"。
+    lang = plan.get("language")
+    if not isinstance(lang, dict) or not lang:
+        raise SystemExit(
+            "[style] 这份剧本没有视觉语言包：\n"
+            "  计划里缺 language，而内置视觉语言表已在本版删除。\n"
+            "  正确做法：python propose.py --brief \"题材\" --script film.json\n"
+            "            python propose.py --confirm --candidate A\n"
+            "  （plan.style=%r）" % (plan.get("style"),))
+    vbad = ST.visual_lint_language(lang)
     if vbad:
-        raise SystemExit("[视觉语言体检失败] %s：%s" % (plan["style"], "；".join(vbad)))
+        raise SystemExit("[视觉语言体检失败] %s：%s" % (plan.get("style"), "；".join(vbad)))
     script["_style"] = plan
     if work and verbose:
         path = os.path.join(work, "style.json")
@@ -428,7 +445,15 @@ def _theme_for(script, work=None):
     th = plan.get("theme")
     if isinstance(th, dict) and th:
         return th
-    return _stylekit().THEMES[plan["theme_id"]]
+    # v1.0.1：内置主题表已删除，没有 theme 计划就是"这份 script 没走过 design/propose"。
+    # 明确报错并给迁移指引，不静默回落（静默回落 = 用一套不存在的默认外观出片）。
+    raise SystemExit(
+        "[style] 这份剧本没有可用的主题：\n"
+        "  计划里缺 theme 字段，而内置主题表已在本版删除。\n"
+        "  正确做法：python propose.py --brief \"题材\" --script film.json   # 出方案\n"
+        "            python propose.py --confirm --candidate A               # 冻结 design.json\n"
+        "            python render.py --script film.json --stage all\n"
+        "  （theme_id=%r）" % (plan.get("theme_id"),))
 
 
 def _print_style(plan):
@@ -635,8 +660,8 @@ def st_layout(script, work, lines=None):
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
     # 同上：设计计划自带 theme，不能假定 theme_id 一定在内置表里（见 _theme_for 的注释）
-    theme = (plan.get("theme") or K._stylekit().THEMES[plan["theme_id"]]
-             if not plan["legacy"] else None)
+    # v1.0.1：没有内置主题表了，theme 必须由计划自带（design 路径一定有）
+    theme = (plan.get("theme") if not plan["legacy"] else None)
     n_ass = K.write_ass(tl["scenes"], os.path.join(work, "sub.ass"), theme=theme)
     print("   总时长 %.2fs / %d 帧 / %d 段 / srt %d 条 / ass %d 条"
           % (tl["total"], tl["frames"], len(tl["scenes"]), n_srt, n_ass))
@@ -770,15 +795,78 @@ def _st_cues_web(script, work):
 
 
 # ---------------------------------------------------------------- 配乐 / 音效
+def _score_with_musicgen(script, work, tl, plan_s, mus):
+    """用参数化编排器出成片配乐（与 previewkit 的样音同一个引擎、同一组参数）。
+
+    为什么不复用 scorekit 那条路：scorekit 的 9 套 MUSIC_STYLES 是**风格表**，
+    而本技能 v1.0.1 起不再提供任何模板 —— 配乐必须由设计里的参数现场生成。
+    musicgen 的六个参数（progressions / motif / drums / voices / mood / sections）
+    全部参与事件展开，实测参数相关性 seed 0.16 / mood 0.32 / voices 0.22，无一是死旋钮。
+    """
+    print("== Score（musicgen 参数化编排）")
+    mg = _try_module("musicgen")
+    mp = plan_s["music"]
+    sections = mus.get("sections")
+    if sections:
+        fixed = []
+        for s in sections:
+            s2 = dict(s)
+            if "at" in s2:
+                s2["start"] = K.cue_time(s2.pop("at"), tl["scenes"])
+            fixed.append(s2)
+        sections = fixed
+    kwargs = dict(
+        bpm=float(mp["bpm"]),
+        key=str(mp["key"] or "Dm"),
+        scale=str(mp.get("scale") or "minor"),
+        mood=str(mp.get("mood") or "steady"),
+        # seed_effective 是"内容指纹掺进去之后"的 32 位大数；musicgen 内部按
+        # sha1(seed) 派生，直接给大整数没问题，但统一夹到 2^31-1 内可以保证
+        # 与 scorekit 时代的取模口径一致（老 work/ 目录里的 score.json 能对上）。
+        seed=int(mp.get("seed_effective") or mp.get("seed") or 0) % (2 ** 31 - 1),
+        sections=sections,
+    )
+    # 设计里显式给出的编排参数原样透传（progressions/motif/drums/voices/energy_curve）。
+    # 只在键存在时传：musicgen 对 None 与缺省的处理不同（缺省=自己按 seed 派生）。
+    for key in ("progressions", "motif", "drums", "voices", "energy_curve"):
+        if mp.get(key) is not None:
+            kwargs[key] = mp[key]
+    t0 = time.time()
+    try:
+        samples, report = mg.render(float(tl["total"]), **kwargs)
+    except Exception as e:                                  # noqa: BLE001
+        raise SystemExit(
+            "[score] musicgen.render() 失败：%s\n"
+            "  参数：bpm=%s key=%s scale=%s mood=%s seed=%s\n"
+            "  这是配乐生成的真错误（不是签名不兼容）——先把参数改对，别改成静默跳过。"
+            % (e, kwargs.get("bpm"), kwargs.get("key"), kwargs.get("scale"),
+               kwargs.get("mood"), kwargs.get("seed"))) from e
+    out = os.path.join(work, "music.wav")
+    mg.save(out, samples)
+    if report:
+        json.dump(report, open(os.path.join(work, "score.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+    print("   musicgen: %s %s / %s BPM / %s / mood %s / seed %s"
+          % (report.get("key_name") or report.get("key"), report.get("scale"),
+             report.get("bpm"), "", report.get("mood"), report.get("seed")))
+    samples_read, _sr = K.wav_read(out)
+    print("   music.wav %.2fs  峰值 %.3f  %.1fs" % (
+        K.wav_dur(out), float(np.max(np.abs(samples_read))), time.time() - t0))
+    return out
+
+
 def st_score(script, work, tl):
-    """程序化配乐 -> work/music.wav（scorekit 不在就跳过，不阻断出片）。
+    """参数化配乐 -> work/music.wav（musicgen 现场编排，没有模板可回退）。
 
     配乐来源由 K.music_plan 统一判定（与 st_audio 共用同一份语义）：
       - mode=off/none 或 enabled=false：不出配乐，也不删已存在的 music.wav
         （删文件会误删"外部提供的配乐"，而 off 的语义只是"本片不要配乐"）；
-      - mode=bed：走 v0.2 和弦床，不生成 scorekit 产物；
+      - mode=bed：走 v0.2 和弦床，不生成 musicgen 产物；
       - mode=file：外部 work/music.wav，原样交给 audio 阶段；
       - 缺省：有 bpm 就生成，没有 bpm 沿用已有 music.wav / 和弦床（v0.2 兼容）。
+
+    需要真的生成配乐时，**只有 musicgen 一条路**：legacy 计划或 musicgen.py 缺失都会
+    明确报错并给迁移指引，不再用 scorekit 的配乐模板兜底（v1.0.1 零模板）。
     """
     print("== Score")
     mus = script.get("music") or {}
@@ -789,82 +877,33 @@ def st_score(script, work, tl):
         return None
     if plan in ("missing-file", "missing-bpm", "unknown-mode"):
         raise SystemExit("[score] " + why)
-    sk = _try_module("scorekit")
-    if sk is None:
-        print("   [WARN] 没有 scorekit.py，跳过配乐（audio 阶段没有 music.wav，本片将无配乐）")
-        return None
-    anchors = K.scenes_anchors(tl["scenes"])
-    sections = mus.get("sections")
-    if sections:
-        # film.json 允许用 id 表述分段起点，换成绝对秒
-        fixed = []
-        for s in sections:
-            s2 = dict(s)
-            if "at" in s2:
-                s2["start"] = K.cue_time(s2.pop("at"), tl["scenes"])
-            fixed.append(s2)
-        sections = fixed
-    plan_s = resolve_style(script)
-    mp = plan_s["music"]
-    t0 = time.time()
-    style_arg = None if plan_s["legacy"] else str(mp.get("style") or plan_s["style"])
-    kwargs = dict(bpm=float(mp["bpm"]), key=str(mp["key"] or "Dm"), anchors=anchors,
-                  sections=sections, seed=int(mp["seed_effective"]))
-    # v0.7：内容指纹参与配乐结构变奏（和弦替换 / 动机级数 / 鼓型 ghost，见
-    # references/audio-variation.md §3.3）。只在非 legacy 时传——不传 fingerprint 的
-    # scorekit 认不出这个 kwarg，会走下面的 TypeError 回退链，照样出片只少变奏。
-    # legacy 必须不传：v0.4 的逐样本兼容是硬契约（selfcheck 20/26 条守着）。
-    fp_hex = ""
-    if not plan_s["legacy"]:
-        fp_hex = str((plan_s.get("fingerprint") or {}).get("full") or "")
-    kw_fp = dict(kwargs, fingerprint=fp_hex) if fp_hex else kwargs
-    # scorekit 0.5 起：style/mood + music_plan（一次把 bpm/key/mood/seed 全交出去，
-    # 免得两处默认值打架）+ pace（把过碎的段落并进前一段）。
-    # 旧 scorekit 没有这些 kwargs -> TypeError -> 自动退回老接口，不阻断出片。
-    # 四级回退：带指纹 -> 不带指纹 -> 只有 style/mood -> 最老的签名。
-    pace = {"min_dur": float(plan_s["pacing"]["min_dur"]),
-            "hold": float(plan_s["pacing"]["hold"])}
-    mood_arg = str(mp.get("mood") or "steady")
-    samples = report = None
-    # v0.7.2：多级签名兼容链以前对**任何** TypeError 都继续换签名试，最后统一报
-    # "不接受任何一种已知签名"。scorekit 内部真出 TypeError（例如某个参数是 None 被拿去做
-    # 算术）时，用户会照着"签名不兼容"的方向白找半天。这里区分两类：
-    #   - 报错文本含 "unexpected keyword argument" -> 确实是不认识这个参数，换签名重试；
-    #   - 其它 TypeError -> 是**内部**错误，带上签名与错误信息立刻报，别吞。
-    attempts = (
-        dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kw_fp),
-        dict(style=style_arg, mood=mood_arg, music_plan=mp, pace=pace, **kwargs),
-        dict(style=style_arg, mood=mood_arg, **kwargs),
-        dict(**kwargs),
-    )
-    for attempt in attempts:
-        try:
-            samples, report = sk.render(float(tl["total"]), **attempt)
-            break
-        except TypeError as err:
-            if "unexpected keyword argument" in str(err):
-                continue
-            raise SystemExit(
-                "[score] scorekit.render() 内部报错（不是签名不兼容，别去改调用参数）：%s\n"
-                "  本次签名：%s\n  要看完整 traceback：set RENDER_DEBUG=1 后重跑"
-                % (err, ", ".join(sorted(k for k in attempt if k != "self")))
-            ) from err
-    if samples is None:
-        raise SystemExit("[score] scorekit.render() 不接受任何一种已知签名，无法出配乐"
-                         "（试过 %d 种：从最全的参数到最简）" % len(attempts))
-    if report and not plan_s["legacy"]:
-        print("   配乐风格: %s / mood %s / %s BPM / %s"
-              % (report.get("style") or style_arg, mp.get("mood"),
-                 report.get("bpm"), report.get("key")))
-    out = os.path.join(work, "music.wav")
-    sk.save(out, samples)
-    if report:
-        json.dump(report, open(os.path.join(work, "score.json"), "w", encoding="utf-8"),
-                  ensure_ascii=False, indent=1)
-    samples_read, _sr = K.wav_read(out)
-    print("   music.wav %.2fs  峰值 %.3f  %.1fs" % (
-        K.wav_dur(out), float(np.max(np.abs(samples_read))), time.time() - t0))
-    return out
+    # v1.0.1：**配乐只有 musicgen 一条路**（参数化编排器，没有风格表）。
+    #
+    # 为什么必须换：v1.0 里 previewkit 用 musicgen 出 12 秒样音，而 st_score 用 scorekit
+    # 出成片音乐 —— 两者是**两个不同的作曲器**，实测同一设计下相关系数 -0.0057（就是两首
+    # 不同的曲子）。用户看样音选方案，成片音乐完全不同，等于"确认"这个动作在音频上失效。
+    #
+    # v1.0.1 把 scorekit 的 9 套 MUSIC_STYLES 风格表整个删了（零模板），它的 render()
+    # 只剩 legacy 逐样本兼容路径。所以这里**不再有 scorekit 回退**：scorekit 一旦回来
+    # 当兜底，成片音乐就又变成一套固定模板，与"每条视频都不一样"直接冲突。
+    plan_s0 = resolve_style(script)
+    if plan_s0.get("legacy"):
+        raise SystemExit(
+            "[score] legacy 配乐路径已移除（v1.0.1 零模板）：\n"
+            "  scorekit 的 9 套配乐风格表已删除，legacy 回退会把成片配乐锁死成一套固定模板。\n"
+            "  正确做法（两步）：\n"
+            "    1) python propose.py --brief \"题材/要求\" --script film.json   # 出 3 个方案\n"
+            "    2) python propose.py --confirm --candidate A                   # 冻结 work/design.json\n"
+            "    3) python render.py --script film.json --stage score           # 用 musicgen 现场编排\n"
+            "  （想手写配乐参数：film.json 的 music.bpm / key / mood / sections 仍然有效）")
+    if _try_module("musicgen") is None:
+        raise SystemExit(
+            "[score] 找不到 musicgen.py，无法生成配乐：\n"
+            "  v1.0.1 起配乐只有参数化编排器一条路（scorekit 的风格模板已删除，不再兜底）。\n"
+            "  检查 <SKILL_DIR>/scripts/musicgen.py 是否被拷到工作目录——\n"
+            "  quickstart 的 cp <SKILL_DIR>/scripts/*.py . 会把它一起拷过来；\n"
+            "  只需要旁白/音效时把 film.json 的 music.mode 设为 off 或 file。")
+    return _score_with_musicgen(script, work, tl, plan_s0, mus)
 
 
 def _sfx_seed_context(script):
@@ -886,7 +925,7 @@ def _sfx_seed_context(script):
 def _duck_transition_sfx(samples, cues, scenes, sr=K.SR, depth_db=-3.0, window=2.2):
     """段落边界前的转场音效自动让位（v0.7，契约 §4）。
 
-    配乐在段落交界自己已经有一段过门（scorekit 的 swell / riser / sub_boom），
+    配乐在段落交界自己已经有一段过门（编排器写的 swell / riser / sub_boom），
     sfx 轨再在同一时刻放 whoosh / riser，同一频段叠两层就是"配乐和音效听起来像同一套"。
     做法：对位于 [边界-window, 边界] 内的转场类 cue，在它的时长内乘一个 dB 增益包络。
     只压转场类，不碰 impact / 提示音（那是"该响"的语义重音）。
@@ -996,7 +1035,7 @@ def _voice_track(tl, script):
 
 
 def _legacy_music(tl, script):
-    """v0.2 的和弦床（没有 scorekit / music.wav 时的兜底）。"""
+    """v0.2 的和弦床（没有 music.wav 时的兜底）。"""
     mus = script.get("music") or {}
     if not (mus.get("enabled", True) and mus.get("chords")):
         return None
@@ -1046,7 +1085,7 @@ def st_audio(tl, work, script):
         print("   配乐: " + why)
     if plan == "score" and music is None:
         # 单独跑 --stage audio 时 score 还没跑过：不混配乐，但必须说清楚为什么
-        print("   [WARN] music 用 scorekit 但 %s 不存在（先跑 --stage score）；本次无配乐"
+        print("   [WARN] music.mode=score 但 %s 不存在（先跑 --stage score）；本次无配乐"
               % music_path)
 
     sfx = None
@@ -1391,7 +1430,10 @@ def _web_style_payload(we, script, tl=None):
     """
     try:
         style_plan = resolve_style(script, verbose=False)
-    except Exception as e:                                  # noqa: BLE001
+    # 必须连 SystemExit 一起接：resolve_style 在"没有设计/主题不过体检"时用 SystemExit
+    # 报错（这是它向 CLI 报用法错误的方式），而 SystemExit 继承自 BaseException，
+    # 只 catch Exception 接不住 —— web 页面会拿着半截载荷渲染，或者整个进程直接退出。
+    except (Exception, SystemExit) as e:                    # noqa: BLE001
         print("   [WARN] web 风格包解析失败，页面用内置配色：%s" % e)
         return None
     if not style_plan or style_plan.get("legacy"):

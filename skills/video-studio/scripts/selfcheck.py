@@ -62,7 +62,8 @@
   55  （v0.9.0）剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分
   56  （v1.0.0）设计 DSL：采样->校验->转计划全通；缺必填块必须报错（fail-closed）；
       同 brief 两次采样一致；两两至少 2 维不同（"伪多方案"门禁）
-  57  （v1.0.0）预设下沉：presets/*.json 全部可读、可转 design、过校验，且 auto 必须为 false
+  57  （v1.0.1）零模板：仓库里不许存在 presets/ 与 presetkit.py；现场采样必须确定性、
+      且换 brief 必须换结果（否则就是还在套模板）
   58  （v1.0.0）提案闸：absent / draft / broken 三档判定正确（confirmed 才放行出片）
 
 说明：本文件里 CASES 的**实际条数**是唯一真理，上面的编号表要与它同步。
@@ -115,9 +116,35 @@ def run(name, fn):
     except AssertionError as e:
         RESULTS.append(("FAIL", name, str(e)))
         print("  FAIL %s  -> %s" % (name, e))
+    except SystemExit as e:
+        # 被调代码用 SystemExit 报"用法错误"（例如 resolve_style 要求先提案）。
+        # 必须记 FAIL 而不是让自检直接退出 —— 早先 selfcheck 会在这里**静默中止**，
+        # 后面的用例一条都不跑，输出留在半截，很容易被当成"还在跑"。
+        RESULTS.append(("FAIL", name, "SystemExit: %s" % (e.code if str(e.code) != "None" else e)))
+        print("  FAIL %s  -> SystemExit: %s" % (name, e))
     except Exception as e:                      # noqa: BLE001
         RESULTS.append(("FAIL", name, "%s: %s" % (type(e).__name__, e)))
         print("  FAIL %s  -> %s: %s" % (name, type(e).__name__, e))
+
+
+# 自检专用：造一份 design 计划。
+# v1.0.1 删掉内置风格表后，"要一份 plan"这件事只能靠现场采样 + 转计划；
+# 每个用例各写一遍既啰嗦又容易漂移，于是收到这里。
+# 固定 seed 保证自检自身可复现（自检必须可复现，否则 CI 抖起来没法查）。
+_PLAN_CACHE = {}
+
+
+def _design_plan(topic="selfcheck 样例", seed=20260101):
+    key = (topic, seed)
+    if key not in _PLAN_CACHE:
+        import designkit as DK
+        d = DK.sample_designs({"topic": topic}, n=1, seed=seed)[0]
+        _PLAN_CACHE[key] = (d, DK.design_to_plan(d))
+    return _PLAN_CACHE[key]
+
+
+def _sample_design(topic="selfcheck 样例", seed=20260101):
+    return _design_plan(topic, seed)[0]
 
 
 def _tone_wav(path, seconds=1.0, freq=440.0):
@@ -464,9 +491,13 @@ def t_music_plan():
         with redirect_stdout(buf):
             # D3 之后没有 design/style 的剧本会被拒（不再静默落 legacy），
             # 这条用例测的是"off 不读旧配乐"，与设计无关，显式给一个风格即可。
-            off_out = render.st_audio(tl, work, {"style": "mono", "music": {"mode": "off"}})
+            # D3 之后没有 design/style 的剧本会被拒（不再静默落 legacy），
+            # 这条用例测的是"off 不读旧配乐"，与设计无关，给一份现场设计即可。
+            _d, _plan = _design_plan("配乐来源判定")
+            _script23 = {"title": "配乐来源", "_style": _plan}
+            off_out = render.st_audio(tl, work, dict(_script23, music={"mode": "off"}))
             off_peak = float(np.max(np.abs(K.wav_read(off_out)[0])))
-            file_out = render.st_audio(tl, work, {"style": "mono", "music": {"mode": "file"}})
+            file_out = render.st_audio(tl, work, dict(_script23, music={"mode": "file"}))
             file_peak = float(np.max(np.abs(K.wav_read(file_out)[0])))
         assert "music.mode=off" in buf.getvalue(), "off 没有打印说明（静默跳过也不行）"
         assert off_peak < 0.01, "music.mode=off 仍把旧 music.wav 混进来了（峰值 %.3f）" % off_peak
@@ -565,28 +596,34 @@ def t_qa_frames():
 
 
 def t_style_kits():
-    """25 风格层：8 套主题过对比度门禁 + 自动选风格能把 8 类题材分开。"""
+    """25 连续配色空间（v1.0.1 替代"8 套主题"）：现场采样的每一套都必须过对比度门禁，
+    且色相真的分散——这条是"没有模板"的硬证据。
+
+    旧断言是"8 套内置主题全部过 lint + 自动选风格能分出 >=6 种"。模板删掉后那个断言
+    失去对象，于是换成更强的：**连续空间采样 12 次，全部可读 + 色相覆盖 >= 180°**。
+    只测"能采出来"不够 —— 全落在同一色相也能过，所以必须夹一条分布断言。
+    """
+    import designkit as DK
     import stylekit as ST
-    bad = ST.lint_all()
-    assert not bad, "内置主题没过对比度门禁: %s" % bad
-    topics = {
-        "tech": "AI 算法 模型 数据 架构 开源 编程 大模型 代码 系统",
-        "report": "报告 复盘 年度 总结 研究 分析 调研 白皮书 趋势 发布",
-        "craft": "手工 自然 历史 传统 木 田野 匠 古 茶 手艺 山河",
-        "launch": "活动 上新 招募 挑战 年轻 潮流 种草 福利 开箱 限量",
-        "truth": "观点 为什么 本质 真相 极简 反思 边界 定义 取舍",
-        "story": "故事 记忆 城市 深夜 旅行 纪实 情绪 时代 变迁 命运",
-        "night": "深夜 学习 效率 专注 写作 整理 笔记 书 日常 房间",
-        "epic": "史诗 爆发 冲击 巅峰 决战 荣耀 震撼 传奇 极限 突破",
-    }
-    got = {}
-    for key, text in topics.items():
-        s = {"title": text, "style": "auto",
-             "lines": [{"id": "l01", "kind": "hook", "text": text},
-                       {"id": "l02", "kind": "body", "text": text}]}
-        got[key] = ST.resolve_script_style(s)["style"]
-    assert len(set(got.values())) >= 6, "8 类题材只分出 %d 套风格: %s" % (len(set(got.values())), got)
-    return "%d 套主题 + %d 类题材 -> %d 种风格" % (len(ST.STYLE_IDS), len(topics), len(set(got.values())))
+    designs = DK.sample_designs({"topic": "配色空间校验"}, n=12, seed=20260101)
+    assert len(designs) == 12, "采样返回 %d 套（要 12）" % len(designs)
+    hues, fails = [], []
+    for d in designs:
+        plan = DK.design_to_plan(d)
+        bad = ST.theme_lint(plan["theme"])
+        if bad:
+            fails.append("%s: %s" % (d["label"], bad[0][:50]))
+        h, _s, _v = ST.rgb_to_hsv(plan["theme"]["bg"])
+        hues.append(h)
+    assert not fails, "有设计过不了对比度门禁：%s" % "；".join(fails[:3])
+    span = max(hues) - min(hues)
+    if span < 180.0:                        # 跨 0° 的情况：取补集
+        span = 360.0 - span
+    assert span >= 180.0, ("12 套设计的底色谱相只覆盖 %.0f°（应 >=180°）——"
+                           "说明配色并没有真的在连续空间里散开" % span)
+    assert len(DK.PALETTE_FAMILIES) == len(DK._LEGACY_FAMILY_ANCHOR), "老族名表应只作兼容层"
+    return "12 套现场配色全部过 lint；色相覆盖 %.0f°；兼容层 %d 个老名" % (
+        span, len(DK._LEGACY_FAMILY_ANCHOR))
 
 
 def t_style_legacy():
@@ -599,46 +636,42 @@ def t_style_legacy():
     """
     import stylekit as ST
     s = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
+    # ① 不给设计：必须报错，且错误文本指得出下一步
     try:
         ST.resolve_script_style(s)
-    except ValueError as e:
-        msg = str(e)
+    except (ValueError, KeyError, SystemExit) as e:
+        msg = str(getattr(e, "code", None) or e)
         assert "propose.py" in msg, "报错必须给出迁移指引（要提到 propose.py），实际：%r" % msg[:120]
         assert "design" in msg.lower(), "报错要说清主路径是 design.json，实际：%r" % msg[:120]
     else:
         raise AssertionError("没有 style/design 却没报错：legacy 路径没有真的移除")
-    # 显式指定风格仍然可用（P3 范围内的兼容面）
+    # ② 显式 style 也不再可用 —— v1.0.1 把内置风格表整个删了。
+    #    和 v1.0 不同：那时"显式选风格"是兼容面；现在连 STYLES 都没了，
+    #    任何 style id 都必须落空并报错（否则就是"模板还在"）。
     s3 = dict(s, style="cinema")
-    p3 = ST.resolve_script_style(s3)
-    assert p3["legacy"] is False, "显式 style 不该标成 legacy"
-    assert p3["music"]["bpm"] in ST.STYLES["cinema"]["music"]["bpm_ladder"]
-    assert p3["music"]["key"] in ST.STYLES["cinema"]["music"]["keys"]
-    return "无 design 时按预期报错并给迁移指引 / 显式 cinema: bpm=%g key=%s" % (
-        p3["music"]["bpm"], p3["music"]["key"])
+    try:
+        ST.resolve_script_style(s3)
+    except (ValueError, KeyError, SystemExit) as e:
+        msg = str(getattr(e, "code", None) or e)
+        assert "模板" in msg or "design" in msg.lower() or "propose" in msg,             "显式 style 报错也该给指引，实际：%r" % msg[:120]
+    else:
+        raise AssertionError("显式 style='cinema' 竟然还能解析出计划：内置风格表没删干净")
+    assert ST.STYLE_IDS == () and not ST.STYLES and not ST.THEMES,         "内置风格/主题表必须为空，实际 STYLE_IDS=%r STYLES=%d THEMES=%d" % (
+            ST.STYLE_IDS, len(ST.STYLES), len(ST.THEMES))
+    return "无设计必报错并给迁移指引 / 显式 style 也被拒绝 / 三张模板表为空"
 
 
 def t_style_determinism():
     """27 指纹确定性：同剧本同结果；改错别字不换风格；改题材才换。"""
-    import stylekit as ST
-    base = {"title": "AI 大模型的三年", "style": "auto",
-            "lines": [{"id": "l01", "kind": "hook", "text": "大模型改变了什么"},
-                      {"id": "l02", "kind": "body", "text": "算法和数据的规模一起上去了"}]}
-    a = ST.resolve_script_style(base)
-    b = ST.resolve_script_style(json.loads(json.dumps(base)))
-    assert json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str), \
-        "同一剧本两次解析结果不同（不确定性）"
-    typo = json.loads(json.dumps(base))
-    typo["lines"][1]["text"] += "。"
-    c = ST.resolve_script_style(typo)
-    assert c["style"] == a["style"], "改一个标点就换了风格: %s -> %s" % (a["style"], c["style"])
-    assert c["music"]["bpm"] == a["music"]["bpm"], "改一个标点就换了 BPM"
-    assert c["fingerprint"]["full"] != a["fingerprint"]["full"], "full 指纹没变（内容派生失效）"
-    other = {"title": "深夜学习指南", "style": "auto",
-             "lines": [{"id": "l01", "kind": "hook", "text": "为什么深夜反而能专注"},
-                       {"id": "l02", "kind": "body", "text": "整理笔记，写作，阅读都更安静"}]}
-    d = ST.resolve_script_style(other)
-    assert d["style"] != a["style"], "换了一部片风格却相同: %s" % d["style"]
-    return "%s -> %s（同一剧本稳定），换片 -> %s" % (a["style"], c["style"], d["style"])
+    import designkit as DK
+    # v1.0.1：没有"剧本 -> 自动选风格"了，改为验证"设计采样"的确定性与区分度。
+    # 固定 seed 才谈确定性：默认不给 seed 时每次都要不同（那是 56/57 条在守的事）。
+    a = DK.sample_designs({"topic": "AI 大模型的三年"}, n=1, seed=11)[0]
+    b = DK.sample_designs({"topic": "AI 大模型的三年"}, n=1, seed=11)[0]
+    assert DK.design_fingerprint(a) == DK.design_fingerprint(b), "同 seed 同 brief 采样不一致"
+    assert DK.design_fingerprint(a) != DK.design_fingerprint(
+        DK.sample_designs({"topic": "手工木作"}, n=1, seed=11)[0]), "换了题材设计却没变"
+    return "同 seed 可复现 + 换题材必变"
 
 
 def t_voice_plan():
@@ -647,13 +680,14 @@ def t_voice_plan():
         import voicekit as VK
     except Exception:                                       # noqa: BLE001
         return "skip"
-    import stylekit as ST
-    s = {"title": "AI 大模型", "style": "auto",
+    import designkit as DK
+    s = {"title": "AI 大模型",
          "lines": [{"id": "l01", "kind": "hook", "text": "大模型改变了什么"},
                    {"id": "l02", "kind": "body", "text": "算法和数据的规模一起上去了"},
                    {"id": "l03", "kind": "quote", "text": "他说：这不可能"},
                    {"id": "l04", "kind": "outro", "text": "它已经在我们身边了"}]}
-    plan = ST.resolve_script_style(s)
+    # v1.0.1：声线计划同样只能从设计来（模板表已删）
+    plan = DK.design_to_plan(DK.sample_designs({"topic": "AI 大模型"}, n=1, seed=7)[0])
     vp = VK.voice_plan(s, plan)
     assert len(vp) == 4, "计划行数应为 4，收到 %d" % len(vp)
     assert json.dumps(vp, sort_keys=True, default=str) == json.dumps(
@@ -667,10 +701,10 @@ def t_voice_plan():
     for r in vp:
         for fld in ("voice", "rate", "pitch", "volume", "lead", "tail"):
             assert r.get(fld) not in (None, ""), "计划行缺 %s: %r" % (fld, r.get("id"))
-    # v1.0 / D3：legacy 兼容段已随 legacy 路径一起删掉；这里改成"单句片"的正常路径检查
-    one = {"title": "单句片", "style": "mono",
+    # 单句片：同样走 design（不再有 style="mono" 这种内置风格可选）
+    one = {"title": "单句片",
            "lines": [{"id": "a", "kind": "body", "text": "一句话"}]}
-    op = ST.resolve_script_style(one)
+    op = DK.design_to_plan(DK.sample_designs({"topic": "单句片"}, n=1, seed=3)[0])
     ovp = VK.voice_plan(one, op)
     assert len(ovp) == 1, "单句片应只给一行计划，收到 %d" % len(ovp)
     assert ovp[0]["voice"].endswith("Neural"), "声线应是 edge voice id：%r" % (ovp[0]["voice"],)
@@ -858,8 +892,9 @@ def t_parallel_frames():
     """
     import json as _json
     import tempfile
-    import stylekit as ST
-    th = dict(ST.THEMES["tech-deep"])
+    # v1.0.1：不再有内置主题可借，用现场设计的主题（颜色同样是 (r,g,b) 元组）
+    _d, _plan0 = _design_plan("并行渲染主题序列化")
+    th = dict(_plan0["theme"])
     # ① 防御层：scenes._hashable 把 list 冻结成 tuple
     scenes = _load_scenes_mod()
     if scenes is not None and hasattr(scenes, "_hashable"):
@@ -871,18 +906,29 @@ def t_parallel_frames():
     assert isinstance(round_trip["bg"], list), "前提变了：JSON 居然保住了 tuple"
     w = tempfile.mkdtemp(prefix="sc_par_")
     snap = os.path.join(w, "snap.json")
-    script = {"title": "t", "style": "tech-deep", "lines": [{"text": "x"}]}
-    script["_style"] = ST.resolve_script_style(script)
+    script = {"title": "t", "lines": [{"text": "x"}]}
+    script["_style"] = _plan0
     with open(snap, "w", encoding="utf-8") as fh:
         _json.dump(script, fh, ensure_ascii=False)
     back = _json.load(open(snap, encoding="utf-8"))
     assert isinstance(back["_style"]["theme"]["bg"], list), "前提变了"
-    # 重解风格（render.resolve_style 的纯函数部分）：必须回到 tuple
-    again = ST.resolve_script_style(back)
-    assert isinstance(again["theme"]["bg"], tuple), (
-        "--jobs >1 时主题色仍是 list，_bg() 会 TypeError（这正是被修的 bug）：%r"
-        % (again["theme"]["bg"],))
-    return "主题标量可哈希 + 反序列化后重解回 tuple"
+    # 子进程路径（v1.0.1 修：worker 必须从 work/design.json 重解设计，而不是回落 stylekit）。
+    # 现在直接验那条路径：把 design.json 放进 work/，resolve_style 必须解出**同一个**设计，
+    # 且颜色回到 tuple（list 会让 _bg() 的缓存键不可哈希）。
+    import designkit as DK
+    import render as R
+    dpath = os.path.join(w, "design.json")
+    with open(dpath, "w", encoding="utf-8") as fh:
+        _json.dump(_sample_design("并行渲染主题序列化"), fh, ensure_ascii=False)
+    sub_script = {"title": "t", "lines": [{"text": "x"}]}
+    got = R.resolve_style(sub_script, w, verbose=False)
+    assert got.get("style", "").startswith("design:"), \
+        "子进程重解没有走 design.json（会画出另一部片）：%r" % (got.get("style"),)
+    assert isinstance(got["theme"]["bg"], tuple), (
+        "重解后主题色仍是 list，_bg() 会 TypeError（这正是被修的 bug）：%r"
+        % (got["theme"]["bg"],))
+    assert got["theme"]["bg"] == th["bg"], "重解出的主题与父进程不一致（并行会画出不同的片）"
+    return "主题可哈希 + JSON 往返 + 按 design.json 重解一致"
 
 
 def _load_scenes_mod():
@@ -1155,17 +1201,20 @@ def t_theme_overrides_linted():
     实测 overrides ink=[30,30,30]/bg=[10,10,10]：基础主题 lint 为空，最终主题 lint 报对比度 1.09。
     """
     import stylekit as ST
-    base = {'title': 'x', 'style': 'auto',
-            'lines': [{'id': 'l01', 'kind': 'body', 'text': 'y'}]}
-    p = ST.resolve_script_style(dict(base, visual={'theme_overrides': {
-        'ink': [30, 30, 30], 'bg': [10, 10, 10]}}))
-    assert ST.theme_lint(ST.THEMES[p['theme_id']]) == [], \
-        "前提变了：基础主题本身就有 lint 问题，这条断言失去意义"
-    bad = ST.theme_lint(p['theme'])
+    # v1.0.1：没有"基础主题 vs 最终主题"的区分了（内置主题表已删），
+    # 但"overrides 之后必须重新 lint"这条规则仍然要守：
+    # 直接把设计主题改成低对比度，theme_lint 必须抓到。
+    _d, _plan43 = _design_plan("theme_overrides 体检")
+    base_th = _plan43["theme"]
+    assert ST.theme_lint(base_th) == [], \
+        "前提变了：设计主题本身就有 lint 问题，这条断言失去意义"
+    dirty = ST.apply_theme_overrides(base_th, {"ink": [30, 30, 30], "bg": [10, 10, 10]})
+    bad = ST.theme_lint(dirty)
     assert bad, '低对比度的 theme_overrides 没被 lint 抓到（用户能造出看不清的字幕）'
     src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
-    assert "ST.theme_lint(plan.get('theme')" in src or 'ST.theme_lint(plan.get("theme")' in src, \
-        "render.resolve_style 仍在体检基础主题而不是最终主题"
+    assert ('ST.theme_lint(plan.get("theme")' in src
+            or "ST.theme_lint(plan.get('theme')" in src), \
+        "render.resolve_style 没有体检最终主题"
     return "最终主题参与体检（%s）" % "；".join(bad)[:60]
 
 
@@ -1244,11 +1293,9 @@ def t_golden_determinism():
     import hashlib
     sc = dict(id="l01", kind="hook", start=0.0, dur=4.0, chapter="01 · 测试",
               text="金帧确定性自检", sub="金帧确定性", big="金帧确定性")
-    # v1.0 / D3：剧本必须显式给设计或风格。以前这里 `except: pass` 吞掉解析失败，
-    # 于是"没有 _style"也能跑——那正是静默回落，D3 之后不允许再出现这种写法。
-    script = {"title": "selfcheck", "_total": 8.0, "style": "mono"}
-    plan = __import__("stylekit").resolve_script_style(dict(script, lines=[sc]))
-    script["_style"] = plan
+    # v1.0.1：剧本必须显式给设计（内置风格表已删，没有"style": "mono" 这种写法了）。
+    script = {"title": "selfcheck", "_total": 8.0}
+    script["_style"] = _design_plan("金帧确定性")[1]
     hs = []
     for _ in range(2):
         fr = mod.draw_frame(sc, 1.25, 4.0, 1.25, script, 37)
@@ -1366,18 +1413,23 @@ def t_web_style_payload():
         import webengine as we
     except Exception as e:                                  # noqa: BLE001
         return "skip（没有 webengine.py：%s）" % e
-    script = {"title": "x", "style": "cinema",
-              "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
+    # v1.0.1：没有 legacy 概念了（legacy 入口已被拒绝），所以这里只验"设计项目必须注入载荷"。
+    script = {"title": "x", "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
+    script["_style"] = _design_plan("web 载荷")[1]
     tl = {"fps": 30, "video": {"out_w": 1280, "out_h": 720}}
-    payload = R._web_style_payload(we, script, tl)
+    try:
+        payload = R._web_style_payload(we, script, tl)
+    except SystemExit as e:
+        raise AssertionError("有 _style 却被当成没有设计：%s" % (e,)) from e
     assert payload is not None, "非 legacy 项目没有生成 style 载荷（页面不会跟随风格）"
     canvas = payload.get("canvas") or {}
     assert int(canvas.get("w") or 0) == 1280 and int(canvas.get("h") or 0) == 720, \
         "画布尺寸没跟着 video 块走：%r" % (canvas,)
-    legacy = {"title": "x", "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
-    assert R._web_style_payload(we, legacy, tl) is None, \
-        "legacy 项目也注入了 style（v0.7 的逐字节兼容会被打破）"
-    return "非 legacy 注入 %dx%d / legacy 回落 None" % (canvas["w"], canvas["h"])
+    # 没有设计的剧本：必须回落 None（不是"随便注入一套默认风格"）
+    bare = {"title": "x", "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
+    assert R._web_style_payload(we, bare, tl) is None, \
+        "没有设计的剧本也注入了 style 载荷（等于凭空套一套外观）"
+    return "有设计注入 %dx%d / 无设计回落 None" % (canvas["w"], canvas["h"])
 
 
 def t_golden_frames():
@@ -1516,27 +1568,28 @@ def t_visual_languages():
     这条盯的是"结构签名真的存在且互不相同"——母题/转场/重心偏移任一维度相同不算问题，
     但**五组签名全同**就说明这套语言只是复制粘贴。
     """
+    import designkit as DK
     import stylekit as ST
-    if not hasattr(ST, "VISUAL_LANGUAGES"):
-        return "skip（stylekit 没有 VISUAL_LANGUAGES）"
-    bad = ST.visual_lint_all()
-    assert not bad, "内置视觉语言没过体检: %s" % bad
-    sigs = {}
-    for sid in ST.STYLE_IDS:
-        vl = ST.VISUAL_LANGUAGES[sid]
+    # v1.0.1：没有 8 套内置语言了。改成验"现场生成的语言"，而且断言更强：
+    # 12 个设计的两两结构签名必须互不相同（以前只要求 8 套里 >=6 种母题）。
+    sigs, motifs, transes = {}, set(), set()
+    designs = DK.sample_designs({"topic": "视觉语言多样性"}, n=12, seed=20260202)
+    for d in designs:
+        plan = DK.design_to_plan(d)
+        vl = plan["language"]
+        bad = ST.visual_lint_language(vl)
+        assert not bad, "%s 的语言包没过体检：%s" % (d["label"], bad[:2])
         key = (str((vl.get("motif") or {}).get("kind")),
                str((vl.get("transition") or {}).get("kind")),
                tuple(sorted((vl.get("bias") or {}).items())))
-        assert vl.get("motion") and vl.get("typography"), "%s 缺 motion/typography 签名" % sid
-        sigs.setdefault(key, []).append(sid)
+        sigs.setdefault(key, []).append(d["label"])
+        motifs.add(str((vl.get("motif") or {}).get("kind")))
+        transes.add(str((vl.get("transition") or {}).get("kind")))
     dup = [v for v in sigs.values() if len(v) > 1]
-    assert not dup, "这些风格的母题/转场/重心完全相同（等于没做结构差异）: %s" % (dup,)
-    motifs = {str((ST.VISUAL_LANGUAGES[s].get("motif") or {}).get("kind")) for s in ST.STYLE_IDS}
-    assert len(motifs) >= 6, "8 套风格只用了 %d 种装饰母题：%r" % (len(motifs), sorted(motifs))
-    return "8 套 / %d 种母题 / %d 种转场 / 无重复签名" % (
-        len(motifs),
-        len({str((ST.VISUAL_LANGUAGES[s].get("transition") or {}).get("kind"))
-             for s in ST.STYLE_IDS}))
+    assert not dup, "这些设计语言签名完全相同（等于只在换色）: %s" % (dup[:2],)
+    assert len(motifs) >= 6, "12 个设计只用了 %d 种装饰母题：%r" % (len(motifs), sorted(motifs))
+    return "12 个设计 / %d 种母题 / %d 种转场 / 无重复签名" % (
+        len(motifs), len(transes))
 
 
 def t_scene_types_single_truth():
@@ -1652,34 +1705,53 @@ def t_design_dsl():
     broken = json.loads(json.dumps(ds[0]))
     broken["visual"].pop("motif", None)
     assert DK.validate_design(broken), "缺 motif 竟然通过校验（fail-closed 失效）"
-    # 确定性
-    again = DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)
-    assert [x["id"] for x in again] == [x["id"] for x in ds], "同一 brief 两次采样不一致"
-    return "3 候选 / 校验全过 / 两两 >=2 维 / 缺字段必报错"
+    # v1.0.1 起语义反转：**不给 seed = 每次都不一样**（需求是"每条视频都不同"），
+    # 给 seed 才可复现。两条都要测，否则改错了任一边都发现不了。
+    x1 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)]
+    x2 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)]
+    assert x1 != x2, "同一 brief 两次采样完全相同（那就是把模板藏进了哈希里）"
+    y1 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3, seed=42)]
+    y2 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3, seed=42)]
+    assert y1 == y2, "给了 seed 竟然不可复现（回归/文档示例就不可信了）"
+    return "3 候选 / 校验全过 / 两两 >=2 维 / 缺字段必报错 / 默认每次不同 + seed 可复现"
 
 
-def t_presets():
-    """57 预设：presets/*.json 能被读、能转 design、且全部通过校验（下沉后仍可用）。"""
+def t_no_templates():
+    """57 零模板：仓库里**不许再有**预设/模板文件（v1.0.1 起本技能只提供技术，不提供模板）。
+
+    反过来断言：早先这条是"presets/*.json 可读可转"，v1.0.1 把预设整个删掉后，
+    如果只是删掉这条检查，就再也拦不住"哪天有人又加一套预设进去"。
+    所以改成**禁止存在**——删掉模板是一次性动作，守住它是长期契约。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+    skill = os.path.join(root, "skills", "video-studio")
+    banned = []
+    presets_dir = os.path.join(skill, "presets")
+    if os.path.isdir(presets_dir):
+        n = len([x for x in os.listdir(presets_dir) if x.endswith(".json")])
+        banned.append("presets/ 目录还在（%d 个 json）" % n)
+    for name in ("presetkit.py",):
+        if os.path.exists(os.path.join(skill, "scripts", name)):
+            banned.append("scripts/%s 还在" % name)
+    assert not banned, ("v1.0.1 起本技能不提供模板，这些必须删掉：%s；"
+                        "要自定义请写 design.json（技术原语仍在，只是不再有现成目录）"
+                        % "；".join(banned))
+    # 同时确认"现场采样"是唯一方式，且**每次都新**：
+    #   · 同一 brief 两次 -> 必须不同（否则等于模板藏在哈希里，用户要新片只能改措辞）
+    #   · 给 seed -> 必须可复现（回归与文档示例需要一个稳定值）
     try:
-        import presetkit as PK
         import designkit as DK
     except Exception:                                       # noqa: BLE001
-        return "skip（没有 presetkit.py）"
-    rows = PK.list_presets()
-    assert rows, "presets/ 目录里一套预设都没有"
-    bad = []
-    for row in rows:
-        pr = PK.load_preset(row["id"])
-        if pr is None:
-            bad.append(row["id"] + ":读不出")
-            continue
-        assert pr.get("auto") is False, "预设 %s 的 auto 必须是 false（不参与自动选型）" % row["id"]
-        design = PK.preset_to_design(pr)
-        probs = DK.validate_design(design)
-        if probs:
-            bad.append("%s: %s" % (row["id"], probs[0][:60]))
-    assert not bad, "有预设转不出合法设计：%s" % "；".join(bad)
-    return "%d 套预设全部可读、可转 design、过校验" % len(rows)
+        return "skip（没有 designkit.py）"
+    a = [d["label"] for d in DK.sample_designs({"topic": "零模板校验 A"}, n=2)]
+    b = [d["label"] for d in DK.sample_designs({"topic": "零模板校验 A"}, n=2)]
+    c = [d["label"] for d in DK.sample_designs({"topic": "零模板校验 B"}, n=2)]
+    s1 = [d["label"] for d in DK.sample_designs({"topic": "零模板校验 A"}, n=2, seed=7)]
+    s2 = [d["label"] for d in DK.sample_designs({"topic": "零模板校验 A"}, n=2, seed=7)]
+    assert a != b, "同一 brief 两次采样结果相同（等于把模板藏进了哈希）"
+    assert a != c, "换 brief 采样结果没变（说明其实在套模板）"
+    assert s1 == s2, "给了 seed 竟然不可复现"
+    return "无模板文件；同 brief 两次必不同、换 brief 必变、seed 可复现"
 
 
 def t_proposal_gate():
@@ -1764,7 +1836,7 @@ CASES = [
     ("54 场景类型单真值（4 处集合一致）", t_scene_types_single_truth),
     ("55 剪影可区分（G13：换风格不能只是换色）", t_silhouette_gate),
     ("56 设计 DSL（采样/校验/转计划/fail-closed）", t_design_dsl),
-    ("57 预设下沉（presets/*.json -> design）", t_presets),
+    ("57 零模板（仓库里不许有预设；采样确定性且随 brief 变化）", t_no_templates),
     ("58 提案闸（absent/draft/confirmed/broken）", t_proposal_gate),
 ]
 

@@ -50,9 +50,14 @@ WEB_SEC_PER_FRAME = (0.080, 0.130)  # web 引擎：Edge 无头 PNG 截图 80–1
 WEB_STARTUP_SEC = 6.0               # 浏览器冷启动 + CDP 连接（12 s 片 28–30 s 含启动）
 X264_FPS = 141.0                    # libx264 -preset medium -crf 17 ≈ 4.7× 实时（仅 reencode_video 用）
 TTS_SEC_PER_LINE = (2.0, 4.0)       # edge-tts：每句每 worker 的墙钟（联网，波动大）：实测 2.2 s，留到 4.0
-SCORE_REFS = ((29.0, 3.6, 6.5), (58.0, 4.5, 6.5), (389.0, 8.0, 18.0))
-#           ^ (片长 s, 耗时低, 耗时高)：前两个点是本机实测（29 s / 58 s 各 3 次），
-#             第三个点是片长外推锚点（不是本机实测），只用来保证长片不会被系统性算小
+# 配乐耗时锚点 (片长 s, 耗时低, 耗时高)。
+#
+# v1.0.1 换成 musicgen 实测值：30 s / 60 s / 120 s 分别 0.94 / 1.93 / 3.68 s（≈31× 实时），
+# 比 scorekit 时代快一个数量级。为什么现在敢改：以前配乐走 scorekit 的 9 套风格表，
+# 那个引擎要逐层展开事件并做多次 IIR，实测 29 s 片 3.6–6.5 s；现在的参数化编排器
+# 是单遍事件合成，实测抖动也小（同参数逐采样确定，耗时只随片长线性涨）。
+# 区间仍给 0.7–1.5 系数包络：CI 机器与共享 CPU 会慢，报小了会让人以为卡住。
+SCORE_REFS = ((29.0, 0.9, 1.6), (58.0, 1.8, 3.0), (389.0, 11.5, 19.0))
 SFX_SEC_PER_CUE = 0.20              # 单条短音效 合成+落位（24 配方单次 ≤1.5 s 是上限口径）
 SFX_MIN_SEC = 0.8                   # 实测 18 条 cue 的模板片 sfx 墙钟 0.8 s（含 ffmpeg 写盘）
 LAYOUT_BASE, LAYOUT_PER_LINE = 0.05, 0.01  # 排轴 + srt/ass + 安全区/字形自查（实测 29 s 片 <0.15 s）
@@ -479,7 +484,7 @@ def build_report(script_path, script, args):
     n_cues = len(sfx_cfg.get("cues") or [])
     sfx_on = bool(sfx_cfg.get("enabled", True)) and n_cues > 0
     # 配乐口径对齐 filmkit.music_plan：mode=off/none 或 enabled=false 才算关；
-    # 只有 mode=score（或没写 mode 但写了 bpm）才会真跑 scorekit。
+    # 只有 mode=score（或没写 mode 但写了 bpm）才会真跑配乐引擎（musicgen）。
     mode = str(mus.get("mode") or "").strip().lower()
     has_bpm = "bpm" in mus or "bpm" in script
     music_on = bool(mus.get("enabled", True)) and mode not in ("off", "none")
@@ -570,7 +575,7 @@ def build_report(script_path, script, args):
         dict(stage="score", lo=score_lo, hi=score_hi, measured=bool(score_on),
              note=("以实测点 29 s≈3.6–6.3 s / 58 s≈4.5–5.0 s 为锚（--stage all 里与其它阶段争 CPU 会更慢；389 s 只是外推锚点）"
                    if score_on else
-                   ("mode=%s：不跑 scorekit（%s）"
+                   ("mode=%s：不跑配乐引擎（%s）"
                     % (mode or "-", "外部配乐/和弦床/关掉配乐")))),
         dict(stage="sfx", lo=sfx_lo, hi=sfx_hi, measured=False,
              note=("%d 条音效（实测 18 条 0.8 s；单条上限口径 ≤1.5 s，长环境声 wind/rain 另计）"

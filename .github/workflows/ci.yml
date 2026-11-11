@@ -83,7 +83,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python sfxkit.py --selftest
 
-      - name: 'selftest: scorekit（配乐）'
+      # scorekit 现在是**合成原语库**（混音/响度/确定性/24-bit 落盘），不再是"配乐模板引擎"：
+      # v1.0.1 删掉了它的 9 套风格表（MUSIC_STYLES / render_styled），只留 legacy 逐样本兼容
+      # 与可复用的合成原语。它仍被这套自检保护，所以这一步保留。
+      - name: 'selftest: scorekit（合成原语 + legacy 逐样本兼容）'
         working-directory: skills/video-studio/scripts
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -97,7 +100,7 @@ jobs:
 
       # 兜底路径也要测：用户没装 scipy 时所有 IIR 走"分块 FFT 卷积"，
       # 那才是他们真正跑的代码。屏蔽 scipy 再跑一遍，断言按路径自适应
-      # （见 scorekit case 8 / sfxkit PERF_BUDGET_*）。
+      # （见 sfxkit PERF_BUDGET_*）。
       - name: 'selftest: 无 scipy 兜底路径（用户常见配置）'
         env:
           PYTHONDONTWRITEBYTECODE: "1"

@@ -19,8 +19,9 @@
 12 秒样音（v1.1）
 -----------------
 ``render_audio_preview`` 是本文件唯一会"出声"的地方：按设计里的 bpm/key/scale/mood/seed
-生成 12 秒配乐，回答"这一版的情绪对不对"。优先走 musicgen（参数化作曲器，另一路并行
-开发中），没就绪就退回 scorekit 的老路径；两条都不在就返回 ok=False。**样音失败绝不
+生成 12 秒配乐，回答"这一版的情绪对不对"。优先走 musicgen（参数化作曲器）；它没就绪时
+退回 scorekit 的 legacy 路径（v1.0.1 起 scorekit 没有风格表，那条路只保证"还能出声"，
+音乐固定为 Dm/120，不能当作方案预览）。两条都不在就返回 ok=False。**样音失败绝不
 打断提案**：提案是决策环节，不该因为配乐引擎没装好就整条断掉。
 
 接口
@@ -477,7 +478,12 @@ def _musicgen():
 
 
 def _scorekit():
-    """惰性 import scorekit：它拉起 numpy，import 期就要几百毫秒，默认不该付这笔钱。"""
+    """惰性 import scorekit：它拉起 numpy，import 期就要几百毫秒，默认不该付这笔钱。
+
+    v1.0.1 起 scorekit 的 9 套配乐风格表已删除（零模板），它只剩 legacy 逐样本兼容
+    路径（固定 Dm/120、无 style/mood 参数）。这里保留它只是"兜底还能出声"：
+    musicgen 没就绪时不至于整条样音链路断掉。
+    """
     _ensure_paths()
     import scorekit
     return scorekit
@@ -502,7 +508,6 @@ def _audio_params(design):
         "key": str(mu.get("key") or "Dm"),
         "scale": str(mu.get("scale") or "minor"),
         "mood": str(mu.get("mood") or "steady"),
-        "style": mu.get("style") if isinstance(mu.get("style"), str) else None,
         "seed": seed,
     }
 
@@ -517,10 +522,10 @@ def _render_musicgen(params, path, secs):
 
 
 def _render_scorekit(params, path, secs):
+    """兜底：scorekit 的 legacy 路径（v1.0.1 起没有 style/mood 参数，别传）。"""
     K = _scorekit()
     samples, report = K.render(secs, bpm=params["bpm"], key=params["key"],
-                               seed=params["seed"], style=params["style"],
-                               mood=params["mood"])
+                               seed=params["seed"])
     K.save(path, samples)
     return report
 
@@ -601,7 +606,8 @@ def render_audio_preview(design, out_dir, seconds=AUDIO_PREVIEW_SECONDS):
     """生成一个候选的 12 秒样音（48 kHz 立体声），返回结果 dict，**绝不抛异常**。
 
     为什么优先 musicgen：它直接吃设计里的 bpm/key/scale/mood/seed，12 秒一次合成；
-    没就绪就退回 scorekit（P0 的老路径，参数取自同一份设计），engine 字段会写明是谁出的。
+    没就绪就退回 scorekit 的 legacy 路径（v1.0.1 起它没有风格表，出的是固定 Dm/120），
+    engine 字段会写明是谁出的，调用方据此知道这条样音能不能代表方案。
     两条都不可用时返回 {"ok": False, "reason": ...}——提案是决策环节，配乐引擎缺位不该
     让整条提案断掉，但也不许假装成功（ok=True 却指着一个不存在的文件比报错更糟）。
 

@@ -62,8 +62,8 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  "grammar",
                  # v1.0：设计 DSL / 离线预览 / 提案器（D3 改造的第一期）
                  "designkit", "previewkit", "propose",
-                 # v1.0 / P3：出厂风格下沉为 presets/*.json 后的加载器
-                 "presetkit",
+                 # v1.0.1：presetkit 已删除（连同 presets/ 一起）；这里不能再列它，
+                 # 否则 ci_check 会去 import 一个不存在的模块
                  # v1.0 / P2：参数化配乐编排器（替代 9 套 MUSIC_STYLES 表）
                  "musicgen"}
 MAX_FILE_BYTES = 400 * 1024

@@ -691,7 +691,7 @@ def wav_write(path, samples, sr=SR, channels=None):
 def wav_read(path):
     """读 PCM WAV（16 / 24 / 32-bit），返回 float32 数组：单声道 (n,) / 立体声 (n,2)。
 
-    v0.3.0 起支持 24-bit：scorekit 落盘默认 PCM_24（多 8 dB 动态余量），
+    v0.3.0 起支持 24-bit：musicgen / scorekit 落盘都用 PCM_24（多 8 dB 动态余量），
     而 v0.2 的 wav_write 只写 16-bit。读取端必须两种都吃。
     """
     with wave.open(str(path), "rb") as w:
@@ -947,7 +947,7 @@ def cue_time(at, scenes=None, total=None):
 
 
 def scenes_anchors(scenes):
-    """给 scorekit 分段用的锚点：[{id, kind, start, end}]。"""
+    """给配乐引擎分段用的锚点：[{id, kind, start, end}]。"""
     return [dict(id=s.get("id"), kind=s.get("kind") or "body",
                  start=float(s["start"]), end=float(s["end"])) for s in scenes]
 
@@ -1434,7 +1434,7 @@ def music_plan(script, has_music_file: bool = False):
     现在 score 与 audio 两个 stage 都用这一份判定，口径不会再打架。
 
     plan 取值：
-      score         scorekit 程序化配乐（work/music.wav）
+      score         现场编排配乐（musicgen -> work/music.wav）；scorekit 仅剩 legacy 原语
       file          外部提供 / 上一轮留下的 work/music.wav
       bed           v0.2 和弦床（music.chords）
       off           明确不要配乐（mode=off/none 或 music.enabled=false）
@@ -1448,8 +1448,21 @@ def music_plan(script, has_music_file: bool = False):
     """
     mus = script.get("music") or {}
     raw = str(mus.get("mode") or "").strip().lower()
-    # v0.5.0：bpm 可以是 "auto"（由 stylekit 按风格梯度和内容指纹决定）。
-    # 这里只判断"有没有 bpm 这个概念"，具体数值由 st_score 解析后传入 scorekit。
+    # v1.0.1 修：设计路径的配乐参数在 script["_style"]["music"] 里（designkit 生成），
+    # 而 film.json 顶层通常**没有** music 块。早先只看顶层，于是"有设计但没写 music"
+    # 被判成 none（本片无配乐）—— 实测设计里 bpm=122/mood=driving，配乐却整段没出。
+    # 现在顶层与设计计划合并：显式写 music 的字段优先（用户能覆盖设计），没写的用设计值。
+    plan_mus = ((script.get("_style") or {}).get("music") or {})
+    if plan_mus:
+        merged = dict(plan_mus)
+        merged.update({k: v for k, v in mus.items() if v is not None})
+        mus = merged
+        if not raw:
+            raw = str(mus.get("mode") or "params").strip().lower()
+            if raw == "params":
+                raw = ""            # params == 默认"按参数现场生成"
+    # v0.5.0：bpm 可以是 "auto"（由风格梯度和内容指纹决定）。
+    # 这里只判断"有没有 bpm 这个概念"，具体数值由 st_score 传给配乐引擎。
     bpm = mus.get("bpm", script.get("bpm"))
     if raw == "auto":
         raw = ""
@@ -1466,14 +1479,14 @@ def music_plan(script, has_music_file: bool = False):
                                 "（把外部配乐拷成 work/music.wav，或删掉 mode=file）")
     if raw in ("score", "programmatic"):
         if bpm in (None, ""):
-            return "missing-bpm", "music.mode=score 但没有 bpm（scorekit 需要 bpm）"
-        return "score", "music.mode=score：scorekit 程序化配乐 bpm=%s" % bpm
+            return "missing-bpm", "music.mode=score 但没有 bpm（配乐引擎需要 bpm）"
+        return "score", "music.mode=score：现场编排配乐 bpm=%s" % bpm
     if raw:
         return "unknown-mode", ("music.mode=%r 不认识（可用：score / bed / file / off，"
                                 "或不写 mode 走兼容链）" % mus.get("mode"))
     # 缺省（v0.2 兼容链）
     if bpm not in (None, ""):
-        return "score", "缺省配乐：有 bpm=%s，用 scorekit 程序化配乐" % bpm
+        return "score", "缺省配乐：有 bpm=%s，现场编排（musicgen）" % bpm
     if has_music_file:
         return "file", "缺省配乐：沿用已有 work/music.wav（外部提供的配乐）"
     if mus.get("chords"):
@@ -1504,9 +1517,15 @@ def resolve_theme(script, scene=None):
         if not isinstance(plan, dict):
             plan = ST.resolve_script_style(script)
         # 设计路径的计划自带完整主题；只有老计划才回查内置表（同 render._theme_for）
-        th = dict(plan.get("theme") or ST.THEMES[plan["theme_id"]])
+        # v1.0.1：内置主题表已删除，主题只能来自计划本身
+        th = plan.get("theme")
+        if not isinstance(th, dict) or not th:
+            return _FALLBACK_THEME
+        th = dict(th)
+        # scene["theme"] 覆盖：只在"同名主题还能查到"时生效（本版恒不成立），
+        # 保留这段是为了老剧本带 scene.theme 时不报错，走默认主题。
         sid = (scene or {}).get("theme")
-        if sid and sid in ST.THEMES:
+        if sid and sid in getattr(ST, "THEMES", {}):
             alt = ST.THEMES[sid]
             if ST.family_compatible(th, alt):
                 th = dict(alt)

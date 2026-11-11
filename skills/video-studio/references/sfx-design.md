@@ -217,7 +217,7 @@ CUE_ALIASES                       # 语义别名表
    `build_audio()` 逐条 `SX.render(type, seed=1000+i, **params)`，按 `pan` 展开立体声、
    按 `CUE_BASE_DB` 与 `gain` 落位到音频总线；未知 type 告警一次并跳过。
 2. **web 引擎**：页面 `window.getCues()` 导出同 schema 的 `work/cues.json`（CONTRACT §4.2）。
-3. **配乐（scorekit）**：`import sfxkit as S`，直接用 `sine/saw/supersaw/fm/pluck/adsr`、
+3. **配乐（musicgen）**：和自己写音效一样，直接用 sfxkit 原语；`import sfxkit as S`，有 `sine/saw/supersaw/fm/pluck/adsr`、
    `lowpass/highpass/tv_filter`、`white/burst/exp_decay/attack_decay`、`smooth_random`、`Mix`。
 
 ## 11. 自检
