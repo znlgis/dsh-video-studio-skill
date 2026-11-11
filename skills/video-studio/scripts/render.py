@@ -377,52 +377,13 @@ def resolve_style(script, work=None, verbose=True):
         "  （work=%r）" % (work,))
 
 
-def _resolve_style_legacy_unused(script, work, verbose):
-    ST = _stylekit()
-    plan = ST.resolve_script_style(script)
-    # 主题体检：坏主题现在拦，不要等渲完 300 帧。
-    # v0.7.2 修：以前只体检**基础主题**（ST.THEMES[theme_id]），而 scenes 实际用的是
-    # plan["theme"]（= 基础主题 + film.json 的 visual.theme_overrides）。于是用 overrides
-    # 把 ink/bg 调成低对比度时，体检照样 PASS，渲完才发现字幕看不清。
-    # 实测：overrides ink=[30,30,30] / bg=[10,10,10] -> 基础主题 lint 为空，
-    #       最终主题 lint = ['ink 与背景对比度 1.09 < 7.0']。
-    bad = ST.theme_lint(plan.get("theme") or ST.THEMES[plan["theme_id"]])
-    if bad:
-        raise SystemExit("[主题体检失败] %s：%s" % (plan["theme_id"], "；".join(bad)))
-    # v0.9：结构签名（视觉语言包）随计划一起解析，并同样在 --stage style 就体检。
-    # 为什么不能等渲染：装饰母题名写错/转场时长越界，都要等渲到第 300 帧才发现，
-    # 而这两类错误恰恰会让整片观感崩掉（转场 1 秒 = 每段都在"糊过去"）。
-    # v1.0.1：没有命名视觉语言了 —— 语言包由计划自带（design 路径必带），
-    # 体检直接对这份字典做，不再"按 style id 查表再体检"。
-    lang = plan.get("language")
-    if not isinstance(lang, dict) or not lang:
-        raise SystemExit(
-            "[style] 这份剧本没有视觉语言包：\n"
-            "  计划里缺 language，而内置视觉语言表已在本版删除。\n"
-            "  正确做法：python propose.py --brief \"题材\" --script film.json\n"
-            "            python propose.py --confirm --candidate A\n"
-            "  （plan.style=%r）" % (plan.get("style"),))
-    vbad = ST.visual_lint_language(lang)
-    if vbad:
-        raise SystemExit("[视觉语言体检失败] %s：%s" % (plan.get("style"), "；".join(vbad)))
-    script["_style"] = plan
-    if work and verbose:
-        path = os.path.join(work, "style.json")
-        try:
-            os.makedirs(work, exist_ok=True)
-            json.dump(plan, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        except Exception as e:                              # noqa: BLE001
-            print("   [WARN] style.json 落盘失败：%s" % e)
-    return plan
-
-
 def _theme_for(script, work=None):
     """返回当前片的主题字典；legacy 返回 None（= v0.4 的硬编码外观，逐字节兼容）。
 
-    work **必须传**：design 路径的身份在 work/design.json 里。不传时 resolve_style
-    读不到 design，只能走 stylekit 的 auto 分支 —— 而且它会把错误的 _style
-    **写进 script**，之后 qavmaf 看到 _style 已存在就不再查 design，
-    整条 QA 的参考帧都用错主题（实测：--stage qa 单独跑 VMAF 1.07，全部内联跑 97.15）。
+    work **必须传**：design 路径的身份在 work/design.json 里。v1.0.1 之前不传会回落到
+    stylekit 的 auto 分支（已删除），现在不传就直接 SystemExit —— 但"传错 work"仍然值得防：
+    work 指到别的目录时会读到**另一份** design.json，参考帧与成片不同源
+    （历史实测：--stage qa 单独跑 VMAF 1.07，全部内联跑 97.15）。
     """
     plan = script.get("_style") if isinstance(script.get("_style"), dict) else None
     if plan is not None and plan.get("legacy"):
@@ -785,7 +746,7 @@ def _st_cues_web(script, work):
             tl = json.load(open(tp, encoding="utf-8"))
     except Exception:                                       # noqa: BLE001
         tl = {}
-    style = _web_style_payload(we, script, tl)
+    style = _web_style_payload(we, script, tl, work)
     vp = (tl.get("video") or {})
     data = we.export_cues(entry, style=style,
                           width=int(vp.get("out_w") or K.W),
@@ -886,7 +847,7 @@ def st_score(script, work, tl):
     # v1.0.1 把 scorekit 的 9 套 MUSIC_STYLES 风格表整个删了（零模板），它的 render()
     # 只剩 legacy 逐样本兼容路径。所以这里**不再有 scorekit 回退**：scorekit 一旦回来
     # 当兜底，成片音乐就又变成一套固定模板，与"每条视频都不一样"直接冲突。
-    plan_s0 = resolve_style(script)
+    plan_s0 = resolve_style(script, work)
     if plan_s0.get("legacy"):
         raise SystemExit(
             "[score] legacy 配乐路径已移除（v1.0.1 零模板）：\n"
@@ -906,13 +867,13 @@ def st_score(script, work, tl):
     return _score_with_musicgen(script, work, tl, plan_s0, mus)
 
 
-def _sfx_seed_context(script):
+def _sfx_seed_context(script, work=None):
     """v0.7：算音效的内容派生上下文 (style, content_fp, key, enabled)。
 
     legacy（没写 style 字段）时返回全 None -> CueBus 走旧的 seed_base + i 路径，
     v0.4 及以前的片子逐样本不变。参考 references/audio-variation.md §3.2 / §4。
     """
-    plan = resolve_style(script)
+    plan = resolve_style(script, work)
     sfx_cfg = script.get("sfx") or {}
     want_content = bool(sfx_cfg.get("content_seed", True))
     if plan.get("legacy") or not want_content:
@@ -993,7 +954,7 @@ def st_sfx(script, work, tl):
         print("   cues.json 里没有提示点，跳过")
         return None
     sfx_cfg = script.get("sfx") or {}
-    style, content_fp, key = _sfx_seed_context(script)
+    style, content_fp, key = _sfx_seed_context(script, work)
     try:
         samples = bus.build_audio(total=tl["total"],
                                   base_db=sfx_cfg.get("base_db"),
@@ -1104,7 +1065,7 @@ def st_audio(tl, work, script):
         sfx = bus.bus[: int(round(total * K.SR))].copy()
         print("   音效: 旧版转场 whoosh（没有 cues.json）")
 
-    plan_s = resolve_style(script)
+    plan_s = resolve_style(script, work)
     # 风格化的 duck 深度：轻快/极简风格的配乐更"薄"，让位可以浅一点；
     # 电影/史诗要压得更狠。用户显式写 music.duck_db 时永远以用户为准。
     # v0.7：整体 +1 dB —— 旧值（2.0/2.5/3.0/4.5）下配乐只比音效低 1.5 dB、duck 仅 3 dB，
@@ -1302,7 +1263,7 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
     script["_total"] = tl["total"]           # 场景算全局进度条要用
     # 分块 worker 是 spawn 出来的新进程：主题必须随快照走，否则子进程算出的
     # _theme_for 与父进程不一致 -> 拼接处出现"半部片换了配色"。
-    script.setdefault("_style", resolve_style(script))
+    script.setdefault("_style", resolve_style(script, work))
     crf = int(script.get("crf", 18))
     preset = script.get("preset", "medium")
     total_frames = tl["frames"]
@@ -1422,14 +1383,14 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
     return silent
 
 
-def _web_style_payload(we, script, tl=None):
+def _web_style_payload(we, script, tl=None, work=None):
     """把风格包解析成 webengine 能吃的 __STYLE__ 载荷（v0.8）。
 
     style=None（legacy 项目 / 解析失败）时返回 None —— webengine 收到 None 连
     add_init_script 都不调，页面行为与 v0.7 逐字节一致（这是兼容性硬要求）。
     """
     try:
-        style_plan = resolve_style(script, verbose=False)
+        style_plan = resolve_style(script, work, verbose=False)
     # 必须连 SystemExit 一起接：resolve_style 在"没有设计/主题不过体检"时用 SystemExit
     # 报错（这是它向 CLI 报用法错误的方式），而 SystemExit 继承自 BaseException，
     # 只 catch Exception 接不住 —— web 页面会拿着半截载荷渲染，或者整个进程直接退出。
@@ -1462,7 +1423,7 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
     entry = _web_entry(script)
     silent = os.path.join(work, "silent.mp4")
     web = script.get("web") or {}
-    style = _web_style_payload(we, script, tl)
+    style = _web_style_payload(we, script, tl, work)
     vp = tl.get("video") or {}
     canvas_w = int(vp.get("out_w") or K.W)
     canvas_h = int(vp.get("out_h") or K.H)
@@ -1969,7 +1930,7 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
     print("== Stills")
     script = dict(script)
     script["_total"] = tl["total"]
-    script.setdefault("_style", resolve_style(script))
+    script.setdefault("_style", resolve_style(script, work))
     outdir = os.path.join(work, "stills")
     os.makedirs(outdir, exist_ok=True)
     by_id = {s["id"]: s for s in tl["scenes"]}
@@ -2553,7 +2514,11 @@ def main():
         print("== Preview（前 %.1fs / %d 帧）" % (n / float(tl["fps"]), n))
         sc2 = dict(script)
         sc2["_total"] = tl["total"]
-        sc2.setdefault("_style", resolve_style(script))
+        # 注意这里之前写成 setdefault(_style, resolve_style(script))：
+        # 对 sc2 做 setdefault 却传 script 的解析结果 —— script 有 _style 时，
+        # setdefault 的第二参数**仍会被求值**（Python 先算参数），等于多做一次无用解析；
+        # 而 script 没有 _style 时又把 work 漏了，单跑 --preview 会报"找不到设计"。
+        sc2.setdefault("_style", resolve_style(script, a.work))
         _render_range(tl, mod, sc2, 0, n, out_mp4, int(script.get("crf", 18)),
                       str(script.get("preset", "medium")), progress=False)
         # 有 audio.wav 就带上声音（没有也能看画面；不阻断）。

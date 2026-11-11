@@ -144,19 +144,32 @@ def _palette_from_hue(hue, sat, val, dark):
     return bg, bg2, surface
 
 
-# 兼容层：老代码/文档里还在用 family 名的地方，按名字反查一个"等效连续点"。
-# 注意它**不是**模板清单：采样器不再从这 8 个名字里挑，只是让旧输入还能被解释。
-_LEGACY_FAMILY_ANCHOR = {
-    "deep-blue": (210.0, 0.62, 0.075, True),
-    "near-black": (240.0, 0.18, 0.038, True),
-    "cool-mint": (168.0, 0.52, 0.085, True),
-    "sand": (36.0, 0.40, 0.105, True),
-    "slate": (215.0, 0.28, 0.145, True),
-    "forest": (150.0, 0.55, 0.075, True),
-    "warm-paper": (38.0, 0.14, 0.945, False),
-    "ink-paper": (60.0, 0.03, 0.965, False),
+# 没有"配色族"这个概念了（v1.0.1）。这个空 dict 只是为了让老调用点
+# （`for name in PALETTE_FAMILIES` 之类）不 AttributeError —— 它必须保持为空：
+# 一旦有人往里加东西，就等于偷偷恢复了一份"可选外观清单"。
+PALETTE_FAMILIES = {}
+
+# 但 brief 里仍然会有人说"要深蓝 / 近黑 / 薄荷"。这些词要能生效，否则用户的
+# 自然语言要求就落空了（那正是 v1.0 的毛病）。
+# 做法：词 -> **色相锚点 + 明暗**，不是"族名 -> 一套现成外观"。锚点只是采样的起点，
+# 色相仍然是连续量（可在锚点附近 ±HUE_WINDOW 内浮动）。
+_PALETTE_ANCHOR = {
+    "deep-blue":  (210.0, True),
+    "near-black": (240.0, True),
+    "cool-mint":  (168.0, True),
+    "sand":       (36.0,  True),
+    "slate":      (215.0, True),
+    "forest":     (150.0, True),
+    "warm-paper": (38.0,  False),
+    "ink-paper":  (60.0,  False),
 }
-PALETTE_FAMILIES = _LEGACY_FAMILY_ANCHOR
+_HUE_WINDOW = 26.0          # 锚点附近 ±26°（再宽就不像"深蓝"了，再窄等于恢复成枚举）
+
+
+def _hue_gap(a, b):
+    """两个色相在色环上的最短距离（0..180）。色相是环形的：350° 与 10° 只差 20°。"""
+    d = abs(float(a) - float(b)) % 360.0
+    return d if d <= 180.0 else 360.0 - d
 
 # 11 个颜色字段（theme_lint 检的就是这些；顺序固定，便于审计）
 PALETTE_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
@@ -394,18 +407,13 @@ def _solve_palette(family, hue_shift=0.0, target_shift=0.0):
     hue_shift / target_shift 是采样器给同族不同候选留的小扰动（确定性，幅度很小），
     让"同族不同设计"也有色相差异；扰动不会改变可行性（网格里始终有 v=0/v=1 的端点）。
     """
-    # family 参数现在接受两种输入：
-    #   · 三元组/四元组 (hue, sat, val, dark) —— 采样器的正常路径，连续色相；
-    #   · 老的族名字符串 —— 只是让旧 design.json 还能被解释（见 _LEGACY_FAMILY_ANCHOR），
-    #     **不是**"可选清单"，采样器永远不会主动从这里挑。
-    if isinstance(family, (tuple, list)):
-        hue, sat, val = float(family[0]), float(family[1]), float(family[2])
-        dark = bool(family[3]) if len(family) > 3 else True
-    elif family in _LEGACY_FAMILY_ANCHOR:
-        hue, sat, val, dark = _LEGACY_FAMILY_ANCHOR[family]
-    else:
-        raise ValueError("配色必须是 (色相, 饱和度, 明度, 暗色) 四元组或老族名；收到 %r"
-                         % (family,))
+    # 只接受 (色相, 饱和度, 明度, 暗色)。v1.0.1 之前还接受 8 个命名族（"deep-blue" 之类），
+    # 那条兼容分支已经删除：design.json 里存的是**算好的 RGB**，从不存族名，
+    # 所以"老 design 带族名"这件事根本不存在——留着就是一个永远走不到、只能误导人的分支。
+    if not isinstance(family, (tuple, list)) or len(family) < 4:
+        raise ValueError("配色必须是 (色相, 饱和度, 明度, 暗色) 四元组；收到 %r" % (family,))
+    hue, sat, val = float(family[0]), float(family[1]), float(family[2])
+    dark = bool(family[3])
     bg, bg2, surface = _palette_from_hue(hue, sat, val, dark)
     refs = (bg, bg2)
     colors = {"bg": bg, "bg2": bg2, "surface": surface}
@@ -1237,7 +1245,9 @@ _CONSTRAINT_WORDS = (
 )
 
 _CATEGORY_VALUES = {
-    "palette": tuple(PALETTE_FAMILIES),
+    # 配色没有"可选值清单"了（连续色相空间），这里只保留空元组以兼容旧约束解析路径：
+    # brief 里写"深蓝"这类词会走 _CONSTRAINT_WORDS -> 被解释成色相区间（见 _resolve_constraints）。
+    "palette": (),
     "motif": tuple(MOTIFS),
     "transition": tuple(TRANSITIONS),
     "mood": tuple(MOODS),
@@ -1357,6 +1367,24 @@ def _resolve_constraints(brief):
     for cat, values in _CATEGORY_VALUES.items():
         want = must.get(cat)
         banned = [v for v, _w, _s in avoid.get(cat, ())]
+        if cat == "palette":
+            # 配色是**连续色相空间**，不能按"枚举过滤"处理（那会直接清空可选范围）。
+            # 约束在这里被翻译成色相窗口：要"深蓝"= 采 h≈210±26° 且暗色底；
+            # avoid"放射"这类非配色词不会走到这；avoid"薄荷"= 跳过 168° 附近。
+            if want is not None and want[0] not in _PALETTE_ANCHOR:
+                raise ValueError("配色约束「%s」没有对应的色相锚点" % want[1])
+            banned_hues = []
+            for bv, bw, _bs in avoid.get(cat, ()):
+                if bv not in _PALETTE_ANCHOR:
+                    raise ValueError("配色排除词「%s」没有对应的色相锚点" % bw)
+                banned_hues.append(_PALETTE_ANCHOR[bv][0])
+            if want is None and not banned_hues:
+                domain[cat] = None
+            else:
+                domain[cat] = {"anchor": _PALETTE_ANCHOR[want[0]] if want else None,
+                               "banned_hues": tuple(banned_hues),
+                               "window": _HUE_WINDOW}
+            continue
         allowed = tuple(v for v in values
                         if (want is None or want[0] == v) and v not in banned)
         if not allowed:
@@ -1459,16 +1487,45 @@ def _constraint_problems(design, must, avoid):
     """按 brief 复核一个候选：返回违反项（空 = 过）。采样器用它兜底，不信"域已经限住"。"""
     bad = []
     for cat, (val, word, _src) in sorted(must.items()):
+        if cat == "palette":
+            # 配色按**色相窗口**复核（不是"族名相等"）：连续空间里"是不是深蓝"
+            # 取决于底色的色相落在 210°±26° 内，而不是某个字符串匹配。
+            got_h = _design_bg_hue(design)
+            anchor = _PALETTE_ANCHOR.get(val)
+            if got_h is None or anchor is None:
+                bad.append("配色不可判定（%r / %s）" % (got_h, val))
+            elif _hue_gap(got_h, anchor[0]) > _HUE_WINDOW:
+                bad.append("配色=%.1f° 不满足 must_have「%s」（要 %s 的色相，即 %.0f°±%.0f°）"
+                           % (got_h, word, val, anchor[0], _HUE_WINDOW))
+            continue
         got = _design_value(design, cat)
         if got != val:
             bad.append("%s=%r 不满足 must_have「%s」（%s 要 %r）"
                        % (_CATEGORY_WORD[cat], got, word, _CATEGORY_WORD[cat], val))
     for cat, rows in sorted(avoid.items()):
+        if cat == "palette":
+            got_h = _design_bg_hue(design)
+            for val, word, _src in rows:
+                anchor = _PALETTE_ANCHOR.get(val)
+                if got_h is not None and anchor and _hue_gap(got_h, anchor[0]) <= _HUE_WINDOW:
+                    bad.append("配色=%.1f° 违反了 avoid「%s」（落在 %s 的色相范围内）"
+                               % (got_h, word, val))
+            continue
         got = _design_value(design, cat)
         for val, word, _src in rows:
             if got == val:
                 bad.append("%s=%r 违反了 avoid「%s」" % (_CATEGORY_WORD[cat], got, word))
     return bad
+
+
+def _design_bg_hue(design):
+    """取一个设计底色的色相；取不到返回 None。"""
+    try:
+        pal = _dig(design, ("visual", "palette"))
+        bg = ST._color_of(pal.get("bg"), "visual.palette.bg")
+        return float(ST.rgb_to_hsv(bg)[0])
+    except Exception:                                     # noqa: BLE001
+        return None
 
 
 
@@ -1529,7 +1586,30 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     # 且整体分布均匀 —— 这就是"每条片底色都不同"的来源。
     dark = h("dark") % 100 < 62                       # 约 62% 暗色片（贴合"工程技术片"气质）
     sp = _PALETTE_SPACE[dark]
-    hue = (h("palette") + index * 137.508) % 360.0
+    # 配色：连续色相空间取点。若 brief 给了配色约束，就落在它的色相窗口内
+    # （窗口内仍是连续的，不是"锁定到某一个预设"）。
+    pcon = dom.get("palette")
+    if isinstance(pcon, dict):
+        anchor = pcon.get("anchor")
+        if anchor is not None:
+            base_hue, dark = anchor
+            # 窗口内按哈希散开，但**避开**用户明确排除的色相
+            span = float(pcon.get("window") or _HUE_WINDOW)
+            for k in range(24):                      # 最多试 24 个位置，全都撞 banned 才放弃
+                hue = (base_hue + ((h("palette") + k * 11) % 100) / 100.0 * span - span / 2.0) % 360.0
+                if not any(_hue_gap(hue, bh) < span for bh in (pcon.get("banned_hues") or ())):
+                    break
+        else:
+            hue = (h("palette") + index * 137.508) % 360.0
+            banned_hues = pcon.get("banned_hues") or ()
+            for k in range(24):
+                if not any(_hue_gap(hue, bh) < _HUE_WINDOW for bh in banned_hues):
+                    break
+                hue = (hue + 37.0) % 360.0
+    else:
+        dark = h("dark") % 100 < 62
+        hue = (h("palette") + index * 137.508) % 360.0
+    sp = _PALETTE_SPACE[dark]
     sat = sp["s"][0] + (h("sat") % 100) / 100.0 * (sp["s"][1] - sp["s"][0])
     val = sp["v"][0] + (h("val") % 100) / 100.0 * (sp["v"][1] - sp["v"][0])
     family = (hue, sat, val, dark)
@@ -1695,15 +1775,17 @@ def sample_designs(brief, n=3, seed=None):
                          if design_distance(cand, o)["n"] < 2]
             if too_close:
                 continue
-            # 配色族必须互不相同（族数够时）。为什么单独管这一条：
+            # 底色必须和已接受候选**拉开色相**。为什么单独管这一条：
             # design_distance 会在"母题/转场/缓动/编号"上找到足够的差异，
-            # 于是两个候选可能**共用同一套底色**却仍被判为"可区分"。
-            # 实测样例：A=近黑金·电影遮幅 / B=近黑金·细线页眉 —— 并排图里第一眼
+            # 于是两个候选可能共用同一片底色却仍被判为"可区分"。
+            # 实测样例（v1.0）：A=近黑金·电影遮幅 / B=近黑金·细线页眉 —— 并排图里第一眼
             # 就是同一个片子的两种排法，用户不会认为那是两个方案。
             # 底色是整屏第一眼信息，必须先分叉。
-            if len(out) < len(PALETTE_FAMILIES):
-                fam = _palette_family_of(cand)
-                if any(_palette_family_of(o) == fam for o in out):
+            # 阈值 24°（≈人眼能分辨的色相差下限）：连续空间里不像 8 个离散族那样天然分开，
+            # 必须显式挡一道，否则"随机取色"偶尔会撞出两个几乎同色的候选。
+            if out:
+                key = _palette_family_of(cand)
+                if key is not None and any(_palette_family_of(o) == key for o in out):
                     continue
             chosen = cand
             break
@@ -1734,20 +1816,30 @@ def _setup_stdio():
             pass
 
 
-def _palette_rows():
+def _palette_rows(n=8):
+    """演示用：从连续色相空间均匀取 n 个点，各自的解出结果。
+
+    早先这里列的是 8 个命名配色族（"深蓝/近黑金/冷薄荷…"）。配色改成连续空间后
+    没有"族"可列了，但**还是得让人看见配色能长什么样**——所以均匀采样给你看，
+    而不是给一份可选清单。这不是模板：打印出来的每个点都可以再调（h/s/v 都是连续量）。
+    """
     rows = []
-    for name, fam in PALETTE_FAMILIES.items():
-        row = {"family": name, "label": fam["label"],
-               "bg": list(fam["bg"]), "bg2": list(fam["bg2"]),
-               "surface": list(fam["surface"]),
-               "accent_hue": fam["accent_hue"], "dark": bool(fam["dark"])}
+    for i in range(int(n)):
+        hue = (i * 360.0 / max(1, int(n))) % 360.0
+        dark = i % 3 != 2                      # 每三个里有一个浅色，便于对照
+        sp = _PALETTE_SPACE[dark]
+        sat = (sp["s"][0] + sp["s"][1]) / 2.0
+        val = (sp["v"][0] + sp["v"][1]) / 2.0
+        row = {"hue": round(hue, 1), "sat": round(sat, 3), "val": round(val, 3),
+               "dark": dark, "label": ("深" if dark else "浅") + "色 h%03d" % int(hue)}
         try:
-            pal = _solve_palette(name)
+            pal = _solve_palette((hue, sat, val, dark))
             row["ink_hex"] = _hex(pal["ink"])
             row["accent_hex"] = _hex(pal["accent"])
+            row["bg_hex"] = _hex(pal["bg"])
+            row["surface_hex"] = _hex(pal["surface"])
         except Exception as e:                        # noqa: BLE001
-            row["ink_hex"] = ""
-            row["accent_hex"] = ""
+            row["ink_hex"] = row["accent_hex"] = row["bg_hex"] = row["surface_hex"] = ""
             row["error"] = str(e)
         rows.append(row)
     return rows

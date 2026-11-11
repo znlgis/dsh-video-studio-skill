@@ -65,6 +65,10 @@
   57  （v1.0.1）零模板：仓库里不许存在 presets/ 与 presetkit.py；现场采样必须确定性、
       且换 brief 必须换结果（否则就是还在套模板）
   58  （v1.0.0）提案闸：absent / draft / broken 三档判定正确（confirmed 才放行出片）
+  59  （v1.0.1）逐 stage 可单独跑：render 里每处 resolve_style 都必须拿得到 work
+      （只跑 --stage frames / --stage sfx 时缺参数会报"找不到设计"，all 被缓存掩盖）
+  60  （v1.0.1）brief 里的要求真的生效：自然语言要解析成 must_have/avoid，
+      配色约束按色相窗口生效（早先整句被塞进 topic，"深蓝"采出来是橙色）
 
 说明：本文件里 CASES 的**实际条数**是唯一真理，上面的编号表要与它同步。
 这张表已经被"自己没被自检"坑过两次：v0.8.0 之前停在 43 条而 CASES 已有 51 条；
@@ -621,9 +625,17 @@ def t_style_kits():
         span = 360.0 - span
     assert span >= 180.0, ("12 套设计的底色谱相只覆盖 %.0f°（应 >=180°）——"
                            "说明配色并没有真的在连续空间里散开" % span)
-    assert len(DK.PALETTE_FAMILIES) == len(DK._LEGACY_FAMILY_ANCHOR), "老族名表应只作兼容层"
-    return "12 套现场配色全部过 lint；色相覆盖 %.0f°；兼容层 %d 个老名" % (
-        span, len(DK._LEGACY_FAMILY_ANCHOR))
+    # 配色必须是**连续**的，不是一份清单：断言"色相是连续量"而不是"落在 8 个点之一"。
+    # 做法：取 12 套的色相，检查它们不是某个固定集合的子集（容差 1°）。
+    # 早先这里断言的是 `len(PALETTE_FAMILIES) == len(_LEGACY_FAMILY_ANCHOR)` ——
+    # 而那两个名字是**同一个对象**，长度当然永远相等，等于什么也没验。
+    assert not DK.PALETTE_FAMILIES, "PALETTE_FAMILIES 必须为空（有内容=偷偷恢复了外观清单）"
+    rounded = sorted({round(h) for h in hues})
+    spread = len(rounded) / float(len(hues))
+    assert spread >= 0.8, ("12 套配色的色相只有 %d 个不同取值（%s）——"
+                           "说明配色退化成了一份离散清单" % (len(rounded), rounded))
+    return "12 套现场配色全部过 lint；色相覆盖 %.0f°；%d/12 个不同色相" % (
+        span, len(rounded))
 
 
 def t_style_legacy():
@@ -755,11 +767,13 @@ def t_font_family():
     assert K.wrap_cn_cached("旧调用", 40, 500) is not None
     # 字幕主题：浅色主题不该画黑背板
     from PIL import Image
-    try:
-        import stylekit as ST
-        th = ST.THEMES["magazine"]
-    except Exception:                                       # noqa: BLE001
-        th = None
+    # v1.0.1：没有内置主题可借（THEMES 已清空），改用手写一份浅色主题。
+    # 这条断言测的是 draw_subtitle 的"浅底不画黑背板"逻辑，与主题从哪来无关。
+    th = {"bg": (247, 244, 238), "bg2": (233, 228, 218), "surface": (255, 255, 255),
+          "ink": (26, 24, 22), "muted": (110, 104, 96), "dim": (150, 146, 140),
+          "accent": (198, 96, 40), "accent2": (52, 96, 160),
+          "good": (46, 150, 92), "bad": (200, 60, 60), "rule": (208, 202, 192),
+          "id": "selfcheck-light", "label": "浅色测试"}
     if th is not None:
         img = Image.new("RGB", (K.W, K.H), th["bg"])
         K.draw_subtitle(img, "浅色主题字幕", theme=th)
@@ -1211,10 +1225,22 @@ def t_theme_overrides_linted():
     dirty = ST.apply_theme_overrides(base_th, {"ink": [30, 30, 30], "bg": [10, 10, 10]})
     bad = ST.theme_lint(dirty)
     assert bad, '低对比度的 theme_overrides 没被 lint 抓到（用户能造出看不清的字幕）'
-    src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
-    assert ('ST.theme_lint(plan.get("theme")' in src
-            or "ST.theme_lint(plan.get('theme')" in src), \
-        "render.resolve_style 没有体检最终主题"
+    # v1.0.1：体检的位置从 render 挪到了 designkit（design_to_plan 里就 lint，不过直接抛）。
+    # 这里改查**真正干活的地方**——早先查 render.py 的源码文本，那只是"哪个文件里写了这行"，
+    # 一旦重构搬家就会误报（本次就是这样：lint 逻辑搬进 designkit 后断言还在查 render）。
+    # 更硬的检查：直接把一份低对比度主题喂给 design_to_plan，必须抛。
+    import designkit as DK
+    dirty_design = json.loads(json.dumps(_sample_design("theme_overrides 体检")))
+    dirty_design["visual"]["palette"]["ink"] = [30, 30, 30]
+    dirty_design["visual"]["palette"]["bg"] = [10, 10, 10]
+    try:
+        DK.design_to_plan(dirty_design)
+    except (ValueError, KeyError, SystemExit) as e:
+        msg = str(getattr(e, "code", None) or e)
+        assert "对比度" in msg or "lint" in msg.lower(), \
+            "低对比度设计被拒了，但错误信息没说是对比度问题：%r" % msg[:120]
+    else:
+        raise AssertionError("低对比度主题竟然通过了 design_to_plan（体检失效，能造出看不清的字幕）")
     return "最终主题参与体检（%s）" % "；".join(bad)[:60]
 
 
@@ -1754,6 +1780,96 @@ def t_no_templates():
     return "无模板文件；同 brief 两次必不同、换 brief 必变、seed 可复现"
 
 
+def t_brief_constraints():
+    """60 brief 里的要求必须真的生效（自然语言 -> 约束 -> 采样结果）。
+
+    这条防的是**需求被静默吃掉**：v1.0.1 之前 propose._brief_of 把整句 --brief 塞进 topic，
+    must_have/avoid 恒为空数组，于是"深蓝配色的科技解说"采出来是 h087 / h316（橙 / 紫）。
+    用户看到的需求和结果无关，而且没有任何提示——比报错更糟。
+
+    三件事都要验：
+      ① 自由文本能解析成 must_have / avoid（含否定词归到 avoid）；
+      ② 配色约束按**色相窗口**生效（不是按 8 个族名）；
+      ③ avoid 真的把色相排除掉。
+    """
+    import re
+    try:
+        import propose as PP
+        import designkit as DK
+        import stylekit as ST
+    except Exception:                                       # noqa: BLE001
+        return "skip（缺 propose/designkit/stylekit）"
+    # ① 解析
+    b1 = PP._brief_of("要深蓝，不要放射线", {"title": "t"})
+    assert b1["must_have"] and "深蓝" in b1["must_have"][0], "must_have 没解析出来：%r" % (b1["must_have"],)
+    assert b1["avoid"] and "放射" in b1["avoid"][0], "avoid 没解析出来：%r" % (b1["avoid"],)
+    b2 = PP._brief_of("随便做个片", {"title": "t"})
+    assert b2["must_have"] == [] and b2["avoid"] == [], "认不出要求时不该硬凑约束"
+    # ② 配色约束 -> 色相窗口
+    ds = DK.sample_designs({"topic": "深蓝科技", "must_have": ["深蓝"]}, n=2, seed=7)
+    for d in ds:
+        h = DK._design_bg_hue(d)
+        assert h is not None, "取不到底色色相"
+        gap = DK._hue_gap(h, DK._PALETTE_ANCHOR["deep-blue"][0])
+        assert gap <= DK._HUE_WINDOW + 1e-6, (
+            "must_have『深蓝』没生效：底色色相 %.1f° 距 210° 有 %.1f°（窗口 %.0f°）"
+            % (h, gap, DK._HUE_WINDOW))
+    # ③ avoid 真的排除
+    mint = DK._PALETTE_ANCHOR["cool-mint"][0]
+    for i in range(3):
+        d = DK.sample_designs({"topic": "避开薄荷 %d" % i, "avoid": ["薄荷"]}, n=1, seed=i)[0]
+        h = DK._design_bg_hue(d)
+        assert DK._hue_gap(h, mint) > DK._HUE_WINDOW, (
+            "avoid『薄荷』没生效：底色色相 %.1f° 落在薄荷范围（%.0f°±%.0f°）"
+            % (h, mint, DK._HUE_WINDOW))
+    return "解析 2/2；深蓝落入窗口；薄荷 3/3 被排除"
+
+
+def t_stage_standalone():
+    """59 逐 stage 可单独跑：render 里每处 resolve_style 都必须能拿到 work。
+
+    这条守住一类**只在"单跑某个 stage"时才发作**的 bug：
+    `--stage all` 时前面的 stage 已经把 script["_style"] 塞好了，后面全都命中缓存，
+    所以缺参数也看不出来；一旦用户只跑 `--stage frames` / `--stage sfx`，
+    resolve_style 读不到 work/design.json 就报"找不到设计"（v1.0.1 实测踩到：
+    frames / sfx 两个 stage 单跑必挂，sfx 还是 NameError——函数里压根没有 work 这个名字）。
+
+    为什么用 AST 而不是真的跑每个 stage：跑一遍 = 要 TTS 联网 + 全片渲染，几十秒起步，
+    不适合放进 20 秒的自检。静态检查能抓住"参数没传/名字不存在"这一整类问题，
+    而这正是本次的真实缺陷形态。
+    """
+    import ast
+    src_path = os.path.join(HERE, "render.py")
+    tree = ast.parse(open(src_path, encoding="utf-8").read())
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        args = [a.arg for a in node.args.args] + [a.arg for a in node.args.kwonlyargs]
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            fn = sub.func
+            name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+            if name != "resolve_style":
+                continue
+            # resolve_style(script, work) 的第二位必须是本函数能拿到的变量
+            if len(sub.args) >= 2:
+                second = sub.args[1]
+                vname = getattr(second, "id", None)
+                if vname and vname not in args and vname not in ("work",):
+                    # 明确允许 a.work 这类属性访问（不是 Name）
+                    bad.append("%s(): resolve_style 的 work 参数用了 %r，但该函数没有这个变量"
+                               % (node.name, vname))
+            else:
+                bad.append("%s(): resolve_style 没传 work（单跑该 stage 会读不到 design.json）"
+                           % node.name)
+    assert not bad, "；".join(bad[:4])
+    return "render 里 %d 处 resolve_style 全部带得上 work" % sum(
+        1 for n in ast.walk(tree) if isinstance(n, ast.Call)
+        and (getattr(n.func, "id", None) or getattr(n.func, "attr", None)) == "resolve_style")
+
+
 def t_proposal_gate():
     """58 提案闸：没确认时必须判 draft/absent，确认后才放行；坏文件判 broken。"""
     try:
@@ -1838,6 +1954,8 @@ CASES = [
     ("56 设计 DSL（采样/校验/转计划/fail-closed）", t_design_dsl),
     ("57 零模板（仓库里不许有预设；采样确定性且随 brief 变化）", t_no_templates),
     ("58 提案闸（absent/draft/confirmed/broken）", t_proposal_gate),
+    ("59 逐 stage 可单独跑（resolve_style 必须拿得到 work）", t_stage_standalone),
+    ("60 brief 里的要求真的生效（自然语言 -> 约束 -> 采样）", t_brief_constraints),
 ]
 
 

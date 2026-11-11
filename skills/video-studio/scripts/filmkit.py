@@ -1522,13 +1522,9 @@ def resolve_theme(script, scene=None):
         if not isinstance(th, dict) or not th:
             return _FALLBACK_THEME
         th = dict(th)
-        # scene["theme"] 覆盖：只在"同名主题还能查到"时生效（本版恒不成立），
-        # 保留这段是为了老剧本带 scene.theme 时不报错，走默认主题。
-        sid = (scene or {}).get("theme")
-        if sid and sid in getattr(ST, "THEMES", {}):
-            alt = ST.THEMES[sid]
-            if ST.family_compatible(th, alt):
-                th = dict(alt)
+        # scene["theme"] 覆盖（"这一段换一套主题"）已随内置主题表一起消失：
+        # 没有命名主题就没有"按名字换"这件事。老剧本带 scene.theme 时静默忽略即可
+        # —— 它是可选装饰字段，不是契约字段，为此报错会让老项目无法渲染。
         return th
     except Exception:                                       # noqa: BLE001
         return _FALLBACK_THEME

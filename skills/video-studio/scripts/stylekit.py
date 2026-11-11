@@ -511,67 +511,15 @@ def fingerprint(script):
     }
 
 
-def _kind_profile(script):
-    """kind 分布画像：用于给风格打分（题材相近的片子 kind 结构也像）。"""
-    kinds = [str(ln.get("kind") or "body") for ln in script.get("lines") or []]
-    n = max(1, len(kinds))
-    return {
-        "hook": kinds.count("hook") / n,
-        "body": kinds.count("body") / n,
-        "outro": kinds.count("outro") / n,
-        "items": sum(1 for ln in script.get("lines") or [] if ln.get("items")) / n,
-        "avg_len": sum(len(str(ln.get("text") or "")) for ln in script.get("lines") or []) / n,
-    }
-
-
-def score_styles(script):
-    """给所有风格打分，返回 [(style_id, score, hits)]，按分数降序（同分按 STYLE_IDS 顺序）。"""
-    text = _text_of(script)
-    prof = _kind_profile(script)
-    fp = fingerprint(script)
-    rows = []
-    for sid in STYLE_IDS:
-        th = THEMES[STYLES[sid]["theme"]]
-        hits = []
-        score = 0.0
-        for kw in th["keywords"]:
-            c = text.count(str(kw))
-            if c:
-                score += 3.0 * c
-                hits.append(str(kw))
-        if prof["items"] >= 0.5:
-            score += 1.5 if sid in ("tech-deep", "magazine", "vivid") else 0.0
-        if prof["avg_len"] >= 28:
-            score += 1.0 if sid in ("cinema", "paper", "mono") else 0.0
-        if prof["hook"] > 0 and prof["outro"] > 0:
-            score += 0.5 if sid in ("tech-deep", "vivid", "epic") else 0.0
-        # 指纹破平：必须把**风格 id** 混进哈希，否则这一项对所有行是同一个常数，
-        # 等于没破平（v0.8 深审实测：旧写法在"AI 报告"上 tech-deep / magazine 同分 12.0，
-        # 永远按 STYLE_IDS 顺序选 tech-deep）。幅度上限 0.0006 << 最小真实分差 0.5，
-        # 只在精确同分时起作用，且不改变"改错别字不换风格"（指纹只吃标题）。
-        score += (_digest("tiebreak", fp["style"], sid) % 7) * 0.0001
-        rows.append((sid, round(score, 4), hits))
-    rows.sort(key=lambda r: (-r[1], STYLE_IDS.index(r[0])))
-    return rows
-
-
-def pick_style(script):
-    """内容驱动选风格。返回 (style_id, reason[list[str], 给用户看的理由])。"""
-    rows = score_styles(script)
-    best_id, best_score, best_hits = rows[0]
-    fp = fingerprint(script)
-    if best_score >= 1.0:
-        if best_hits:
-            reason = ["关键词命中：%s" % "、".join(dict.fromkeys(best_hits))[:80]]
-        else:
-            # 分数可以只由结构加分（items / 长句 / hook+outro）凑到 1.0 以上，
-            # 这时旧文案会写"关键词命中："后面空一截 —— 等于向用户报告没发生的事。
-            reason = ["无关键词命中，按题材结构加分选中（items / 长句 / hook+outro）"]
-    else:
-        pool = list(STYLE_IDS)
-        best_id = pool[int(fp["tempo"], 16) % len(pool)]
-        reason = ["无关键词命中，按内容指纹落桶（%s）" % fp["tempo"][:8]]
-    return best_id, reason
+# —— 自动选风格（score_styles / pick_style / _kind_profile）已删除 ——
+#
+# 这三个函数是"机器替你挑一套内置风格"的实现：按关键词给 8 套 STYLES 打分、同分用指纹破平。
+# v1.0.1 把 STYLES/THEMES 清空后它们必然崩（`THEMES[STYLES[sid]["theme"]]` -> KeyError），
+# 而且留着也没有意义 —— 没有"可选集合"就没有"选"这件事。
+#
+# 为什么必须**删掉**而不是留着报错：留下一个"看起来还能调用"的入口，
+# 下一个维护者会以为它是活的，调通了才发现整个语义已经不成立。
+# 现在的唯一路径是 propose.py 现场采样。
 
 
 # ============================================================================

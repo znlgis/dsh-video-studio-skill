@@ -2160,10 +2160,15 @@ def _parse_frames(text: str) -> list:
 
 
 def _resolve_style_spec(text):
-    """解析 --style 的三种写法：内联 JSON / JSON 文件路径 / stylekit 风格 id。
+    """解析 --style 的**两种**写法：内联 JSON / JSON 文件路径。
 
     返回 normalize_style 能吃的 dict；空字符串返回 None（= 不注入，旧行为）。
     解析失败一律 SystemExit（CLI 场景，带可操作提示），不做静默回落。
+
+    v1.0.1：**不再接受"stylekit 风格 id"这种写法**。内置风格表已删除，
+    `--style magazine` 这种用法没有对象了。早先这里会调 ST.get()/ST.theme_of()，
+    而那两个函数现在只会抛 KeyError —— 与其让它抛一个"没有风格 X"的错，
+    不如直接把写法和替代方案说清楚。
     """
     s = str(text or "").strip()
     if not s:
@@ -2179,24 +2184,20 @@ def _resolve_style_spec(text):
             return json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise SystemExit("[错误] --style 的 JSON 文件 %s 解析失败：%s" % (p, exc))
-    try:
-        import stylekit as ST
-    except Exception as exc:                # noqa: BLE001
-        raise SystemExit("[错误] --style %r 被当成风格 id，但 stylekit.py 不在同目录（%s）。"
-                         "要么用 --style work/style.json，要么把 stylekit.py 放在脚本旁边。"
-                         % (s, exc))
-    try:
-        pack = ST.get(s)
-    except KeyError as exc:
-        raise SystemExit("[错误] %s" % (exc.args[0] if exc.args else exc))
-    return {"style": s, "style_name": pack.get("name"), "legacy": ST.is_legacy(s),
-            "theme": ST.theme_of(s), "layout_default": (pack.get("layouts") or ("left-stack",))[0]}
+    raise SystemExit(
+        "[错误] --style %r 不是 JSON、也不是存在的文件——而**按内置风格 id 取外观这条路已经没有了**。\n"
+        "  v1.0.1 删除了全部内置风格/主题表（本技能不提供模板）。现在注入外观只有两种写法：\n"
+        "    ① --style '{\"theme\": {...}, \"canvas\": {...}}'        # 内联 JSON\n"
+        "    ② --style work/style.json                             # 由 render.py --stage style 落盘\n"
+        "  想生成一套新外观：python propose.py --brief \"题材\" --script film.json\n"
+        "  详细契约见 references/web-engine.md 的 __STYLE__ 段。" % (s,))
 
 
 def _add_style_args(p, *, fps=True):
     """给子命令加风格参数（缺省 = v0.7 旧行为：不注入、1920x1080）。"""
     p.add_argument("--style", default="",
-                   help="风格：stylekit 风格 id（如 magazine）/ work/style.json / 内联 JSON；缺省不注入")
+                   help="外观载荷：work/style.json / 内联 JSON；缺省不注入"
+                        "（v1.0.1 起不接受风格 id：内置风格表已删除）")
     p.add_argument("--width", type=int, default=W, help="画布宽（只收 16:9 横屏偶数，默认 %d）" % W)
     p.add_argument("--height", type=int, default=H, help="画布高（默认 %d）" % H)
     if fps:

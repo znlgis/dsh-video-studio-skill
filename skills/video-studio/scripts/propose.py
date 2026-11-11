@@ -142,13 +142,46 @@ def _load_script(path):
 
 
 # ---------------------------------------------------------------- 提案生成
+_NEGATIVE_WORDS = ("不要", "不想要", "别用", "别", "避开", "排除", "避免", "去掉", "不用")
+
+
 def _brief_of(text, script):
-    """把用户一句话变成 brief dict。剧本的标题是隐含 topic（避免空 brief）。"""
+    """把用户一句话变成 brief dict。剧本的标题是隐含 topic（避免空 brief）。
+
+    v1.0.1 修：以前这里把整句话塞进 topic 就完事，**must_have/avoid 恒为空数组**。
+    后果是 `--brief "深蓝配色的科技解说"` 里的"深蓝"完全不生效 —— 实测采出来的是
+    h087 / h316（橙 / 紫），用户看到的需求与结果无关。designkit 明明有一张
+    32 个词的关键词表（_constraint_words），但没人喂给它。
+
+    现在按句子切开逐个识别：
+      · 含否定词的片段 -> avoid（"不要放射线" -> avoid 放射）；
+      · 其余片段 -> must_have（"深蓝配色" -> must_have 深蓝）；
+      · 一句都没认出来的部分原样留着——顶层会告诉用户"这条没生效"，绝不静默丢弃。
+    """
     text = str(text or "").strip()
     topic = text or str(script.get("title") or "").strip()
     if not topic:
         raise SystemExit("[proposal] 需要 --brief 或剧本里至少有 title（否则不知道在给什么题材做方案）")
-    return {"topic": topic, "duration_target": None, "must_have": [], "avoid": []}
+    try:
+        import designkit as DK
+        probe = DK._constraints_in
+    except Exception:                                       # noqa: BLE001
+        probe = None
+    must, avoid = [], []
+    if probe is not None and text:
+        # 按标点/连接词切成短句，逐句判定极性
+        import re as _re
+        for seg in _re.split(r"[，。；、,.;!?！？]+|\s+", text):
+            seg = seg.strip()
+            if not seg:
+                continue
+            hits = probe(seg)
+            if not hits:
+                continue                       # 认不出来的短句留给 topic，由上层提示
+            neg = any(w in seg for w in _NEGATIVE_WORDS)
+            (avoid if neg else must).append(seg)
+    return {"topic": topic, "duration_target": None,
+            "must_have": must, "avoid": avoid}
 
 
 def _candidate_row(design, script, outdir, n_frames, previewkit, designkit,
