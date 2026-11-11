@@ -1,0 +1,214 @@
+{
+ "schema": 1,
+ "id": "paper",
+ "label": "手绘纸感",
+ "auto": false,
+ "theme": {
+  "id": "paper",
+  "label": "手绘纸感",
+  "keywords": [
+   "手工",
+   "自然",
+   "历史",
+   "传统",
+   "木",
+   "田野",
+   "匠",
+   "古",
+   "茶",
+   "手艺",
+   "山河"
+  ],
+  "bg": [
+   240,
+   232,
+   212
+  ],
+  "bg2": [
+   222,
+   210,
+   186
+  ],
+  "surface": [
+   249,
+   244,
+   232
+  ],
+  "ink": [
+   46,
+   38,
+   30
+  ],
+  "muted": [
+   92,
+   80,
+   64
+  ],
+  "dim": [
+   112,
+   98,
+   80
+  ],
+  "accent": [
+   42,
+   72,
+   116
+  ],
+  "accent2": [
+   124,
+   72,
+   32
+  ],
+  "good": [
+   48,
+   98,
+   60
+  ],
+  "bad": [
+   150,
+   48,
+   40
+  ],
+  "rule": [
+   46,
+   38,
+   30
+  ],
+  "vignette": 0.14,
+  "vignette_tint": [
+   198,
+   184,
+   158
+  ],
+  "grain": 9.0,
+  "grain_freq": 0.22,
+  "texture": "paper",
+  "texture_alpha": 0.055,
+  "family": "kai",
+  "scale": {
+   "display": [
+    92,
+    "bold"
+   ],
+   "heading": [
+    60,
+    "bold"
+   ],
+   "sub": [
+    36,
+    "light"
+   ],
+   "body": [
+    33,
+    "reg"
+   ],
+   "kicker": [
+    27,
+    "bold"
+   ],
+   "chip": [
+    26,
+    "reg"
+   ],
+   "brand": [
+    22,
+    "reg"
+   ]
+  },
+  "line_gap": 1.36,
+  "tracking": 1.0,
+  "layout": "left-stack",
+  "card": {
+   "radius": 4,
+   "fill_a": 30,
+   "outline_a": 52,
+   "pad": 32,
+   "h": 94,
+   "gap": 116
+  },
+  "safe_bias": 0,
+  "ease": "inOut3",
+  "entrance_dx": 0,
+  "entrance_dy": 18,
+  "push": 0.03,
+  "item_stagger": 0.42,
+  "transition": "wash",
+  "hud": "corner-line",
+  "qa": {
+   "luma_max": 0.045,
+   "flicker_thresh": 6.0,
+   "dark": false
+  }
+ },
+ "language": {
+  "motion": {
+   "ease": "inOut3",
+   "enter": [
+    0.55,
+    1.0
+   ],
+   "push": 0.03,
+   "breathe_hz": 0.42
+  },
+  "motif": {
+   "kind": "handdrawn",
+   "density": 1.0,
+   "detail": {
+    "wobble": 3.0,
+    "seal": true,
+    "tape": true
+   }
+  },
+  "transition": {
+   "kind": "paper",
+   "dur": 0.35
+  },
+  "typography": {
+   "tracking": 1.0,
+   "line_gap": 1.36,
+   "align": "left",
+   "number": "cn",
+   "ratio": 1.53
+  },
+  "bias": {
+   "x": -150,
+   "y": 80,
+   "inset": 40
+  },
+  "layout_cycle": [
+   "left-stack",
+   "center-stack",
+   "split-right"
+  ]
+ },
+ "music": {
+  "keys": [
+   "G",
+   "D",
+   "C"
+  ],
+  "scale": "major",
+  "bpm_ladder": [
+   84,
+   88,
+   92
+  ],
+  "mood": "hopeful"
+ },
+ "voice": {
+  "body": "zh-TW-HsiaoChenNeural",
+  "hook": "zh-CN-XiaoxiaoNeural",
+  "quote": "zh-CN-YunyangNeural",
+  "outro": "zh-TW-HsiaoChenNeural"
+ },
+ "pacing": {
+  "lead": 0.68,
+  "tail": 1.0,
+  "min_dur": 3.4,
+  "hold": 0.3
+ },
+ "layouts": [
+  "left-stack",
+  "center-stack"
+ ]
+}

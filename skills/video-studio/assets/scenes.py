@@ -271,11 +271,31 @@ def _plan(script):
     return got
 
 
+# 主题里这些键的值是 RGB，统一要 (r,g,b) 元组。JSON 往返会把它变成 list，
+# 而 list 不能当缓存键 —— _soft_dot / _bg 之类的 key 里都带着颜色，一旦错位就是
+# "unhashable type: 'list'"。实测触发路径：--stage frames --jobs N 把 script 写成
+# _script_snapshot.json，子进程读回来重建，于是 theme.bg 是 [8,8,10]。
+# 修在**入口**（_scene_theme）而不是每个缓存点：缓存点会越加越多，入口只有一个。
+_THEME_RGB_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
+                   "accent", "accent2", "good", "bad", "rule", "vignette_tint")
+
+
+def _freeze_theme(th):
+    """把主题里的颜色值统一成元组（就地不重复建字面量的前提下返回新 dict）。"""
+    out = dict(th)
+    for k in _THEME_RGB_KEYS:
+        v = out.get(k)
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            out[k] = (int(v[0]), int(v[1]), int(v[2]))
+    # scale / card / qa 是嵌套 dict，外面只读不建缓存键，原样保留
+    return out
+
+
 def _scene_theme(plan, scene):
     """本段用哪套主题：全片主题 + 可选的 scene["theme"] 覆盖（只许同明暗族）。"""
     base = plan.get("theme")
     if isinstance(base, dict):
-        th = dict(base)
+        th = _freeze_theme(base)
     else:
         th = dict(ST.THEMES[plan["theme_id"]])
     sid = scene.get("theme")
@@ -293,7 +313,7 @@ def _scene_theme(plan, scene):
                    "场景 %r 想从主题 %s 换到 %s，两者明暗族不同（同片换族会触发闪烁门禁），已忽略"
                    % (scene.get("id"), th.get("id"), sid))
         return th
-    return dict(alt)
+    return _freeze_theme(alt)
 
 
 # ---------------- 包内小工具 ----------------
@@ -1194,13 +1214,19 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
     lh = int(size * gap)
     ksize = int(th["scale"]["kicker"][0])
     kicker = scene.get("kicker") or "00 · 开场"
+    y = float(lay["title_y"]) + bdy
 
+    # kicker 的纵向位置必须**跟着标题字号走**，不能直接用布局表里的固定 y。
+    # 为什么：布局表给的是 left-stack 的 title_y=300 / kicker_y=250，只差 50px；
+    # 而 hero 的标题字号是 96px（display 档），字形往上顶穿 kicker —— 实测封面上
+    # "00 · 开场"直接压在"价值与代价来自同一个选择"中间。
+    # 按字号算间距后，换字体/换字号档（visual 语言包会改 ratio）都不会再压。
+    _ky = min(float(lay["kicker_y"]), y - size * 1.05 - ksize * 0.35)
     p0 = ease(rng(t, 0.05, 0.85))
     _draw_text(img, th, v, kicker, ax + _entrance_x(th, p0, align),
-               float(lay["kicker_y"]) + _entrance_y(th, p0), ksize, "bold",
+               _ky + _entrance_y(th, p0), ksize, "bold",
                th["accent"], align, p0, trk * 0.5)
 
-    y = float(lay["title_y"]) + bdy
     for i, ln in enumerate(lines):
         p = ease(rng(t, 0.12 + 0.13 * i, 0.88 + 0.13 * i))
         _draw_text(img, th, v, ln, ax + _entrance_x(th, p, align),
@@ -1513,10 +1539,23 @@ def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
         d.rectangle([v.x(bx + i * (bw + gapb)), v.y(760), v.x(bx + i * (bw + gapb) + bw),
                      v.y(768)], fill=_rgba(th["accent"] if on else th["rule"],
                                            int((150 if on else 34))))
+    # 次要统计：**数值 + 单位 + 标签**都要画出来。
+    # v1.0 修：早先这里只画了 s["label"]，于是 stats[] 里的第 2、3 项（例如
+    # "338207 次 / 工具调用"、"22.62 B / Token 重放"）在画面上只剩两个光秃秃的词，
+    # 并且行距 30px < 字号，两行直接叠在一起 —— 观众看到的是"工具调用/Token 重放"两行字
+    # 糊在一块、数字完全消失。数字卡的价值就在数字，丢数字等于这段白做。
+    nsize = int(th["scale"]["body"][0] - 6)
+    step = int(nsize * 1.75)          # 行距必须大于字号，否则相邻两行会压在一起
     for j, s in enumerate(notes):
         pn = ease(rng(t, 0.6 + 0.15 * j, 1.3 + 0.15 * j))
-        txt = str(s.get("label") or "")
-        _draw_text(img, th, v, txt, W * 0.5, 800.0 + j * 30, int(th["scale"]["body"][0] - 6),
+        val = str(s.get("value") if s.get("value") is not None else "").strip()
+        unit = str(s.get("unit") or "").strip()
+        lbl = str(s.get("label") or "").strip()
+        head = val + ((" " + unit) if unit else "")
+        txt = (head + "  " + lbl) if head else lbl
+        if not txt:
+            continue
+        _draw_text(img, th, v, txt, W * 0.5, 796.0 + j * step, nsize,
                    "reg", th["muted"], "center", pn)
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
@@ -2003,18 +2042,18 @@ _KIND_TO_TYPE = {
 def draw_frame(scene, t_local, dur, t_global, script, frame):
     """按帧画一张 1920x1080 RGB 图。
 
-    派发顺序（v0.9）：
-      1. legacy（film.json 没有 style 字段）-> v0.4 三个老绘制器，逐字节不变；
-      2. 非 legacy -> 按 scene_type（grammar.py 选好、render.py 写进 timeline）派发到
-         10 类构图之一；没有 scene_type 的旧 timeline 按 kind 映射到兼容类型。
+    v1.0 / D3 起只有一条路：按 scene_type（grammar.py 选好、render.py 写进 timeline）
+    派发到 10 类构图之一；没有 scene_type 的旧 timeline 按 kind 映射到兼容类型。
+
+    原来的第 1 条分支（legacy —— film.json 不写 style 就走 v0.4 三个老绘制器）**已删除**：
+    stylekit 不再产出 legacy 计划（不写设计会直接报错），那条分支永远走不到。
+    留着死分支比删掉更危险——它会让"legacy 还能用"的错觉一直存在。
+
     未命中的类型回落到 list（"有条目就画条目"是最不会丢信息的兜底），
     并 warn 一次——静默画错构图比报错更糟。
     """
     plan = _plan(script)
     kind = scene.get("kind") or "body"
-    if plan.get("legacy"):
-        fn = _LEGACY_DRAWERS.get(kind) or _legacy_scene_body
-        return fn(scene, t_local, dur, t_global, script, frame)
     th = _scene_theme(plan, scene)
     stype = str(scene.get("scene_type") or "").strip()
     if not stype:

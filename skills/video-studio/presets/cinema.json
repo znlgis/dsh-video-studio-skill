@@ -1,0 +1,212 @@
+{
+ "schema": 1,
+ "id": "cinema",
+ "label": "电影青橙",
+ "auto": false,
+ "theme": {
+  "id": "cinema",
+  "label": "电影青橙",
+  "keywords": [
+   "故事",
+   "记忆",
+   "城市",
+   "深夜",
+   "旅行",
+   "纪实",
+   "情绪",
+   "时代",
+   "变迁",
+   "命运"
+  ],
+  "bg": [
+   8,
+   14,
+   16
+  ],
+  "bg2": [
+   20,
+   32,
+   34
+  ],
+  "surface": [
+   26,
+   40,
+   42
+  ],
+  "ink": [
+   238,
+   234,
+   226
+  ],
+  "muted": [
+   164,
+   176,
+   170
+  ],
+  "dim": [
+   128,
+   140,
+   136
+  ],
+  "accent": [
+   232,
+   126,
+   58
+  ],
+  "accent2": [
+   104,
+   196,
+   190
+  ],
+  "good": [
+   116,
+   196,
+   140
+  ],
+  "bad": [
+   214,
+   92,
+   84
+  ],
+  "rule": [
+   255,
+   255,
+   255
+  ],
+  "vignette": 0.55,
+  "vignette_tint": [
+   0,
+   0,
+   0
+  ],
+  "grain": 6.0,
+  "grain_freq": 0.29,
+  "texture": "scanlines",
+  "texture_alpha": 0.035,
+  "family": "sans",
+  "scale": {
+   "display": [
+    94,
+    "bold"
+   ],
+   "heading": [
+    58,
+    "bold"
+   ],
+   "sub": [
+    36,
+    "light"
+   ],
+   "body": [
+    33,
+    "reg"
+   ],
+   "kicker": [
+    27,
+    "bold"
+   ],
+   "chip": [
+    26,
+    "reg"
+   ],
+   "brand": [
+    22,
+    "reg"
+   ]
+  },
+  "line_gap": 1.38,
+  "tracking": 3.0,
+  "layout": "center-stack",
+  "card": {
+   "radius": 2,
+   "fill_a": 14,
+   "outline_a": 30,
+   "pad": 30,
+   "h": 92,
+   "gap": 114
+  },
+  "safe_bias": 0,
+  "ease": "inOut3",
+  "entrance_dx": 0,
+  "entrance_dy": 16,
+  "push": 0.12,
+  "item_stagger": 0.46,
+  "transition": "black",
+  "hud": "corner-line",
+  "qa": {
+   "luma_max": 0.02,
+   "flicker_thresh": 6.0,
+   "dark": true
+  }
+ },
+ "language": {
+  "motion": {
+   "ease": "inOut3",
+   "enter": [
+    0.7,
+    1.2
+   ],
+   "push": 0.12,
+   "breathe_hz": 0.3
+  },
+  "motif": {
+   "kind": "letterbox",
+   "density": 1.0,
+   "detail": {
+    "top": 40,
+    "bottom": 44,
+    "flares": true
+   }
+  },
+  "transition": {
+   "kind": "dip",
+   "dur": 0.45
+  },
+  "typography": {
+   "tracking": 3.0,
+   "line_gap": 1.38,
+   "align": "center",
+   "number": "timecode",
+   "ratio": 1.62
+  },
+  "bias": {
+   "x": 0,
+   "y": 30,
+   "inset": 0
+  },
+  "layout_cycle": [
+   "center-stack",
+   "left-stack",
+   "split-right"
+  ]
+ },
+ "music": {
+  "keys": [
+   "Dm",
+   "Am"
+  ],
+  "scale": "minor",
+  "bpm_ladder": [
+   76,
+   80,
+   84
+  ],
+  "mood": "reflective"
+ },
+ "voice": {
+  "body": "zh-CN-YunyangNeural",
+  "hook": "zh-CN-YunjianNeural",
+  "quote": "zh-CN-XiaoxiaoNeural",
+  "outro": "zh-CN-YunyangNeural"
+ },
+ "pacing": {
+  "lead": 0.76,
+  "tail": 1.1,
+  "min_dur": 3.6,
+  "hold": 0.4
+ },
+ "layouts": [
+  "center-stack",
+  "left-stack"
+ ]
+}

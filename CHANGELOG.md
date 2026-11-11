@@ -6,6 +6,189 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.0.0 — 提案优先（Proposal-First）第一步：设计 DSL + 离线预览 + 提案闸（2026-11-10）
+
+> **这不是一次普通的功能增量，是换地基的第一步。** 用户拍板走 **D3 彻底归零**：
+> 删除 8 套内置风格与 legacy 内核，改成"设计 DSL + 采样器"。本版是 P0，
+> 只交付"能先出方案、能确认、能拦住未确认的出片"这三件事；删表与参数化配乐在 P2–P3。
+
+### 为什么
+
+v0.9.1 及以前的病根有三条（本轮实测）：
+
+| 病 | 实测证据 |
+|---|---|
+| 自动选风格把选择权从用户手里拿走了 | 8 个不同题材只命中 5/8 套风格，其中 3 个落进同一套 tech-deep；不写 `style` 时 8/8 全落 legacy（120BPM/Dm 一套） |
+| 改了不少东西但用户改不动 | 审计实测出 **11 个静默失效的旋钮**（`voice` 写字符串时 map/jitter 全失效、`theme_overrides.ease/transition/item_stagger/layout` 被遮住、嵌套键被忽略、`sfx.cues[].seed` 必崩、`pan` 对立体声配方无效） |
+| 没有"先看后选"的环节 | 四道人工签核全在 mux/qa/accept 收尾，`frames` 之前**零拦截** |
+
+### 新增
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/designkit.py` | **设计 DSL**：`validate_design`（fail-closed 校验）／`design_to_plan`（转成 scenes 能吃的计划）／`sample_designs`（确定性采样 N 个两两可区分的候选）／`design_distance`（伪多方案门禁） |
+| `scripts/previewkit.py` | **离线预览**：`FAKE_VOICE_DUR` 合成时间轴 + `grammar.plan_scenes` + `draw_frame` + 联系表。**不联网、不合成旁白** |
+| `scripts/propose.py` | **提案器**：`--brief` 出 N 候选 / `--revise` 重出 / `--diff` 对比 / `--confirm` 冻结 / `--show` 查看 |
+| `schemas/design.schema.json` | 设计契约（六块：structure / visual / audio / pacing / id / pitch） |
+| `schemas/proposal.schema.json` | 提案契约（候选 + 确认状态 + designHash） |
+| `references/proposal.md` | 提案层文档：流程、闸门五档、fail-closed 理由、配色求解、常见误用 |
+| `scripts/presetkit.py` | 预设加载器：读 `presets/*.json`、转 design（8 套预设全部可转且过校验） |
+| `scripts/musicgen.py` | 参数化配乐编排器：无风格表，和弦进行/动机/鼓型/音色全可传参 |
+| `presets/*.json` | 8 套出厂风格下沉为**数据**（全部 `auto:false`，不参与自动选型） |
+| `assets/design_fixture.json` | 金帧基准设计（像素回归绑它，不绑内置风格） |
+| `assets/voice_loudness.json` | 音色响度补偿表（voicekit 与 designkit 共用，避免两处漂移） |
+
+### 改动
+
+| 文件 | 改了什么 |
+|---|---|
+| `scripts/render.py` | ① `resolve_style` 增加 **design 优先分支**：`work/design.json` 存在就以它为准；② 新增 `_proposal_gate()` 并在 `frames`/`all` 最前面调用；③ 新增 `--require-proposal`（默认只警告）；④ `_sources()` 增加 `design` 源头 |
+| `scripts/stagewatch.py` | `STAGE_IO` 的 `style`/`frames` 增加 `design` 源头；`_src_fp` 支持 design；源头名走 `SRC_LABEL`（不再硬编码两个 kind） |
+| `tools/ci_check.py` | `LOCAL_MODULES` 增加 `designkit` / `previewkit` / `propose` |
+| `SKILL.md` | 新增 **§0.5 铁律：先提案，再出片**（用户没要求也要先给方案；四步流程；三条硬约束） |
+
+### 设计要点（都来自实测，不是拍脑袋）
+
+- **配色不是随机取色**：纯 HSV 随机取色的 `theme_lint` 通过率只有 **21/60 = 35%**；改成"色相族 + (s,v) 网格求解"后 **60/60 = 100%**。
+- **设计空间**：8 配色族 × 8 母题 × 6 转场 × 4 缓动 × 8 编号 × 2 调式 × 7 情绪 = **344,064 种**（不含色相微抖），对比现状出厂的 8 种。
+- **预览成本**：单候选 4 帧 1080p 约 **0.8–1.0 s**（热缓存 0.6 s），3 候选（含并排对比图）约 **2.5 s**，全程离线。
+- **fail-closed**：设计缺字段/枚举越界/对比度不达标一律报错，**绝不静默回落默认值**——这是对"11 个静默失效旋钮"的直接反思。
+- **候选必须"第一眼就不同"**：光靠"两两至少 2 维不同"不够——实测出现过两个候选都叫「冷薄荷·rays」。
+  现在采样器用**互质步长轮转**（配色族 +i、母题 +3i、转场 +5i、情绪 +3i），n≤8 时天然保证多轴不同；
+  并排对比图还会给每个候选打中文标签（id + 立意），否则人分不清哪行是哪个。
+- **配色族 8 个**（含 2 个亮底：暖纸白 / 墨纸白），亮暗族都会出现在候选里——不是只有深色一种画风。
+
+### 行为变化
+
+| 变化 | 之前 | 现在 | 影响 |
+|---|---|---|---|
+| `frames`/`all` 前 | 不看提案 | 查提案；未确认默认**警告**（`--require-proposal` 才失败） | 有 `proposal.json` 但没确认时 stdout 多两行提示；退出码默认不变 |
+| `work/design.json` 存在时 | 忽略 | **以它为准**解析主题/语言/配乐/声线/节奏 | 想回到旧路径就删掉 `work/design.json` |
+| stagewatch | 2 个源头（script/scenes） | 3 个（+design） | 改 design 后 `--stage explain` 会报 `source-changed` |
+| ci_check | 12 项三档 | 内容不变，白名单加 3 个本地模块 | — |
+
+### P1 / P2 / P4 / P5（本版一并交付）
+
+| 期 | 交付 | 实测 |
+|---|---|---|
+| **P1** | `--with-audio` 给每个候选附 **12 秒无旁白样音**；`confirm` 额外绑**剧本指纹**（剧本改了要重新提案） | 单候选样音 0.15–0.17 s；2 候选含静帧+样音 1.46 s；两个候选样音 sha1 不同 |
+| **P2** | 新模块 `musicgen.py`：参数化配乐编排器（**没有风格表**；progressions / motif / drums / voices 全部参与事件展开，六种合成音色带各自的音区/衰减/奏法） | 12 s 合成 **0.30 s**、30 s **0.78 s**；**参数相关性全部 < 0.95**（越低越有效）：seed 0.34 / mood 0.33 / voices 0.33 / progressions 0.49 / drums 0.80；同参数跨进程逐采样一致；26 项自检全 PASS |
+| **P4** | `voicekit` 删掉 persona 身份表，改裸 edge voice id + **响度补偿数据表** `assets/voice_loudness.json`（9 把音色的实测补偿，跨度 6.0 dB）；`calibrate_voice()` 离线时 `measured=False` 不抛 | 6 把可采样音色**全部有补偿**（改造前采样器产出 7 把、其中 4 把无补偿）；`gain_db` 实测 +3.6 / -2.7 |
+| **P5** | 金帧基线改绑**固定 fixture 设计** `assets/design_fixture.json`（不再是"某套内置风格"）；`selfcheck` 55 → **58 条**（新增 56 设计 DSL / 57 预设下沉 / 58 提案闸） | 金帧 `--write` 后 `--check` 3/3 帧一致；selfcheck 58/58；改写的 4 条老断言（24/26/28/46）全部换成新语义 |
+
+> P2 的验收口径写死成「参数相关性 < 0.95」，是因为项目里已经有 9 张风格表被证明是**片间差异的唯一来源**
+> （删表后只靠 bpm/key/mood/seed，实测 seed 0.959、mood 1.000 —— 等于参数白写）。
+> 现在 5 个参数全部显著低于门槛，`musicgen` 才算真的替代了风格表。
+> 已知边界：12 s 默认段落只有 calm/body/drive 三个 tier（没有 climax），所以「只改 climax 的鼓型」
+> 在短片里可能听不出差异；长片（30 s+）会覆盖更多 tier。
+
+> **P4 收尾修正**：`presets/*.json` 的 voice 段原本还是 persona 名（`narrator_male` 之类），
+> 而 voicekit 在 D3 之后只认 edge voice id —— 已把这 8 份预设全部翻译成 id，
+> 并让 `presetkit.preset_to_design` 真正读取预设的 voice map（此前它硬编码了一把嗓子）。
+> 连带修掉一处契约不一致：`designkit` 的 voice 正则原本只认 `zh-CN-*`，
+> 但响度补偿表里确实有 `zh-TW-HsiaoChenNeural`（soft 女声，-3.0 dB），模式改为 `zh-CN|TW|HK`。
+> 实测：8/8 预设都能转出合法 design，且每个候选的 `gain_db` 来自**有实测补偿**的音色。
+
+> **P1 收尾**：`must_have`/`avoid` 的匹配口径固化下来（中文按子串、英文按**整词**，
+> 否则 `warm-paper` 会顺带命中「纸卷/paper」、`female` 会命中 `male`；同一句每类只取最长命中，
+> 所以「稳稳推进」判 driving 而不是 steady+driving 互斥）。约束先解析成「每类允许的取值」，
+> 再让确定性的 sha1 步进在**允许集**上轮转——不靠重采样碰运气（声线池只有 3 个女声时，
+> 靠碰全中的概率不可用）。实测：`must_have:['女声','深蓝']` 3 个候选全女声、配色全深蓝、两两 n=9/10/8。
+> `_unmatched_constraints` 已补进 `schemas/design.schema.json`（否则采样器吐出的设计自己过不了契约校验）。
+
+> **P2 边界修复（climax 与中低频）**：两处都是"参数/素材写了但听不出"，属于同一类病。
+> ① **climax 够不到**：默认段落按时长比例切、tier 按小节网格取，两套网格对不齐时峰值段整个落在
+> 小节中心之外（8 s / 96 BPM 中心 1.25/3.75/6.25/8.75，peak 段 4.16–6.08，三个中心全在窗外），
+> 于是 12 s/30 s 片永远没有 climax，调用方传 `{"climax": [...]}` 完全无效。
+> 修法：默认段落改成**按小节切**（每段至少 1 小节、权重和 = 总小节数），
+> bar 能量取小节内 ±0.20 小节窗口的最响值。实测覆盖 21 组（3 bpm × 7 时长）从 0/21 到 **18/21**；
+> 剩余 3 组是**两小节片**（约 5–7 s），没有空间放收尾段，peak 落在末小节属有意设计。
+> ② **低中频挖空**：实测 20–120 Hz 占 50%、120–250 Hz 只有 **2.5%**、500–2000 Hz 占 18%——
+> 听感偏"低频轰、中频薄"。根因是 pad 全在 250 Hz 以上、bass 96% 在 120 Hz 以下，中间没人。
+> 修法：pad 叠一层**根音降八度的中低音层**（MIDI 40–57，基频恰在 120–250 Hz），
+> 并重配总线（pad_hi 1.45 / bass 0.50 / kick 0.62）。
+> 实测 12 s/30 s × 3 个 bpm 的 120–250 Hz 占比从 2.5–3% 升到 **14–27%**，20–120 Hz 从 50% 降到 **35–38%**。
+> 26 项 `musicgen --selftest` 全 PASS，参数相关性仍然全部 < 0.95（seed 0.27 / mood 0.37 /
+> key 0.33 / scale 0.38 / voices 0.37 / drums 0.85）。
+
+### 真实题材试跑（用一份 1.2 MB 分析报告做成片）挖出的 5 个 bug
+
+> 这一节不是新功能，是**拿真实材料跑一遍整链**的结果。动机很直白：前六期所有验证都用
+> 仓库自带的模板片（4 段、30 s、8 套内置风格），它绕过了所有与"真实剧本"有关的路径。
+> 换成一份 6 段、58 s、`stats[]`/`series[]`/`sides{}` 全用上的剧本后，一路挖出 5 个 bug，
+> 全部是"单线程跑一遍看不见"的那类。
+
+| # | bug | 症状 | 根因 | 修法 |
+|---|---|---|---|---|
+| 1 | **并行渲染出另一部片** | `--jobs 4` 的成片是科技深蓝，`--jobs 1`/QA 参考帧是设计本身的近黑金；MAE 0.059、**VMAF 1.49** | `_render_chunk_worker` 把 snapshot 的 `_style` 弹掉后重解析，但 `resolve_style(script)` **没传 work**，读不到 `design.json`，只能走 stylekit 的 auto 分支 | 调用时把 work 传进子进程；`resolve_style(script, work)` |
+| 2 | **主题元组被 JSON 变成 list** | 子进程 `TypeError: unhashable type: 'list'`（`_soft_dot` 的缓存键） | v0.6 只给 `scenes._bg` 做了冻结兜底，`_soft_dot`/`_plate` 等其它缓存点没覆盖 | 在**入口** `_scene_theme` 统一把 12 个颜色键冻结成元组（缓存点会越加越多，入口只有一个） |
+| 3 | **数字卡只画第一个数** | `stats[]` 的第 2、3 项在画面上只剩"工具调用""Token 重放"两行字，且两行重叠 | 绘制器只画 `stats[0]` 的数值，其余项**只画 label 不画 value**；且行距 30px < 字号（约 28px） | 次要统计改画"数值 + 单位 + 标签"，行距按字号 ×1.75 |
+| 4 | **封面角标压标题** | `00 · 开场` 直接盖在标题中间 | hero 的 kicker 用布局表的固定 `kicker_y=250`，而标题 `title_y=300`、字号 96px —— 50px 间距装不下 96px 字形 | kicker 位置按标题字号算（`y - size*1.05 - ksize*0.35`），换字体/字号档不再压 |
+| 5 | **预览会骗人** | 剧本写了 `type=chart`，预览里画成要点列表（一根条形都没有），但成片里是正常的 | 预览用假旁白时长 2.0 s 排轴 -> 段长 3.4 s < chart 的 4.5 s 门槛 -> grammar 把 chart 降级成 list | 假时长提到 3.2 s（段长约 4.6 s）；**降级信息写进返回值与提案**，人读输出也打印 `[降级]` |
+
+> 第 1、5 条值得单独记住：
+> **① 并行度会改变输出**是最隐蔽的一类 bug——任何单线程验证都发现不了，只有"两条路径产出的帧"逐像素比才会暴露。
+> **② 预览静默改构图**比预览粗糙严重得多：用户以为"数据条没做出来"，实际是预览在骗他。
+> 所以预览现在**自曝降级**，宁可多说一句，也不让人误判。
+
+> 顺带修的契约不一致：`render._theme_for` / `st_layout` / `filmkit.resolve_theme` 都无条件
+> `THEMES[plan["theme_id"]]`，而设计路径的 `theme_id`（如 `a-44957fb5`）不在内置表里 -> KeyError；
+> 三者统一改成"**先看 plan['theme']**，老计划才回查内置表"。
+> `qavmaf._style_plan` 同样加了 design 优先（它原本在独立进程里解析不到 design，会拿 tech-deep 当参考帧）。
+
+| 6 | **QA 单独跑与内联跑结论不同** | `--stage qa` 单独跑 VMAF 1.07，`--stage all` 内联跑 97.15；同一份成片 | `st_qa` 里 `_theme_for(script)` **没传 work**，读不到 `design.json`，回落到 stylekit auto（tech-deep）并把错误的 `_style` **写进 script**；随后 qavmaf 见 `_style` 已存在就直接用，design 优先级失效 | `_theme_for(script, work)`；`qavmaf._prepare_script` 改成 **design 优先于缓存的 `_style`** |
+| 7 | **暗色主题被判成整片黑屏** | 门禁报「首尾之外检测到 4 段长黑帧」，实测真实亮度全程 0.05–0.07、一段真黑屏都没有 | `ffmpeg blackdetect` 的 `pix_th` 是 0.10（默认），而近黑金主题底色亮度只有 0.031 —— 全片 98% 像素都在"黑"的阈值下 | `detect_black` 加 `pix_th` 形参，`qa_report` 按主题底色算（`bg 亮度 × 0.45`，夹在 0.012–0.10） |
+
+> 第 6、7 条是同一类：**判据本身跟着"当前主题/当前路径"漂移**，而不是画面变了。
+> 这类问题的危害在于它看起来像"片坏了"，实际是尺子坏了——所以修法都是"让尺子跟着对象走"。
+
+### 真实题材跑片的产物（可复现）
+
+> 材料：一份 1.2 MB / 488 段 / 43 张表的 DSH 全景分析报告（本机 1093 会话的实证观察）。
+> 剧本：6 段 58 s，`hero / stat / list / compare / chart / outro` 六种构图全用上。
+> 选型：`--brief` 采样出 3 个候选（近黑金·电影遮幅 / 科技深蓝·极简留白 / 暖砂金·放射线），
+> 底色族两两不同；人工选 A（近黑金 + 88BPM 小调 reflective，贴合"复盘"语气）。
+
+| 结果项 | 实测 |
+|---|---|
+| 成片 | 1920×1080 / 30fps / h264+aac / **57.93 s** / 37.3 MB / 5.15 Mbps |
+| 响度 | **−16.0 LUFS** / 真峰 −1.5 dBTP |
+| 全片 VMAF | **97.15**（SSIM 0.9937，1738 帧，参考帧=场景函数实时重渲） |
+| 词级时间戳 | 6 句 / 124 词，末词偏差最大 0.09 s |
+| ASR 回读 | 字符召回 0.836（缺句 0），l02 单独 0.57 会记 warning |
+| 门禁 | pass 10 · fail 0 · skipped 1（signoff 未签核，属预期） |
+
+> ASR 那条 warning 值得留一句：l02 的原文是"六十天，一千零九十三个会话，十一万七千步，三十三万八千次工具调用，
+
+> 二十二点六亿 Token"——密集中文数字连读，small 模型转成"117000部""338000次"。
+> 这不是旁白错了，是**读数类文案对 ASR 天然不友好**；要压召回率就把数字改成阿拉伯数字朗读。
+
+### P3 拆地基（本版一并交付）
+
+| 动作 | 结果 |
+|---|---|
+| 8 套风格下沉 | `skills/video-studio/presets/*.json`（8 个文件，往返无损导出，全部 `auto:false`） |
+| 新增 `presetkit.py` | 读预设、转 design（`preset_to_design`），**8/8 套预设都能过 `validate_design`** |
+| `propose.py --preset` | 以预设为起点出候选：配色保持预设精确色值，只扰动母题/转场/版式/编号 |
+| legacy 路径删除 | 不写 `style` 或写 `style:"legacy"` → **报错 + 两步迁移指引**（不再静默落老外观） |
+| `pick_style` 自动选型停用 | 仍工作但打 deprecation 警告（保留是为了不让 100+ 个调用点同时崩） |
+| `scenes.draw_frame` | 删掉不可达的 legacy 分支 |
+
+> 实测：`selfcheck 55/55 PASS`、`ci_check 12/12 PASS`（改写 4 条断言以匹配新语义：24 / 26 / 28 / 46）。
+
+### 未完成（P1/P2/P4/P5，见 `.team/proposal-v1.0-proposal-first.md` §十）
+
+| 期 | 内容 | 状态 |
+|---|---|---|
+| P0 | 提案契约 + 离线预览 + `--stage propose` | **本版** |
+| P1 | 提案闸增强（签核绑定、stagewatch 结构化、报告/账本行） | 待做 |
+| P2 | 参数化配乐编排器（替代 9 套 `MUSIC_STYLES`） | 待做 |
+| P3 | **拆除 legacy 内核 + 停用 `pick_style` + 删 8 套表** | 待做 |
+| P4 | 声线自校准（补回 6.0 dB 响度补偿跨度）+ `presets/` 下沉 | 待做 |
+| P5 | 重建验收口径（金帧绑 fixture design、自检 53/55 改口径、文档演示图） | 待做 |
+
+> 升级提示：本版**不删任何东西**，已有项目不写 `design.json` 时行为与 v0.9.1 一致。
+> "删表"发生在 P3，届时会另发版本并在本文件写明迁移动作。
 ## 0.9.1 — 把装饰母题烘焙进底版：消掉 5.6 ms/帧的固定开销（2026-11-10）
 
 > 0.9.0 落地后量了一笔账：单帧预算 25 ms，而"逐帧把全屏 RGBA 母题 paste 到画面上"

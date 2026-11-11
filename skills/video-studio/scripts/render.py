@@ -296,13 +296,75 @@ def _stylekit():
                          "（skills/video-studio/scripts/stylekit.py）：%s" % e)
 
 
+def _design_path(work):
+    return os.path.join(str(work), "design.json") if work else ""
+
+
+def _plan_from_design(script, work, verbose=True):
+    """v1.0：如果 work/design.json 存在（用户已确认提案），**以它为准**解析计划。
+
+    D3 之后这是唯一主路径：design.json 是"这一版长什么样"的冻结点，剧本只提供台词。
+    返回 None 表示没有 design（调用方回落到 stylekit 的旧解析，P3 会删掉那条路）。
+    """
+    direct = script.get("design")
+    design = None
+    if isinstance(direct, dict):
+        design = direct
+    else:
+        p = _design_path(work)
+        if p and os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    design = json.load(fh)
+            except (OSError, json.JSONDecodeError) as e:
+                raise SystemExit("[design] %s 读不出来：%s（重新 propose.py --confirm 一次）"
+                                 % (p, e)) from e
+    if not isinstance(design, dict):
+        return None
+    try:
+        import designkit as DK
+    except ImportError as e:
+        raise SystemExit("[design] 缺少 designkit.py（%s）——design.json 需要它解析成计划" % e) from e
+    # 骨架版/半成品 designkit 会 import 成功但接口没实现：那种情况必须给一句人话，
+    # 不能让 AttributeError 的 traceback 冒充"渲染器坏了"（v0.9 之前这种误报踩过多次）。
+    missing = [n for n in ("validate_design", "design_to_plan")
+               if not callable(getattr(DK, n, None))]
+    if missing:
+        raise SystemExit("[design] designkit.py 不完整：缺 %s（这个文件还没实现完）"
+                         % "、".join(missing))
+    bad = DK.validate_design(design)
+    if bad:
+        raise SystemExit("[设计体检失败] %s\n  - %s"
+                         % (design.get("id") or "(无 id)", "\n  - ".join(bad)))
+    plan = DK.design_to_plan(design)
+    if verbose:
+        print("   设计: %s（%s）" % (plan.get("style"), (design.get("pitch") or "")[:60]))
+    return plan
+
+
 def resolve_style(script, work=None, verbose=True):
     """解析风格计划并挂到 script["_style"] 上（同一进程内各 stage 共享）。
+
+    优先级（v1.0）：
+      1. script["_style"] 已存在（同进程内各 stage 复用）
+      2. work/design.json（用户已确认的提案）—— 这是正式主路径
+      3. stylekit 旧解析（P3 之后会删除；现在保留是为了让未迁移的项目还能跑）
 
     纯函数 + 落盘 work/style.json（审计用：用户能看到"为什么是这套风格"）。
     """
     if isinstance(script.get("_style"), dict):
         return script["_style"]
+    plan = _plan_from_design(script, work, verbose=verbose)
+    if plan is not None:
+        script["_style"] = plan
+        if work and verbose:
+            try:
+                os.makedirs(work, exist_ok=True)
+                with open(os.path.join(work, "style.json"), "w", encoding="utf-8") as fh:
+                    json.dump(plan, fh, ensure_ascii=False, indent=1)
+            except Exception as e:                          # noqa: BLE001
+                print("   [WARN] style.json 落盘失败：%s" % e)
+        return plan
     ST = _stylekit()
     plan = ST.resolve_script_style(script)
     # 主题体检：坏主题现在拦，不要等渲完 300 帧。
@@ -337,12 +399,18 @@ def resolve_style(script, work=None, verbose=True):
     return plan
 
 
-def _theme_for(script):
-    """返回当前片的主题字典；legacy 返回 None（= v0.4 的硬编码外观，逐字节兼容）。"""
+def _theme_for(script, work=None):
+    """返回当前片的主题字典；legacy 返回 None（= v0.4 的硬编码外观，逐字节兼容）。
+
+    work **必须传**：design 路径的身份在 work/design.json 里。不传时 resolve_style
+    读不到 design，只能走 stylekit 的 auto 分支 —— 而且它会把错误的 _style
+    **写进 script**，之后 qavmaf 看到 _style 已存在就不再查 design，
+    整条 QA 的参考帧都用错主题（实测：--stage qa 单独跑 VMAF 1.07，全部内联跑 97.15）。
+    """
     plan = script.get("_style") if isinstance(script.get("_style"), dict) else None
     if plan is not None and plan.get("legacy"):
         return None
-    plan = resolve_style(script)
+    plan = resolve_style(script, work)
     if plan.get("legacy"):
         return None
     # plan["theme"] 是 stylekit 合并过 film.json 的 visual.theme_overrides 之后的最终主题，
@@ -352,6 +420,13 @@ def _theme_for(script):
     # 字段时回落到基础主题，行为与本行改动前一致。
     th = plan.get("theme")
     if isinstance(th, dict):
+        return th
+    # v1.0：**先看 plan["theme"]**（designkit 生成的计划自带完整 35 字段主题），
+    # 只有老计划（stylekit 解析、没有 theme 字段）才回查内置表。
+    # 早先无条件 THEMES[plan["theme_id"]]，于是设计路径的 theme_id（如 "a-44957fb5"）
+    # 在表里查不到 -> KeyError，整条出片链路在 layout 阶段崩掉。
+    th = plan.get("theme")
+    if isinstance(th, dict) and th:
         return th
     return _stylekit().THEMES[plan["theme_id"]]
 
@@ -559,7 +634,9 @@ def st_layout(script, work, lines=None):
     json.dump(tl, open(os.path.join(work, "timeline.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
-    theme = (K._stylekit().THEMES[plan["theme_id"]] if not plan["legacy"] else None)
+    # 同上：设计计划自带 theme，不能假定 theme_id 一定在内置表里（见 _theme_for 的注释）
+    theme = (plan.get("theme") or K._stylekit().THEMES[plan["theme_id"]]
+             if not plan["legacy"] else None)
     n_ass = K.write_ass(tl["scenes"], os.path.join(work, "sub.ass"), theme=theme)
     print("   总时长 %.2fs / %d 帧 / %d 段 / srt %d 条 / ass %d 条"
           % (tl["total"], tl["frames"], len(tl["scenes"]), n_srt, n_ass))
@@ -1148,7 +1225,8 @@ def _seg_usable(path, frames):
 
 def _render_chunk_worker(args):
     """分块渲染工作单元（供 multiprocessing 调用；函数必须模块级可 pickle）。"""
-    (tl_path, scenes_path, script_path, f0, f1, out_path, crf, preset, part_path) = args
+    (tl_path, scenes_path, script_path, f0, f1, out_path, crf, preset, part_path) = args[:9]
+    work = args[9] if len(args) > 9 else ""
     tl = json.load(open(tl_path, encoding="utf-8"))
     script = json.load(open(script_path, encoding="utf-8"))
     script["_total"] = tl["total"]
@@ -1156,9 +1234,15 @@ def _render_chunk_worker(args):
     # scenes._bg() 拿 th["bg"] 当缓存键 -> TypeError: unhashable type: "list"，
     # 于是 --jobs >1 整条并行路径直接崩。计划是**纯函数**，这里按剧本重新解一次，
     # 既拿回元组，也保证子进程的主题与父进程逐字段一致。
+    #
+    # v1.0 修：重解时**必须带上 work**。design 路径的身份在 work/design.json 里，
+    # 不带 work 就只能走 stylekit 的 auto 分支 -> 画出一套完全不同的主题。
+    # 实测后果：--jobs 4 的成片是 tech-deep（偏蓝），而 --jobs 1 / QA 参考帧是
+    # 设计本身的近黑金；两者 MAE 0.059、VMAF 直接掉到 1.49。
+    # 这种"并行度不同就出不同片子"的 bug 最隐蔽——单线程跑一遍永远看不见。
     script.pop("_style", None)
     try:
-        script["_style"] = resolve_style(script, verbose=False)
+        script["_style"] = resolve_style(script, work or None, verbose=False)
     except Exception as e:                                  # noqa: BLE001
         print("   [WARN] 子进程重解风格失败，回退到快照里的 _style：%s" % e)
         script["_style"] = json.load(open(script_path, encoding="utf-8")).get("_style")
@@ -1256,7 +1340,8 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
             except OSError:
                 pass
         part = os.path.join(seg_dir, "_part_" + os.path.basename(seg))
-        todo.append((tl_path, scenes_path, script_path, f0, f1, seg, crf, preset, part))
+        todo.append((tl_path, scenes_path, script_path, f0, f1, seg, crf, preset, part,
+                     str(work)))
 
     # 旧计划留下的分块不会参与拼接，但会一直占盘：说出来，不静默
     stale = [n for n in os.listdir(seg_dir)
@@ -1601,8 +1686,19 @@ def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
             if cfg["ssim"].get(ckey) is not None:
                 kw[key] = float(cfg["ssim"][ckey])
     print("   [vmaf] 模式=%s（参考帧=场景函数实时渲染，不是成片抽帧）" % m)
+    # qavmaf 是独立解析（它拿不到本进程的 script["_style"]），所以这里把
+    # **冻结设计**一起传下去：参考帧必须与成片同源，否则 VMAF 会掉到个位数。
+    # 实测未修前：design 片被解析成 tech-deep，VMAF 1.50、同源抽查 MAE=0.0384。
+    script_for_vmaf = dict(script or {})
+    dpath = os.path.join(str(work), "design.json")
+    if "design" not in script_for_vmaf and os.path.exists(dpath):
+        try:
+            with open(dpath, encoding="utf-8") as fh:
+                script_for_vmaf["design"] = json.load(fh)
+        except (OSError, json.JSONDecodeError) as e:        # noqa: BLE001
+            print("   [WARN][vmaf] design.json 读不出来，参考帧可能不同源：%s" % e)
     try:
-        res = qv.report(film, tl, scenes_mod, script, mode=m,
+        res = qv.report(film, tl, scenes_mod, script_for_vmaf, mode=m,
                         out_json=os.path.join(str(work), "qa", "vmaf.json"), **kw)
     except Exception as e:                                  # noqa: BLE001
         lg.fail("G11", "全片 VMAF / SSIM 画质", "门禁自身失败：%s" % e)
@@ -1699,7 +1795,7 @@ def _qa_asr_gate(lg, film, work, script, tl=None, cfg=None):
 
 def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
     print("== QA")
-    th = _theme_for(script) if script is not None else None
+    th = _theme_for(script, work) if script is not None else None
     shots, refs = [], []             # refs: [(frac 下标, PIL 原图)]
     fracs = (0.08, 0.3, 0.55, 0.78)
     ref_script = dict(script) if script is not None else None
@@ -2122,6 +2218,50 @@ def run_batch(a):
     return 0 if okn == len(results) else 1
 
 
+# ---------------------------------------------------------------- 提案闸（v1.0）
+def _proposal_gate(a):
+    """提案闸：frames 之前必须先有"已确认的设计"。
+
+    D3 之后本项目的主路径是"先提案、再出片"，所以这条闸是语义要求，不是可选装饰。
+    但它默认只警告（0 退出码），加 --require-proposal 才失败——原因只有一条：
+    --stage frames 是开发期高频命令（改一帧看一帧），硬拦会让调试变得没法用。
+
+    判定（propose.proposal_state 的几档）：
+      absent    -> 没有任何提案
+      draft     -> 有提案但没确认
+      confirmed -> 已确认且 design.json 指纹与确认时一致（唯一放行态）
+      stale     -> 确认过但 design.json 被改过（等于没确认）
+    """
+    try:
+        import propose as PP
+    except ImportError:
+        print("[proposal] 没有 propose.py，跳过提案检查（只警告）")
+        return True
+    try:
+        status, detail = PP.proposal_state(a.work)
+    except SystemExit as e:
+        status, detail = "broken", str(e)
+    except Exception as e:                                  # noqa: BLE001
+        status, detail = "broken", "%s: %s" % (type(e).__name__, e)
+
+    if status == "confirmed":
+        print("[proposal] OK  %s" % detail)
+        _LEDGER.ok("proposal", "提案已确认", detail)
+        return True
+
+    msg = "提案闸未通过（%s）：%s" % (status, detail)
+    print("[proposal] WARN  %s" % msg)
+    if status in ("absent", "draft"):
+        print("           先跑：python propose.py --brief \"题材/要求\" --script %s --n 3" % a.script)
+        print("           确认：python propose.py --confirm --candidate A")
+    if bool(getattr(a, "require_proposal", False)):
+        _LEDGER.fail("proposal", "提案未确认", msg)
+        print("\n[提案闸] --require-proposal 下这是失败项：先提案并确认，或去掉该参数")
+        return False
+    _LEDGER.skip("proposal", "提案闸", msg + "（默认只警告；--require-proposal 才失败）")
+    return True
+
+
 # ---------------------------------------------------------------- main
 def main():
     _setup_stdio()
@@ -2152,6 +2292,8 @@ def main():
                     help="过时也照跑（会在 QC 报告里留痕）")
     ap.add_argument("--no-gate", action="store_true",
                     help="跳过人工签核检查（会在 QC 报告里留痕，不算通过）")
+    ap.add_argument("--require-proposal", action="store_true",
+                    help="把'提案未确认'当成失败（默认只警告；先跑 propose.py 再出片）")
     ap.add_argument("--cost", action="store_true",
                     help="每个 stage 往 work/cost.jsonl 记一行实测耗时")
     # ---- v0.8 ----
@@ -2204,8 +2346,15 @@ def main():
         print("[gate] --no-gate：跳过人工签核检查（会在 QC 报告里留痕）")
 
     def _sources():
-        """源头输入：剧本与 scenes.py（改它们等于改了所有下游的依据）。"""
-        return {"script": a.script, "scenes": a.scenes}
+        """源头输入：剧本、scenes.py、冻结设计（改它们等于改了所有下游的依据）。
+
+        design.json 是 v1.0 新增的第三个源头：它由 propose.py --confirm 写出，
+        记录"这一版长什么样"。改设计 = 画面必须重渲，所以它必须进 stagewatch 的
+        源头指纹，否则"改了配色但没重跑 frames"这种事故查不出来。
+        """
+        design = os.path.join(a.work, "design.json")
+        return {"script": a.script, "scenes": a.scenes,
+                "design": design if os.path.exists(design) else ""}
 
     # 本次命令行**计划要跑**的 stage 集合：--stage all 展开成 10 个，单 stage 就是它自己。
     # 用途见 stagewatch.check 的 pending：本阶段马上要用新输入重算，那种"输入变了"不是过时。
@@ -2567,6 +2716,11 @@ def main():
         return 1 if (errs or rc) else 0
 
     if stage in ("all", "frames", "mux"):
+        # ---- 提案闸（v1.0）：出片前必须先有已确认的设计 ----
+        # 放在最前面（before ensure_tl/preflight/st_frames）：渲完再拦等于白渲。
+        if stage in ("all", "frames"):
+            if not _proposal_gate(a):
+                return 1
         tl = tl if stage == "all" else ensure_tl()
         audio = os.path.join(a.work, "audio.wav")
         silent = os.path.join(a.work, "silent.mp4")

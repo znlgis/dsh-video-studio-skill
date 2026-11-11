@@ -43,7 +43,12 @@ STAGE_IO = {
     # 开了 --strict-stale 就直接失败，而 --stage style 是全新项目的第一条生产命令。
     # legacy 剧本本来就不写这个文件：check() 只在「上次记录的是具体指纹、现在没了」
     # 时才报 output-missing，所以 legacy 下记为 missing 不会被当成永久过时。
-    "style":   dict(sources=["script"], inputs=[], outputs=["style.json"]),
+    # v1.0 提案层：proposal.json / design.json 由 propose.py 写（不经 render.py），
+    # 但**style 与 frames 都必须读它**——所以挂在 style 的 sources 里当"源头输入"，
+    # 并在 frames 的 inputs 里再要一次 design.json（改设计 = 画面必须重渲）。
+    # 为什么放 sources 而不是 inputs：它不是 render.py 的任何 stage 产出的，
+    # 按 inputs 记会永远报"产物缺失"（proposal 还没跑时）。
+    "style":   dict(sources=["script", "design"], inputs=[], outputs=["style.json"]),
     "tts":     dict(sources=["script"], inputs=["style.json"],
                     outputs=["tts.json", "voice_plan.json"]),
     "layout":  dict(sources=["script"],
@@ -57,7 +62,7 @@ STAGE_IO = {
     "audio":   dict(sources=["script"],
                     inputs=["tts.json", "timeline.json", "music.wav", "sfx.wav"],
                     outputs=["audio.wav"]),
-    "frames":  dict(sources=["script", "scenes"],
+    "frames":  dict(sources=["script", "scenes", "design"],
                     inputs=["timeline.json", "audio.wav", "cues.json"],
                     outputs=["silent.mp4"]),
     "mux":     dict(sources=["script"], inputs=["silent.mp4", "audio.wav"], outputs=[]),
@@ -146,10 +151,21 @@ HARD_KINDS = ("source-changed", "output-missing", "no-manifest", "input-stale")
 SOFT_KINDS = ("input-pending", "source-pending")
 
 
+SRC_LABEL = {"script": "剧本 film.json",
+             "scenes": "画面代码 scenes.py",
+             "design": "设计 design.json（propose.py --confirm 冻结的那份）"}
+
+
 def _src_fp(kind, sources):
-    """源头输入指纹：script=剧本（film.json）、scenes=场景代码（scenes.py）。"""
+    """源头输入指纹：script=剧本、scenes=场景代码、design=冻结设计。"""
     p = (sources or {}).get(kind)
-    return _fp(p, ".") if p else "missing"
+    if not p:
+        return "missing"
+    return _fp(p, ".")
+
+
+def _src_label(kind):
+    return SRC_LABEL.get(str(kind), str(kind))
 
 
 def snapshot(work, stage, sources=None):
@@ -236,7 +252,7 @@ def check(work, stage, sources=None, self_built=False, pending=(), _seen=None):
         was = old_src.get(kind, "missing")
         if now == was:
             continue
-        fname = {"script": "剧本 film.json", "scenes": "画面代码 scenes.py"}.get(kind, kind)
+        fname = _src_label(kind)
         if str(stage) in planned:
             # 源头变了 + 本轮马上就要重跑本阶段 = 正常待办，不是过时。
             # 不软化的话，「改一句台词 -> --stage all --strict-stale」会在第一个 stage

@@ -1503,7 +1503,8 @@ def resolve_theme(script, scene=None):
         plan = script.get("_style")
         if not isinstance(plan, dict):
             plan = ST.resolve_script_style(script)
-        th = dict(ST.THEMES[plan["theme_id"]])
+        # 设计路径的计划自带完整主题；只有老计划才回查内置表（同 render._theme_for）
+        th = dict(plan.get("theme") or ST.THEMES[plan["theme_id"]])
         sid = (scene or {}).get("theme")
         if sid and sid in ST.THEMES:
             alt = ST.THEMES[sid]
@@ -2373,14 +2374,24 @@ def loudness(path):
     return out
 
 
-def detect_black(path, dur=0.4, head=1.2, tail=None):
+def detect_black(path, dur=0.4, head=1.2, tail=None, pix_th=None):
     """长黑帧检测。head/tail 秒内是刻意的淡入淡出，不算问题。
 
     返回 None 表示**检测根本没跑成**（ffmpeg 打不开文件 / blackdetect 失败）。
     这一点必须可区分：旧实现把失败也返回 0，qa 门禁于是把"没查"记成"0 段黑帧 = 通过"。
+
+    pix_th：多"暗"算黑（0..1）。**必须跟着主题底色走**，否则暗色主题会被整片误判。
+    blackdetect 的默认 pix_th 是 0.10，意思是"亮度低于 10% 的像素算黑"；
+    而本项目的近黑金主题底色是 (8,8,10) ≈ 0.031 —— 全片 98% 的像素都在"黑"的阈值以下，
+    于是 blackdetect 把整段正常画面报成"4 段长黑帧"。实测：真实亮度全程 0.05–0.07，
+    一段真正的黑屏都没有，但门禁报了 4 段。
     """
+    if pix_th is None:
+        # 缺省仍取 ffmpeg 自带值，保证老调用方行为不变
+        pix_th = 0.10
+    vf = "blackdetect=d=%s:pic_th=0.98:pix_th=%.4f" % (dur, float(pix_th))
     p = _run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-vf",
-              "blackdetect=d=%s:pic_th=0.98" % dur, "-f", "null", "-"])
+              vf, "-f", "null", "-"])
     if p.returncode != 0:
         return None
     total = media_dur(path)
@@ -2853,7 +2864,19 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
             warns.append("真峰 %.1f dBTP 余量不足（AAC 编码后可能更高）" % lo["TP"])
     else:
         warns.append("未能测到真峰（ebur128 解析失败），责任门禁缺一项")
-    nb = detect_black(path)
+    # 黑帧阈值跟着主题底色走（见 detect_black 的注释）：底色亮度越低，阈值要越低，
+    # 否则"深色主题的正常画面"会被当成整片黑屏。取底色亮度的 0.45 倍，
+    # 下限 0.012（比纯黑略高，仍能抓到真黑），上限 0.10（ffmpeg 默认）。
+    _pix_th = 0.10
+    try:
+        import stylekit as _ST
+        _th = (theme or {}).get("bg") if isinstance(theme, dict) else None
+        if isinstance(_th, (list, tuple)) and len(_th) >= 3:
+            _luma = _ST.luminance(tuple(int(x) for x in _th[:3]))
+            _pix_th = max(0.012, min(0.10, _luma * 0.45))
+    except Exception:                                       # noqa: BLE001
+        _pix_th = 0.10
+    nb = detect_black(path, pix_th=_pix_th)
     if nb is None:
         warns.append("长黑帧检测未执行（ffmpeg blackdetect 失败），本项不能当作通过")
     elif nb > 0:

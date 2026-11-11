@@ -451,9 +451,11 @@ def t_music_plan():
         K.wav_write(os.path.join(work, "music.wav"), np.stack([loud, loud], axis=1))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            off_out = render.st_audio(tl, work, {"music": {"mode": "off"}})
+            # D3 之后没有 design/style 的剧本会被拒（不再静默落 legacy），
+            # 这条用例测的是"off 不读旧配乐"，与设计无关，显式给一个风格即可。
+            off_out = render.st_audio(tl, work, {"style": "mono", "music": {"mode": "off"}})
             off_peak = float(np.max(np.abs(K.wav_read(off_out)[0])))
-            file_out = render.st_audio(tl, work, {"music": {"mode": "file"}})
+            file_out = render.st_audio(tl, work, {"style": "mono", "music": {"mode": "file"}})
             file_peak = float(np.max(np.abs(K.wav_read(file_out)[0])))
         assert "music.mode=off" in buf.getvalue(), "off 没有打印说明（静默跳过也不行）"
         assert off_peak < 0.01, "music.mode=off 仍把旧 music.wav 混进来了（峰值 %.3f）" % off_peak
@@ -577,29 +579,30 @@ def t_style_kits():
 
 
 def t_style_legacy():
-    """26 legacy 兼容：没写 style 字段必须精确落回 v0.4 的配乐/旁白参数。"""
+    """26 legacy 已移除（v1.0 / D3）：不写 style 必须报错并给出迁移指引，而不是静默落老外观。
+
+    这条以前盯的是"老项目无痛升级"；D3 之后那句话不再成立——legacy 路径整个删掉了，
+    因为它是同质化的另一半根因（不写 style = 全片一套固定外观 + 120BPM/Dm）。
+    新断言分成两半：① 不给设计时必须**报错**且错误文本指得出下一步；
+    ② 显式给 style 时旧路径仍可用（P3 只停了 auto 与 legacy，没删显式选风格）。
+    """
     import stylekit as ST
     s = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
-    p = ST.resolve_script_style(s)
-    assert p["legacy"] is True, "没有 style 字段却没走 legacy"
-    assert p["music"]["bpm"] == 120.0, "legacy BPM 应为 120，收到 %r" % (p["music"]["bpm"],)
-    assert p["music"]["key"] == "Dm", "legacy 调性应为 Dm，收到 %r" % (p["music"]["key"],)
-    assert p["music"]["seed_effective"] == 7, "legacy seed 应为 7（不做内容派生）"
-    assert p["music"]["seed_from_content"] is False
-    assert p["voice"]["map"] == {}, "legacy 不该有声线映射"
-    assert p["voice"]["policy"]["jitter"] == 0.0 and p["voice"]["policy"]["auto"] is False
-    # legacy 的节奏必须等于 render.py v0.4 的函数默认值，否则"没写 lead 的老剧本"会变节奏
-    assert (p["pacing"]["lead"], p["pacing"]["tail"], p["pacing"]["min_dur"]) == (0.55, 0.85, 3.0), p["pacing"]
-    # 显式 "legacy" 也必须是同一档
-    s2 = dict(s, style="legacy")
-    assert ST.resolve_script_style(s2)["legacy"] is True
-    # 显式风格则必须真的换掉三件套
+    try:
+        ST.resolve_script_style(s)
+    except ValueError as e:
+        msg = str(e)
+        assert "propose.py" in msg, "报错必须给出迁移指引（要提到 propose.py），实际：%r" % msg[:120]
+        assert "design" in msg.lower(), "报错要说清主路径是 design.json，实际：%r" % msg[:120]
+    else:
+        raise AssertionError("没有 style/design 却没报错：legacy 路径没有真的移除")
+    # 显式指定风格仍然可用（P3 范围内的兼容面）
     s3 = dict(s, style="cinema")
     p3 = ST.resolve_script_style(s3)
-    assert p3["legacy"] is False and p3["music"]["bpm"] in ST.STYLES["cinema"]["music"]["bpm_ladder"]
+    assert p3["legacy"] is False, "显式 style 不该标成 legacy"
+    assert p3["music"]["bpm"] in ST.STYLES["cinema"]["music"]["bpm_ladder"]
     assert p3["music"]["key"] in ST.STYLES["cinema"]["music"]["keys"]
-    return "bpm=%g key=%s seed=%d / cinema: bpm=%g key=%s" % (
-        p["music"]["bpm"], p["music"]["key"], p["music"]["seed_effective"],
+    return "无 design 时按预期报错并给迁移指引 / 显式 cinema: bpm=%g key=%s" % (
         p3["music"]["bpm"], p3["music"]["key"])
 
 
@@ -644,20 +647,23 @@ def t_voice_plan():
     assert len(vp) == 4, "计划行数应为 4，收到 %d" % len(vp)
     assert json.dumps(vp, sort_keys=True, default=str) == json.dumps(
         VK.voice_plan(s, plan), sort_keys=True, default=str), "voice_plan 不确定"
-    personas = {r["persona"] for r in vp}
-    assert len(personas) >= 2, "4 句样片只用了一个声线: %s" % personas
+    # v1.0 / D3：persona 身份表已删，声音身份的唯一表示是 edge voice id。
+    # 断言从"至少 2 个 persona"改成"至少 2 个不同的 voice id"——语义不变，字段换了。
+    voices = {r["voice"] for r in vp}
+    assert len(voices) >= 2, "4 句样片只用了一个声线: %s" % voices
     tones = {r["tone"] for r in vp}
     assert len(tones) >= 2, "语气档没有变化: %s" % tones
     for r in vp:
         for fld in ("voice", "rate", "pitch", "volume", "lead", "tail"):
             assert r.get(fld) not in (None, ""), "计划行缺 %s: %r" % (fld, r.get("id"))
-    # legacy：单声线、body 语气、无抖动
-    leg = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
-    lp = ST.resolve_script_style(leg)
-    lvp = VK.voice_plan(leg, lp)
-    assert len({r["voice"] for r in lvp}) == 1, "legacy 出现多声线"
-    assert all(r["tone"] == "body" for r in lvp), "legacy 不该换语气档"
-    return "%d 句 / %d 把声音 / %d 档语气" % (len(vp), len(personas), len(tones))
+    # v1.0 / D3：legacy 兼容段已随 legacy 路径一起删掉；这里改成"单句片"的正常路径检查
+    one = {"title": "单句片", "style": "mono",
+           "lines": [{"id": "a", "kind": "body", "text": "一句话"}]}
+    op = ST.resolve_script_style(one)
+    ovp = VK.voice_plan(one, op)
+    assert len(ovp) == 1, "单句片应只给一行计划，收到 %d" % len(ovp)
+    assert ovp[0]["voice"].endswith("Neural"), "声线应是 edge voice id：%r" % (ovp[0]["voice"],)
+    return "%d 句 / %d 把声音 / %d 档语气" % (len(vp), len(voices), len(tones))
 
 
 def t_font_family():
@@ -1227,12 +1233,11 @@ def t_golden_determinism():
     import hashlib
     sc = dict(id="l01", kind="hook", start=0.0, dur=4.0, chapter="01 · 测试",
               text="金帧确定性自检", sub="金帧确定性", big="金帧确定性")
-    script = {"title": "selfcheck", "_total": 8.0}
-    try:
-        plan = __import__("stylekit").resolve_script_style(dict(script, lines=[sc]))
-        script["_style"] = plan
-    except Exception:                                       # noqa: BLE001
-        pass
+    # v1.0 / D3：剧本必须显式给设计或风格。以前这里 `except: pass` 吞掉解析失败，
+    # 于是"没有 _style"也能跑——那正是静默回落，D3 之后不允许再出现这种写法。
+    script = {"title": "selfcheck", "_total": 8.0, "style": "mono"}
+    plan = __import__("stylekit").resolve_script_style(dict(script, lines=[sc]))
+    script["_style"] = plan
     hs = []
     for _ in range(2):
         fr = mod.draw_frame(sc, 1.25, 4.0, 1.25, script, 37)
@@ -1612,6 +1617,85 @@ def t_silhouette_gate():
         len(pairs), same_ok if same_ok is not None else "?", same_n if same_n else "?")
 
 
+def t_design_dsl():
+    """56 设计 DSL：采样 -> 校验 -> 转 plan，且 fail-closed（坏设计必须报错）。"""
+    try:
+        import designkit as DK
+    except Exception:                                       # noqa: BLE001
+        return "skip（没有 designkit.py）"
+    ds = DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)
+    assert len(ds) == 3, "采样器只给了 %d 个候选" % len(ds)
+    for d in ds:
+        bad = DK.validate_design(d)
+        assert not bad, "采样器吐出了不合格的设计 %r：%s" % (d.get("id"), bad)
+        plan = DK.design_to_plan(d)
+        assert plan["legacy"] is False, "design 计划不该标 legacy"
+        assert str(plan["style"]).startswith("design:"), "style 应是 design:<id>：%r" % plan["style"]
+        assert len(plan.get("theme") or {}) >= 30, "主题字段太少：%d" % len(plan.get("theme") or {})
+    # 两两必须至少 2 个维度不同（"伪多方案"门禁）
+    for i in range(len(ds)):
+        for j in range(i + 1, len(ds)):
+            d = DK.design_distance(ds[i], ds[j])
+            assert d["n"] >= 2, "候选 %s 与 %s 只差 %d 维" % (ds[i]["id"], ds[j]["id"], d["n"])
+    # fail-closed：删掉必填块必须报错，不能静默回落
+    broken = json.loads(json.dumps(ds[0]))
+    broken["visual"].pop("motif", None)
+    assert DK.validate_design(broken), "缺 motif 竟然通过校验（fail-closed 失效）"
+    # 确定性
+    again = DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)
+    assert [x["id"] for x in again] == [x["id"] for x in ds], "同一 brief 两次采样不一致"
+    return "3 候选 / 校验全过 / 两两 >=2 维 / 缺字段必报错"
+
+
+def t_presets():
+    """57 预设：presets/*.json 能被读、能转 design、且全部通过校验（下沉后仍可用）。"""
+    try:
+        import presetkit as PK
+        import designkit as DK
+    except Exception:                                       # noqa: BLE001
+        return "skip（没有 presetkit.py）"
+    rows = PK.list_presets()
+    assert rows, "presets/ 目录里一套预设都没有"
+    bad = []
+    for row in rows:
+        pr = PK.load_preset(row["id"])
+        if pr is None:
+            bad.append(row["id"] + ":读不出")
+            continue
+        assert pr.get("auto") is False, "预设 %s 的 auto 必须是 false（不参与自动选型）" % row["id"]
+        design = PK.preset_to_design(pr)
+        probs = DK.validate_design(design)
+        if probs:
+            bad.append("%s: %s" % (row["id"], probs[0][:60]))
+    assert not bad, "有预设转不出合法设计：%s" % "；".join(bad)
+    return "%d 套预设全部可读、可转 design、过校验" % len(rows)
+
+
+def t_proposal_gate():
+    """58 提案闸：没确认时必须判 draft/absent，确认后才放行；坏文件判 broken。"""
+    try:
+        import propose as PP
+    except Exception:                                       # noqa: BLE001
+        return "skip（没有 propose.py）"
+    with tempfile.TemporaryDirectory() as work:
+        status, detail = PP.proposal_state(work)
+        assert status == "absent", "空目录应判 absent，收到 %r" % status
+        os.makedirs(work, exist_ok=True)
+        with open(os.path.join(work, "proposal.json"), "w", encoding="utf-8") as fh:
+            json.dump({"schema": 1, "rev": 1, "status": "draft",
+                       "candidates": [{"id": "A"}, {"id": "B"}]}, fh)
+        status, _ = PP.proposal_state(work)
+        assert status == "draft", "有草案但没确认应判 draft，收到 %r" % status
+        with open(os.path.join(work, "proposal.json"), "w", encoding="utf-8") as fh:
+            fh.write("{broken json")
+        try:
+            status, _ = PP.proposal_state(work)
+        except SystemExit:
+            status = "broken"
+        assert status == "broken", "坏 JSON 应判 broken，收到 %r" % status
+    return "absent / draft / broken 三档判定正确"
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -1668,6 +1752,9 @@ CASES = [
     ("53 视觉语言包（结构签名互不相同）", t_visual_languages),
     ("54 场景类型单真值（4 处集合一致）", t_scene_types_single_truth),
     ("55 剪影可区分（G13：换风格不能只是换色）", t_silhouette_gate),
+    ("56 设计 DSL（采样/校验/转计划/fail-closed）", t_design_dsl),
+    ("57 预设下沉（presets/*.json -> design）", t_presets),
+    ("58 提案闸（absent/draft/confirmed/broken）", t_proposal_gate),
 ]
 
 

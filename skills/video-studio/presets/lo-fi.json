@@ -1,0 +1,213 @@
+{
+ "schema": 1,
+ "id": "lo-fi",
+ "label": "暖灰薄荷",
+ "auto": false,
+ "theme": {
+  "id": "lo-fi",
+  "label": "暖灰薄荷",
+  "keywords": [
+   "深夜",
+   "学习",
+   "效率",
+   "专注",
+   "写作",
+   "整理",
+   "笔记",
+   "书",
+   "日常",
+   "房间"
+  ],
+  "bg": [
+   232,
+   238,
+   236
+  ],
+  "bg2": [
+   210,
+   220,
+   216
+  ],
+  "surface": [
+   244,
+   248,
+   246
+  ],
+  "ink": [
+   44,
+   52,
+   50
+  ],
+  "muted": [
+   84,
+   98,
+   94
+  ],
+  "dim": [
+   112,
+   126,
+   122
+  ],
+  "accent": [
+   20,
+   86,
+   84
+  ],
+  "accent2": [
+   104,
+   72,
+   96
+  ],
+  "good": [
+   40,
+   100,
+   72
+  ],
+  "bad": [
+   146,
+   52,
+   50
+  ],
+  "rule": [
+   44,
+   52,
+   50
+  ],
+  "vignette": 0.12,
+  "vignette_tint": [
+   206,
+   200,
+   190
+  ],
+  "grain": 7.0,
+  "grain_freq": 0.24,
+  "texture": "paper",
+  "texture_alpha": 0.048,
+  "family": "sans",
+  "scale": {
+   "display": [
+    86,
+    "bold"
+   ],
+   "heading": [
+    58,
+    "bold"
+   ],
+   "sub": [
+    35,
+    "light"
+   ],
+   "body": [
+    32,
+    "reg"
+   ],
+   "kicker": [
+    26,
+    "bold"
+   ],
+   "chip": [
+    25,
+    "reg"
+   ],
+   "brand": [
+    21,
+    "reg"
+   ]
+  },
+  "line_gap": 1.36,
+  "tracking": 1.0,
+  "layout": "left-stack",
+  "card": {
+   "radius": 18,
+   "fill_a": 40,
+   "outline_a": 26,
+   "pad": 34,
+   "h": 98,
+   "gap": 120
+  },
+  "safe_bias": 6,
+  "ease": "out3",
+  "entrance_dx": 0,
+  "entrance_dy": 22,
+  "push": 0.05,
+  "item_stagger": 0.44,
+  "transition": "wash",
+  "hud": "chip-left",
+  "qa": {
+   "luma_max": 0.045,
+   "flicker_thresh": 6.0,
+   "dark": false
+  }
+ },
+ "language": {
+  "motion": {
+   "ease": "out3",
+   "enter": [
+    0.45,
+    0.85
+   ],
+   "push": 0.05,
+   "breathe_hz": 0.6
+  },
+  "motif": {
+   "kind": "signal",
+   "density": 0.9,
+   "detail": {
+    "bars": 12,
+    "radius": 18,
+    "note": true
+   }
+  },
+  "transition": {
+   "kind": "wash",
+   "dur": 0.3
+  },
+  "typography": {
+   "tracking": 1.0,
+   "line_gap": 1.36,
+   "align": "left",
+   "number": "dot",
+   "ratio": 1.48
+  },
+  "bias": {
+   "x": 60,
+   "y": -70,
+   "inset": 0
+  },
+  "layout_cycle": [
+   "left-stack",
+   "split-right",
+   "center-stack"
+  ]
+ },
+ "music": {
+  "keys": [
+   "C",
+   "F",
+   "G"
+  ],
+  "scale": "major",
+  "bpm_ladder": [
+   72,
+   78,
+   84
+  ],
+  "mood": "calm"
+ },
+ "voice": {
+  "body": "zh-CN-XiaoxiaoNeural",
+  "hook": "zh-TW-HsiaoChenNeural",
+  "quote": "zh-CN-YunyangNeural",
+  "outro": "zh-CN-XiaoxiaoNeural"
+ },
+ "pacing": {
+  "lead": 0.72,
+  "tail": 1.06,
+  "min_dur": 3.4,
+  "hold": 0.4
+ },
+ "layouts": [
+  "left-stack",
+  "split-right"
+ ]
+}

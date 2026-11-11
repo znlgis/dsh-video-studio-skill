@@ -458,7 +458,27 @@ def _looks_legacy(script) -> bool:
 
 
 def _style_plan(script) -> dict:
-    """解析剧本风格计划：优先复用 script["_style"]，否则调 stylekit（纯函数、确定性）。"""
+    """解析剧本风格计划：**design 优先**，其次 script["_style"]，最后 stylekit。
+
+    为什么必须先看 design：v1.0 之后"这一版长什么样"由 work/design.json 决定，
+    而 qavmaf 是**独立进程**——它拿到的 script 里没有 render 塞进去的 _style。
+    早先这里直接调 stylekit，于是 design 路径的片子会被解析成 tech-deep（默认风格），
+    参考帧用一套主题、成片用另一套：实测 VMAF 1.50、同源抽查 MAE=0.0384。
+    这不是"画质劣化"，是**参考帧根本不是同一部片**。
+    """
+    # ① design（与 render._plan_from_design 同一口径）
+    design = script.get("design") if isinstance(script, dict) else None
+    if isinstance(design, dict) and design:
+        import designkit as DK
+        bad = DK.validate_design(design)
+        if bad:
+            raise LookupError("design.json 没过校验，参考帧无法与成片同源：%s" % "；".join(bad[:3]))
+        return DK.design_to_plan(design)
+    # ② 调用方已经解析过（extract_frames 会塞进来）
+    cached = script.get("_style") if isinstance(script, dict) else None
+    if isinstance(cached, dict) and cached:
+        return cached
+    # ③ 老路径：stylekit
     try:
         import stylekit as ST
     except Exception as e:              # noqa: BLE001
@@ -563,10 +583,17 @@ def _prepare_script(script, tl):
     """
     sc = dict(script)                   # 浅拷贝：不改调用方的对象
     sc["_total"] = float(_f(tl.get("total"), 0.0))
-    plan = sc.get("_style")
-    if not isinstance(plan, dict):
+    # design 必须**优先于**缓存的 _style：调用方（render.st_qa）可能已经用一个
+    # 错误的 _style 污染过 script —— 它自己解析时没传 work、读不到 design.json，
+    # 于是 _style 是 stylekit 的 auto 结果。看到 _style 就直接用，等于沿用那个错误。
+    if isinstance(sc.get("design"), dict) and sc["design"]:
         plan = _style_plan(sc)
         sc["_style"] = plan
+    else:
+        plan = sc.get("_style")
+        if not isinstance(plan, dict):
+            plan = _style_plan(sc)
+            sc["_style"] = plan
     legacy = bool((plan or {}).get("legacy"))
     if legacy:
         return sc, None

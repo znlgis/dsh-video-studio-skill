@@ -69,6 +69,11 @@ SCRIPTS = os.path.join(SKILL, "scripts")
 ASSETS = os.path.join(SKILL, "assets")
 
 DEFAULT_SCRIPT = os.path.join(ASSETS, "film.json")
+# v1.0 / D3：金帧基线绑"固定 fixture 设计"而不是内置风格。
+# 为什么：金帧要守的是"同一份设计 + 同一份场景代码，像素不许漂"，
+# 不是"某套内置风格长什么样"——后者会随风格表下沉到 presets 而失去意义。
+# 没有这个文件时回落到老口径（读 film.json 的 style），不阻塞老项目。
+DEFAULT_DESIGN = os.path.join(ASSETS, "design_fixture.json")
 DEFAULT_SCENES = os.path.join(ASSETS, "scenes.py")
 DEFAULT_GOLDEN = os.path.join(ASSETS, "golden_frames.json")
 
@@ -216,11 +221,39 @@ def build_timeline(K, script):
     return tl
 
 
-def resolve_plan(ST, script):
-    """解析风格计划并挂到 script["_style"]（与 render.resolve_style 同口径，含 theme_overrides）。
+def _design_plan(design_path):
+    """读 fixture 设计并转成计划；读不到返回 None（回落到 stylekit 老口径）。"""
+    if not design_path or not os.path.exists(str(design_path)):
+        return None
+    try:
+        with open(design_path, encoding="utf-8") as fh:
+            design = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError("fixture 设计读不出来（%s）：%s" % (design_path, e)) from e
+    sys.path.insert(0, SCRIPTS)
+    import designkit as DK
+    bad = DK.validate_design(design)
+    if bad:
+        raise RuntimeError("fixture 设计没过校验（%s）：%s" % (design_path, "；".join(bad)))
+    return DK.design_to_plan(design)
+
+
+def resolve_plan(ST, script, design_path=None):
+    """解析计划并挂到 script["_style"]。
+
+    v1.0 / D3 起优先用 **fixture 设计**（design_path，默认 assets/design_fixture.json）：
+    金帧守的是"固定设计 + 固定场景代码 -> 像素不漂"，与"哪套内置风格"无关。
+    没有 fixture 时回落到 stylekit 老口径，不阻塞老项目。
 
     主题体检失败在这里就抛错（不要等渲到第 3 帧才炸）。
     """
+    plan = _design_plan(design_path)
+    if plan is not None:
+        script["_style"] = plan
+        bad = ST.theme_lint(plan.get("theme") or {})
+        if bad:
+            raise RuntimeError("fixture 设计主题体检失败：%s" % "；".join(bad))
+        return plan
     plan = ST.resolve_script_style(script)
     bad = ST.theme_lint(plan.get("theme") or ST.THEMES[plan["theme_id"]])
     if bad:
@@ -384,7 +417,7 @@ def default_frame_specs(tl):
 
 
 # ---------------------------------------------------------------- 基线读写
-def _golden_payload(script_path, scenes_path, K, plan, tl, rendered):
+def _golden_payload(script_path, scenes_path, K, plan, tl, rendered, design_path=None):
     font_fp, fonts = font_fingerprint(K, plan)
     env_fp, env = env_fingerprint()
     return {
@@ -398,6 +431,7 @@ def _golden_payload(script_path, scenes_path, K, plan, tl, rendered):
         "fps": int(tl["fps"]),
         "script": _rel(script_path),
         "scenes": _rel(scenes_path),
+        "design": _rel(design_path) if design_path else "",
         "font_fp": font_fp,
         "fonts": fonts,
         "env_fp": env_fp,
@@ -407,6 +441,9 @@ def _golden_payload(script_path, scenes_path, K, plan, tl, rendered):
             "scenes_sha1": _sha1_file(scenes_path),
             "filmkit_sha1": _sha1_file(os.path.join(SCRIPTS, "filmkit.py")),
             "stylekit_sha1": _sha1_file(os.path.join(SCRIPTS, "stylekit.py")),
+            # 设计 fixture 进指纹：改了基准设计却不重录基线 = "改了但基线不报警"
+            "design_sha1": _sha1_file(design_path) if design_path else "",
+            "designkit_sha1": _sha1_file(os.path.join(SCRIPTS, "designkit.py")),
             "golden_tool_sha1": _sha1_file(os.path.abspath(__file__)),
         },
         "frames": [dict(sp, sha256=sha, scene=scene_id, frame=int(f))
@@ -414,13 +451,13 @@ def _golden_payload(script_path, scenes_path, K, plan, tl, rendered):
     }
 
 
-def write_golden(script_path, scenes_path, golden_path, frames=None):
+def write_golden(script_path, scenes_path, golden_path, frames=None, design_path=None):
     """--write：渲染金帧并写基线。返回 result（status=pass，written=True）。"""
     K, ST = _modules()
     script = _load_script(script_path)
     scenes_mod = _load_scenes(scenes_path)
     tl = build_timeline(K, script)
-    plan = resolve_plan(ST, script)
+    plan = resolve_plan(ST, script, design_path=design_path)
     if frames:
         specs = [dict(frame=int(f), scene=str(_scene_at(tl, int(f) / float(tl["fps"]))[0]
                                        .get("id") or ""),
@@ -432,7 +469,8 @@ def write_golden(script_path, scenes_path, golden_path, frames=None):
         specs = default_frame_specs(tl)
     rendered = render_frames(script, scenes_mod, plan, tl, [sp["frame"] for sp in specs])
     plan = dict(plan, specs=specs)
-    data = _golden_payload(script_path, scenes_path, K, plan, tl, rendered)
+    data = _golden_payload(script_path, scenes_path, K, plan, tl, rendered,
+                           design_path=design_path)
     golden_path = os.path.abspath(str(golden_path))
     d = os.path.dirname(golden_path)
     if d:
@@ -475,7 +513,7 @@ def _fmt_fp_pair(actual, expect):
     return "%s… vs %s…" % (str(actual)[:12], str(expect)[:12])
 
 
-def check_golden(script_path, scenes_path, golden_path):
+def check_golden(script_path, scenes_path, golden_path, design_path=None):
     """--check：渲染基线里的帧号并与基线比对（默认命令）。"""
     golden, why = _load_golden(golden_path)
     if golden is None:
@@ -498,7 +536,7 @@ def check_golden(script_path, scenes_path, golden_path):
         script = _load_script(script_path)
         scenes_mod = _load_scenes(scenes_path)
         tl = build_timeline(K, script)
-        plan = resolve_plan(ST, script)
+        plan = resolve_plan(ST, script, design_path=design_path)
         font_fp, fonts = font_fingerprint(K, plan)
         env_fp, env = env_fingerprint()
         # 先做"能不能比"的判定，再渲（省得换机时白渲三帧）
@@ -551,7 +589,9 @@ def check_golden(script_path, scenes_path, golden_path):
     cur_inputs = dict(script_sha1=_sha1_file(script_path),
                       scenes_sha1=_sha1_file(scenes_path),
                       filmkit_sha1=_sha1_file(os.path.join(SCRIPTS, "filmkit.py")),
-                      stylekit_sha1=_sha1_file(os.path.join(SCRIPTS, "stylekit.py")))
+                      stylekit_sha1=_sha1_file(os.path.join(SCRIPTS, "stylekit.py")),
+                      design_sha1=(_sha1_file(design_path) if design_path else ""),
+                      designkit_sha1=_sha1_file(os.path.join(SCRIPTS, "designkit.py")))
     stale = [k for k, v in cur_inputs.items()
              if inputs.get(k) and inputs.get(k) != v]
     if changed:
@@ -608,6 +648,9 @@ def main(argv=None):
     g.add_argument("--check", action="store_true", help="校验（默认）")
     g.add_argument("--write", action="store_true", help="生成/更新基线")
     ap.add_argument("--script", default=DEFAULT_SCRIPT, help="film.json（默认模板片）")
+    ap.add_argument("--design", default=DEFAULT_DESIGN,
+                    help="固定 fixture 设计（默认 assets/design_fixture.json）；"
+                         "传空串回落到老的 stylekit 口径")
     ap.add_argument("--scenes", default=DEFAULT_SCENES, help="scenes.py（默认模板场景）")
     ap.add_argument("--golden", default=DEFAULT_GOLDEN,
                     help="基线 JSON（默认 skills/video-studio/assets/golden_frames.json）")
@@ -627,12 +670,14 @@ def main(argv=None):
                     raise SystemExit("--frames 必须是逗号分隔的整数帧号，收到 %r" % a.frames)
                 if not frames:
                     raise SystemExit("--frames 里没有有效帧号")
-            res = write_golden(a.script, a.scenes, a.golden, frames)
+            res = write_golden(a.script, a.scenes, a.golden, frames,
+                       design_path=(a.design or None))
         else:
             if a.frames:
                 raise SystemExit("--frames 只用于 --write；--check 的帧号由基线决定"
                                  "（要换帧号请 --write --frames ... 重录）")
-            res = check_golden(a.script, a.scenes, a.golden)
+            res = check_golden(a.script, a.scenes, a.golden,
+                       design_path=(a.design or None))
     except SystemExit:
         raise
     except Exception as e:                                  # noqa: BLE001

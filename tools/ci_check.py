@@ -59,7 +59,13 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  # v0.8.0：渲染前资源闸门、全片 VMAF/SSIM 门禁、ASR 回读门禁
                  "preflight", "qavmaf", "qaasr",
                  # v0.9.0：场景语法（内容 -> 构图选型）。纯标准库，可被 scenes.py 反向 import
-                 "grammar"}
+                 "grammar",
+                 # v1.0：设计 DSL / 离线预览 / 提案器（D3 改造的第一期）
+                 "designkit", "previewkit", "propose",
+                 # v1.0 / P3：出厂风格下沉为 presets/*.json 后的加载器
+                 "presetkit",
+                 # v1.0 / P2：参数化配乐编排器（替代 9 套 MUSIC_STYLES 表）
+                 "musicgen"}
 MAX_FILE_BYTES = 400 * 1024
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。

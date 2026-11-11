@@ -890,6 +890,46 @@ def _as_bool(v, default=False):
     return bool(v)
 
 
+# persona 名 -> edge voice id 的**兼容映射**（v1.0 / D3）。
+# 这不是"身份表"：它不带语速/音高/响度补偿，只是把老 STYLES 表里的字符串翻译成
+# voicekit 现在要求的 edge voice id。真正的声音参数在 design.audio.voice 里。
+_PERSONA_VOICE = {
+    "narrator_male": "zh-CN-YunyangNeural",
+    "narrator_female": "zh-CN-XiaoxiaoNeural",
+    "warm_female": "zh-TW-HsiaoChenNeural",
+    "bright_female": "zh-CN-XiaoyiNeural",
+    "authority_male": "zh-CN-YunjianNeural",
+    "young_male": "zh-CN-YunxiNeural",
+    "teen_male": "zh-CN-YunxiaNeural",
+    "dialect_ne_female": "zh-CN-liaoning-XiaobeiNeural",
+    "dialect_sx_female": "zh-CN-shaanxi-XiaoniNeural",
+}
+
+
+def _persona_to_voice_id(name):
+    """老 persona 名 -> edge voice id；已经是 voice id 就原样返回。"""
+    s = str(name or "").strip()
+    if not s:
+        return s
+    return _PERSONA_VOICE.get(s, s)
+
+
+_AUTO_WARNED = []
+
+
+def _warn_auto_style_once():
+    """每天每进程只喊一次：自动选型已经不该再用了。"""
+    if _AUTO_WARNED:
+        return
+    _AUTO_WARNED.append(1)
+    import sys as _sys
+    print("[stylekit][deprecated] style=auto 的自动选型已停用（v1.0 / D3）。"
+          "\n  现在的主路径是 work/design.json：先 python propose.py --brief \"...\" 出方案，"
+          "\n  再 python propose.py --confirm --candidate A 冻结设计。"
+          "\n  想以出厂预设为起点：python propose.py --preset tech-deep ...",
+          file=_sys.stderr)
+
+
 def resolve_script_style(script):
     """解析整份剧本的最终风格计划（纯函数、确定性、可直接 json.dump）。
 
@@ -908,18 +948,39 @@ def resolve_script_style(script):
     raw = script.get("style")
     raw_s = str(raw).strip().lower() if raw is not None else ""
     if not has_style_field and not vis.get("theme") and not mus.get("style"):
-        # 老项目（film.json 里根本没有 style 字段）-> legacy：配乐逐样本一致，v0.4 原路径
-        sid, source, reason = LEGACY_STYLE, "legacy", ["film.json 没有 style 字段，走 v0.4 兼容路径"]
+        # v1.0 / D3：**legacy 路径已移除**。以前"不写 style"会静默落到 v0.4 的固定外观
+        # （同一套皮肤 + 120BPM/Dm），这是同质化的另一半根因；D3 决定不再兼容它。
+        # 报错必须给出可执行的下一步，否则用户只知道"跑不动"。
+        raise ValueError(
+            '这个剧本没有指定设计：v1.0 起「不写 style 就走老外观」的兼容路径已移除。\n'
+            '  正确做法（两步）：\n'
+            '    1) python propose.py --brief "题材/要求" --script <film.json> --n 3\n'
+            '    2) python propose.py --confirm --candidate A      # 冻结成 work/design.json\n'
+            '  想以出厂预设为起点：python propose.py --preset tech-deep --script <film.json>\n'
+            '  （预设见：python presetkit.py）')
     elif raw_s in ("", "auto", "default"):
         if vis.get("theme"):
             sid = str(vis["theme"])
             source = "visual.theme"
             reason = ["film.json visual.theme 指定"]
         else:
+            # v1.0 / D3：**自动选型已停用**。
+            # 这一条是"每部片都长一个样"的机制性根因（选出来的身份又确定又不透明），
+            # 但它还有大量老调用方（render._plan_from_design 之外的兼容路径、scorekit、
+            # check 脚本）在跑，所以这里先降级为"显式警告 + 继续工作"，而不是直接抛错——
+            # 直接抛会让 100+ 个依赖点同时变红，反而没人敢继续迁移。
+            # 真正的主路径是 work/design.json（由 propose.py --confirm 产出）。
+            _warn_auto_style_once()
             sid, reason = pick_style(script)
             source = "auto"
     else:
         sid = str(raw).strip()
+        if sid == LEGACY_STYLE:
+            # 显式写 "legacy" 也是同一个坑：它只是"不写设计"的另一种写法。
+            # 两套语义必须一起消失，否则用户会以为"显式写 legacy 还能用"。
+            raise ValueError(
+                'style="legacy" 已移除（v1.0 / D3）：它等价于"不要设计"，而 v1.0 起设计是必填的。\n'
+                '  改用：python propose.py --brief "题材/要求" --script <film.json>，再 --confirm 选一个。')
         source = "explicit"
         reason = ["film.json style 指定"]
     get(sid)                       # 未知 id 在这里就炸，不要等到渲染 300 帧后
@@ -971,13 +1032,16 @@ def resolve_script_style(script):
         seed_effective = seed
 
     # ---- 旁白：声线映射 + 策略 ----
+    # v1.0 / D3：voicekit 已删掉 persona 身份表，只认 edge voice id。
+    # 而 STYLES 表里存的仍是老 persona 名（young_male 之类）——所以这里必须翻译一次。
+    # 不翻译的话，走到 voicekit 就是"style_plan.voice.map['hook'] 不是 edge voice id"。
     style_voice = pack["voice"]
     voice_map = {}
     if not is_legacy(sid):
         for kind in ("hook", "body", "quote", "outro"):
             dv = style_voice.get(kind)
             if dv:
-                voice_map[kind] = dv
+                voice_map[kind] = _persona_to_voice_id(dv)
     explicit_map = voce.get("map") if isinstance(voce.get("map"), dict) else {}
     voice_map.update({str(k): str(v) for k, v in explicit_map.items() if v})
     policy = {
