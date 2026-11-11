@@ -1895,6 +1895,238 @@ def t_proposal_gate():
     return "absent / draft / broken 三档判定正确"
 
 
+
+
+def t_subtitle_style():
+    """61 字幕样式可定制（v1.0.2）：design.visual.subtitle 必须真的改变像素，缺省逐像素不变。
+
+    为什么必须有这条：字幕字号/位置/背板过去是 filmkit 的**模块常量**，任何两条片子
+    的字幕带都一模一样 —— 这正是用户说的"跨片大面积重复"。改成设计字段后，最容易
+    出现的退化是"字段读进来了但没传给 draw_subtitle"（写完不生效，实测踩过）。
+    所以这里验行为：同一个 theme、同一段文字，换字幕参数必须像素不同；
+    不传参数时必须与 v1.0.1 的调用逐像素一致（老项目不漂）。
+    """
+    import numpy as _np
+    import designkit as DK
+    # 用一套现场采样设计里的主题，避免依赖内置主题表（v1.0.1 已删）
+    d = DK.sample_designs({"topic": "字幕样式自检"}, n=1, seed=3)[0]
+    plan = DK.design_to_plan(d)
+    theme = plan["theme"]
+    text = "这是一句用来测试字幕样式是否真的生效的中文字幕"
+    base = K.Image.new("RGB", (K.W, K.H), tuple(theme["bg"]))
+    default_img = K.draw_subtitle(base.copy(), text, theme=theme)
+    kw = K.subtitle_kwargs(plan)
+    assert kw.get("size") and kw.get("align") in ("center", "left"), (
+        "subtitle_kwargs 没把设计的字幕参数带出来：%r" % (kw,))
+    styled = K.draw_subtitle(base.copy(), text, theme=theme, **kw)
+    a = _np.asarray(default_img, dtype=_np.int16)
+    b = _np.asarray(styled, dtype=_np.int16)
+    assert int(_np.abs(a - b).max()) > 0, "字幕参数没有改变任何像素（字段写了不生效）"
+    # 缺省必须等价于旧调用（老 design.json 逐像素不变）
+    assert K.subtitle_kwargs({}) == {}, "没有 subtitle 的计划必须返回空 kw（保持旧像素）"
+    assert K.subtitle_kwargs({"subtitle": {}}) == {}, "空 subtitle 也必须是空 kw"
+    return "字幕参数改变像素；缺省等价旧调用（size=%s align=%s）" % (kw.get("size"), kw.get("align"))
+
+
+def t_layout_cycle():
+    """62 片内版式轮换（v1.0.2）：layout_cycle 真的让不同章节换骨架，同章必须稳定。
+
+    用户原则 5：同一部片不能"长时间一张版式"。v1.0.1 的 design.visual.layout 是单值，
+    grammar 把它当全片默认 → 8 段片子 8 屏同骨架。这条验三件事：
+      ① 有 layout_cycle 时，不同 chapter 拿到不同版式；
+      ② 同一个 chapter 内所有段版式一致（不能每句都跳）；
+      ③ 没有 layout_cycle 时行为与旧版一致（全用 layout_default）。
+    """
+    import grammar as G
+    scenes = [
+        {"id": "a1", "kind": "body", "chapter": "第一章", "start": 0.0, "end": 4.0, "dur": 4.0},
+        {"id": "a2", "kind": "body", "chapter": "第一章", "start": 4.0, "end": 8.0, "dur": 4.0},
+        {"id": "b1", "kind": "body", "chapter": "第二章", "start": 8.0, "end": 12.0, "dur": 4.0},
+        {"id": "b2", "kind": "body", "chapter": "第二章", "start": 12.0, "end": 16.0, "dur": 4.0},
+    ]
+    plan = {"chapter_layout": {}, "layout_default": "left-stack",
+            "layout_cycle": ["left-stack", "center-stack"]}
+    scenes = [dict(s) for s in scenes]
+    G.plan_scenes(scenes, {"lines": []}, plan)
+    got = {s["id"]: s["scene_layout"] for s in scenes}
+    assert got["a1"] == got["a2"], "同一章内版式必须稳定，实际 %s" % (got,)
+    assert got["b1"] == got["b2"], "同一章内版式必须稳定，实际 %s" % (got,)
+    assert got["a1"] != got["b1"], "不同章节应轮换版式，实际两章都是 %s" % (got["a1"],)
+    # 没有 cycle 时回到旧行为
+    scenes2 = [dict(s) for s in scenes]
+    G.plan_scenes(scenes2, {"lines": []}, {"chapter_layout": {}, "layout_default": "split-right"})
+    assert all(s["scene_layout"] == "split-right" for s in scenes2), \
+        "没有 layout_cycle 时必须全用 layout_default（旧行为）"
+    return "两章轮换 %s -> %s；同章稳定；无 cycle 时回落 layout_default" % (got["a1"], got["b1"])
+
+
+def t_brief_constraint_robustness():
+    """63 带约束的 brief 不许高概率直接失败（v1.0.2）。
+
+    实测过的真缺陷：配色候选去重按 24° 分桶，而 must_have「深蓝」把色相窗口压到 52°，
+    n=3 时约一半概率抛 ValueError；「暖纸色 + 女声」20/20 全失败。用户第一步就撞墙。
+    修法改成"色相距离 + 结构差异"分档后，这里用 20 次独立采样守回归。
+    """
+    import propose as PP
+    import designkit as DK
+    briefs = ["深蓝", "纪录片，暖纸色，缓慢，女声", "科技发布会，深蓝，要遮幅"]
+    for text in briefs:
+        b = PP._brief_of(text, {"title": "t"})
+        for _ in range(6):
+            try:
+                DK.sample_designs(b, n=3)
+            except ValueError as e:
+                raise AssertionError("brief %r 采样失败：%s" % (text, str(e)[:200])) from e
+    return "3 种带约束 brief × 6 次 = 18 次 n=3 采样全部成功"
+
+
+def t_removed_apis_fail_closed():
+    """64 已删除的 API 必须"明确报错/非零退出"，不许 NameError、假绿或静默 fallback。
+
+    v1.0.1 删内置风格表时留下了一批**死路径**：stylekit 的 --list/--show NameError、
+    --lint 空表 exit 0（假绿）、filmkit 的 resolve_theme/style_plan 吞异常回落到写死的
+    v0.4 主题（静默降级 = 用模板出片）。这三种都必须绝迹。
+    """
+    import subprocess as _sp
+    import stylekit as ST
+    import filmkit as FK
+    # ① stylekit.resolve_script_style 必须 raise 且带指引
+    try:
+        ST.resolve_script_style({"title": "t", "lines": []})
+    except (ValueError, KeyError, SystemExit) as e:
+        msg = str(getattr(e, "code", None) or e)
+        assert "propose.py" in msg, "报错必须给迁移指引（要提到 propose.py）：%r" % msg[:120]
+    else:
+        raise AssertionError("没有设计的剧本竟然解析出了计划")
+    # ② stylekit CLI 三个动作必须非零退出（不许假绿/NameError traceback）
+    for flag in ("--list", "--lint"):
+        p = _sp.run([sys.executable, os.path.join(HERE, "stylekit.py"), flag],
+                    capture_output=True, text=True, timeout=60)
+        assert p.returncode == 2, "stylekit.py %s 应 exit 2（能力已移除），实际 %d" % (flag, p.returncode)
+        assert "Traceback" not in (p.stderr or ""), "stylekit.py %s 不该抛 traceback" % flag
+    # ③ filmkit 的静默回落必须改成明确报错
+    for fn in (FK.resolve_theme, FK.style_plan):
+        try:
+            fn({"title": "t", "lines": []})
+        except (ValueError, KeyError) as e:
+            assert "propose" in str(e).lower() or "design" in str(e).lower(), \
+                "%s 的报错要给迁移指引：%r" % (fn.__name__, str(e)[:120])
+        else:
+            raise AssertionError("%s 在无设计时静默返回了兜底主题（模板残留）" % fn.__name__)
+    # ④ designkit 的配色采样示例不许崩（--list-palettes 曾 KeyError: family）
+    p = _sp.run([sys.executable, os.path.join(HERE, "designkit.py"), "--list-palettes", "--json"],
+                capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, "designkit.py --list-palettes 崩了：%s" % (p.stderr or p.stdout)[:200]
+    return "resolve_script_style/CLI/filmkit 全部 fail-closed；--list-palettes 可跑"
+
+
+def t_audio_overrides():
+    """65 design.audio 的音量/音效参数必须真的落进 script（v1.0.2）。
+
+    实测过的真缺陷：design.json 的 audio.music.gain_db / duck_db 与 audio.sfx.enabled
+    / density / gain_db 一直被 validate_design 接受、却从来没有渲染代码读它们 ——
+    用户把 sfx.enabled 写成 false，成片照样出 8 条音效。
+    现在的契约：**film.json 显式写了的 > design 的值 > 模块默认**。
+    """
+    import designkit as DK
+    d = DK.sample_designs({"topic": "声音参数自检"}, n=1, seed=5)[0]
+    d = json.loads(json.dumps(d))
+    d["audio"]["music"]["gain_db"] = -7.5
+    d["audio"]["music"]["duck_db"] = 9.0
+    d["audio"]["sfx"] = {"enabled": False, "density": "rich", "gain_db": -3}
+    plan = DK.design_to_plan(d)
+    ov = plan.get("audio_overrides") or {}
+    assert abs(float(ov["music"]["gain_db"]) + 7.5) < 1e-9, "music.gain_db 没进计划"
+    assert abs(float(ov["music"]["duck_db"]) - 9.0) < 1e-9, "music.duck_db 没进计划"
+    assert ov["sfx"]["enabled"] is False, "sfx.enabled 没进计划"
+    import render as R
+    # 剧本里没写 -> 用 design 的值
+    s1 = {"title": "t", "lines": []}
+    R._apply_audio_overrides(s1, plan)
+    assert s1["sfx"]["enabled"] is False and abs(s1["music"]["gain_db"] + 7.5) < 1e-9, \
+        "design 的声音参数没有填进 script：%r" % (s1,)
+    # 剧本显式写了 -> 以剧本为准（用户手里 film.json 是最终裁决权）
+    s2 = {"title": "t", "lines": [], "music": {"gain_db": -1.0}, "sfx": {"enabled": True}}
+    R._apply_audio_overrides(s2, plan)
+    assert s2["music"]["gain_db"] == -1.0 and s2["sfx"]["enabled"] is True, \
+        "film.json 的显式值被 design 覆盖了：%r" % (s2,)
+    return "design.audio -> plan -> script 贯通；film.json 显式值优先"
+
+
+def t_design_ledger():
+    """66 片间去重台账（v1.0.2）：确认过的设计要记住，下次提案主动避开；可关可查。
+
+    用户原则 5：不同视频的整体风格不能大面积重复。v1.0.1 只保证"同一 brief 两次采样不同"
+    （nonce），但没有记忆——连拍同题材仍可能撞到相近设计。台账补上这一环。
+    这条验四件事：① confirm 后写台账；② 提案会读台账并报告距离；
+    ③ 台账路径可被环境变量重定向（绝不污染用户真实台账）；④ --no-ledger 可关闭。
+    """
+    import tempfile
+    import subprocess as _sp
+    tmp = tempfile.mkdtemp(prefix="vs_ledger_selfcheck_")
+    ledger = os.path.join(tmp, "ledger.json")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", VIDEO_STUDIO_LEDGER=ledger)
+    script = {"title": "台账自检", "lines": [
+        {"id": "l01", "kind": "hook", "text": "第一句话。"},
+        {"id": "l02", "kind": "body", "text": "第二句话，讲一件具体的事。"},
+        {"id": "l03", "kind": "outro", "text": "结束。"}]}
+    film = os.path.join(tmp, "film.json")
+    with open(film, "w", encoding="utf-8") as fh:
+        json.dump(script, fh, ensure_ascii=False)
+    pp = os.path.join(HERE, "propose.py")
+
+    def _run(args):
+        r = _sp.run([sys.executable, pp] + args, cwd=tmp, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", env=env, timeout=300)
+        assert r.returncode == 0, "propose.py %s 失败：%s" % (args[0], (r.stderr or r.stdout)[-300:])
+        return r
+
+    _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3"])
+    assert not os.path.exists(ledger), "还没 confirm 就写台账了（草稿不该记）"
+    _run(["--confirm", "--candidate", "A"])
+    assert os.path.exists(ledger), "confirm 之后没有写台账：%s" % ledger
+    data = json.load(open(ledger, encoding="utf-8"))
+    assert len(data.get("designs") or []) == 1, "台账条数不对：%r" % (data,)
+    row = data["designs"][0]
+    assert row.get("fingerprint") and isinstance(row.get("design"), dict), "台账记录缺字段"
+    # 第二次提案：必须能读到台账（人读输出里有一行"片间去重"）
+    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3"])
+    assert "片间去重" in r.stdout, "提案没有报告台账状态：%s" % r.stdout[-400:]
+    # --show-ledger 能查；--no-ledger 能关
+    r = _run(["--show-ledger"])
+    assert row["fingerprint"] in r.stdout, "--show-ledger 没列出刚记的指纹"
+    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3", "--no-ledger"])
+    assert "--no-ledger" in r.stdout, "--no-ledger 没有给出关闭提示"
+    return "草稿不记 / confirm 记账 / 提案读取并报告 / --show-ledger 可查 / --no-ledger 可关"
+
+
+def t_duration_target():
+    """67 时长要求真的被接住（v1.0.2）：brief 里的「2 分钟」要影响设计，渲染时对账。
+
+    过去 `_brief_of` 把 duration_target 恒填 None —— 用户写「做个 2 分钟的片」等于没写，
+    成片永远按台词长度出（实测 23s / 30s）。这条守三件事：
+      ① 中文/阿拉伯数字的常见时长说法都能解析；
+      ② 解析出的时长进 design.structure.target_sec，并决定候选段落数；
+      ③ 渲染时按"目标 vs 实测"对账（差 >15% 告警，但不截断旁白）。
+    """
+    import propose as PP
+    import designkit as DK
+    cases = {"2分钟": 120.0, "做个90秒的短视频": 90.0, "一分钟半": 90.0,
+             "3分30秒": 210.0, "2.5分钟": 150.0, "两分钟": 120.0}
+    for text, want in cases.items():
+        got = PP.parse_duration(text)
+        assert got is not None and abs(got - want) < 1e-6, \
+            "时长解析 %r 得到 %r，期望 %r" % (text, got, want)
+    assert PP.parse_duration("深蓝科技解说") is None, "没有时长时不该硬凑"
+    assert PP.parse_duration("两小时") is None, "超出 3–1800s 契约范围应拒绝"
+    b = PP._brief_of("深蓝，科技，2分钟，硬切", {"title": "t"})
+    assert b.get("duration_target") == 120.0, "brief 没接住时长：%r" % (b,)
+    d = DK.sample_designs(b, n=2, seed=9)[0]
+    assert d["structure"].get("target_sec") == 120.0, \
+        "目标时长没进设计：%r" % (d["structure"],)
+    plan = DK.design_to_plan(d)
+    assert plan.get("target_sec") == 120.0, "目标时长没进计划：%r" % (plan.get("target_sec"),)
+    return "6 种时长说法解析正确；进 design/plan；超范围拒绝"
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -1956,6 +2188,13 @@ CASES = [
     ("58 提案闸（absent/draft/confirmed/broken）", t_proposal_gate),
     ("59 逐 stage 可单独跑（resolve_style 必须拿得到 work）", t_stage_standalone),
     ("60 brief 里的要求真的生效（自然语言 -> 约束 -> 采样）", t_brief_constraints),
+    ("61 字幕样式可定制（design.visual.subtitle 真的生效）", t_subtitle_style),
+    ("62 片内版式轮换（layout_cycle：换章即换骨架）", t_layout_cycle),
+    ("63 带约束的 brief 不会高概率采样失败", t_brief_constraint_robustness),
+    ("64 已删除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）", t_removed_apis_fail_closed),
+    ("65 design.audio 的音量/音效参数真的落进 script", t_audio_overrides),
+    ("66 片间去重台账（确认记账 / 提案避开 / 可关可查）", t_design_ledger),
+    ("67 时长要求真的被接住（brief -> design -> 渲染对账）", t_duration_target),
 ]
 
 

@@ -86,7 +86,7 @@ CALIBRATION = dict(
              "（是否同一台未核实，只保证这些数字是在上述 24 逻辑核机器上测的）"),
     measured_at="2026-11-10",
     sdk="video-studio v0.7.1 scripts（ffmpeg 自带 x264）",
-    film="29.011 s / 870 帧 / 模板片（assets/film.json + assets/scenes.py）",
+    film="29.011 s / 870 帧 / 测试样片（assets/film.json + assets/scenes.py，仅用于基准校准）",
     method="render.py --stage all --jobs 2，逐 stage 取 [time] 行墙钟；同片重复 2 次",
     observed=dict(tts=2.2, layout=0.0, cues=0.0, score=6.3, sfx=0.8, audio=0.7,
                   frames=9.7, mux=1.9, qa=6.8, total=28.4),
@@ -157,8 +157,9 @@ def load_script(path, as_json=False):
     """读剧本；坏输入给一句话错误（退出码 2），不甩 traceback。"""
     p = Path(path).expanduser()
     if not p.exists():
-        _die("找不到剧本 %s（--script 指到 film.json；模板在 skills/video-studio/assets/film.json）"
-             % p, as_json)
+        _die("找不到剧本 %s（--script 指向你自己的 film.json；"
+             "仓库里只有一个用于测试的样例 skills/video-studio/assets/film.json，"
+             "它不是要抄的模板）" % p, as_json)
     try:
         raw = p.read_text(encoding="utf-8")
     except OSError as e:

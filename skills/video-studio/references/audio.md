@@ -139,32 +139,32 @@ trimmed = K.trim_silence(pcm, thresh_db=-42.0, keep_ms=80)   # 不是 trim_tail�
 # 轻 EQ：200 Hz 以下衰减 2 dB（去闷），3 kHz 提 1 dB（清晰度）
 ```
 
-### 7.1 声线（persona）与语气（tone）—— v0.5.0
+### 7.1 声线（edge voice id）与语气（tone）—— v1.0.1 起没有 persona 身份表
 
-v0.4 及以前全片只有一个 `voice/rate/pitch`，于是"每部片的旁白都差不多"。
-v0.5 引入 **persona（声线）× tone（语气档）**，由 `voicekit.py` 解析成逐句 spec：
+> **v0.5 的 persona 表（`bright_female` / `narrator_male` 之类 9 个身份）在 v1.0.0 已删除。**
+> 现在 `voice` 只认**裸 edge-tts voice id**（如 `zh-CN-YunxiNeural`）+ 实测响度补偿表
+> `assets/voice_loudness.json`；tone 的 6 档（hook/body/quote/outro/emphasis/calm）保留。
 
 ```json
-{"voice": {"map": {"hook": "bright_female", "body": "narrator_female", "quote": "authority_male"},
+{"voice": {"id": "zh-CN-YunxiNeural",
+           "map": {"hook": "zh-CN-YunxiaNeural", "body": "zh-CN-YunxiNeural",
+                   "quote": "zh-CN-YunyangNeural", "outro": "zh-CN-YunxiNeural"},
            "jitter": 0.35, "max_distinct": 3}}
 ```
 
 ```bash
-python voicekit.py --list          # 9 个 persona + 6 个 tone（含实测响度补偿 gain_db）
-python voicekit.py --plan film.json  # 打印某份剧本的逐句声线计划（不发请求）
+python <SKILL_DIR>/scripts/voicekit.py --list    # 音色响度表（裸 id + 实测 gain_db）与 6 档 tone
+python <SKILL_DIR>/scripts/voicekit.py --plan film.json   # 打印逐句声线计划（不发请求）
 ```
 
-- **persona** 决定 edge-tts 音色 id + 基线 rate/pitch/volume/gain_db；
+- **voice id** 直接就是 edge-tts 的音色名；`--list` 里带的是**实测响度补偿**（不同音色天然差 3–7 dB，
+  实测跨度 6.0 dB）。写了表里没有的音色，补偿回落 0 = 旁白电平没校准。
 - **tone** 决定相对偏移与句前/句后停顿：hook / body / quote / outro / emphasis / calm
-  （`body` 严格等于 v0.4 基准：lead 0.62 / tail 0.92 / 所有 delta=0）；
-- **内容规则**会自动升级语气：引号句 -> quote（并换到 quote 声线）、数字密集 -> emphasis、
-  问句/感叹 -> 稍快稍亮、长句 -> 降速加尾部留白；显式 `lines[].voice/tone` 优先级最高；
-- **jitter**（默认 0.35）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感；
+  （`body` 严格等于 v0.4 基准：lead 0.62 / tail 0.92 / 所有 delta=0）。
+- **内容规则**会自动升级语气：引号句 → quote（并换到 quote 声线）、数字密集 → emphasis、
+  问句/感叹 → 稍快稍亮、长句 → 降速加尾部留白；显式 `lines[].voice/tone` 优先级最高。
+- **jitter**（默认 0.35）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感。
 - **governor** 限制全片最多 `max_distinct` 把声音、相邻句不换人 —— 超过就变成广播剧，不是旁白。
-
-**响度校准**：不同音色的响度天然差 3–7 dB（实测 narrator_female 比 narrator_male 响约 5.7 dB），
-persona 表里的 `gain_db` 是**实测回填**的（`voicekit.py --calibrate` 可复测）。
-混音侧每句只应用一次增益（v0.5 顺手修掉了 v0.4 `voice_gain` 被乘两次的静默 bug）。
 
 **缓存键 v2**：`sha1(v2|text|voice|rate|pitch|volume|trim|trim_db)`。v0.4 的 key 不含 trim，
 于是把 `trim_silence` 改成 false 仍会命中旧的裁剪版 —— "关了裁剪其实没关"。v1 key 仍然保留给老缓存。
@@ -479,6 +479,6 @@ D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何
 ### 13.4 改音频代码后的自检清单
 
 1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C 三组达标（在包根执行）。
-2. `python selfcheck.py` —— 55 条全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先，第 39 条盯音频边界）。
+2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **67 条**全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先，第 39 条盯音频边界）。
 3. `python musicgen.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS（musicgen 的 26 项覆盖编排与确定性）。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

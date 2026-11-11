@@ -322,7 +322,11 @@ SCRIPT_SPEC = {
     "props": {
         "title": {"t": "str", "nonempty_warn": True},
         "end_text": {"t": "str"},
-        "style": {"t": "str", "enum_dynamic": "style"},
+        # v1.0.2: style is deprecated since v1.0.1 (appearance comes from work/design.json).
+        # It used to use enum_dynamic -> _load_styles(); STYLE_IDS is now empty, so it always
+        # emitted a misleading WARN saying stylekit.py was missing (the file was there).
+        # Now it is an inert key: accepted (old scripts must not hard-fail) but reported.
+        "style": {"t": "str", "inert": "v1.0.1 起已废弃：外观由 work/design.json 决定（python propose.py --brief ... 再 --confirm），这里写任何值都不生效"},
         "engine": {"t": "str", "enum": ENGINES},
         "voice": {"t": ("str", "dict"), "open": "dict"},
         "rate": {"t": "str", "pattern": RATE_RE, "example": "+6%"},
@@ -469,22 +473,6 @@ def _check(val, rule, path, rep, ctx):
     # 否则"写对了却不生效"会一路带到交付（本项目历史上最贵的一类缺陷）。
     if rule.get("inert"):
         rep.warn(path, "这个键**当前不生效**：%s" % rule["inert"], "inert_key")
-
-    if rule.get("enum_dynamic") == "style":
-        styles = ctx.get("styles")
-        if styles is None:
-            if not ctx.get("style_warned"):
-                ctx["style_warned"] = True
-                rep.warn(path, "stylekit.STYLES 不可用（找不到 %s/stylekit.py），"
-                               "跳过 style 枚举校验——只提示，不判错" % str(HERE), "stylekit_missing")
-        else:
-            enum = ["auto"] + list(styles)
-    if enum and isinstance(val, str) and val not in enum:
-        near = _suggest(val, [e for e in enum if isinstance(e, str)])
-        hint = ("；是不是想写 %r？" % near) if near else ""
-        rep.err(path, "枚举错误：%r 不是可用值（可用：%s）%s"
-                % (val, " / ".join(str(e) for e in enum), hint), "bad_enum")
-        return
 
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         if rule.get("positive") and val <= 0:
@@ -813,19 +801,6 @@ def _fail(msg, as_json, code=2):
     raise SystemExit(code)
 
 
-def _load_styles():
-    """从 stylekit.STYLES 单向读取风格 id；拿不到返回 None（调用方降级成只 WARN）。"""
-    try:
-        if str(HERE) not in sys.path:
-            sys.path.insert(0, str(HERE))
-        import stylekit                                  # noqa: F401  （只读枚举，不复制）
-        # 优先用公开的 STYLE_IDS（8 套），没有就退回 STYLES 的键（含内部 legacy）
-        ids = list(getattr(stylekit, "STYLE_IDS", ()) or getattr(stylekit, "STYLES", {}).keys())
-        return ids or None
-    except Exception:                                    # noqa: BLE001
-        return None
-
-
 def _load_personas():
     """从 voicekit 单向读取 persona 名与 tone id；拿不到返回 (None, None) 降级成不查。
 
@@ -891,7 +866,7 @@ def main(argv=None):
 
     kind = _classify(data)
     rep = Report()
-    ctx = {"styles": _load_styles(), "style_warned": False, "timeline": None}
+    ctx = {"timeline": None}
     skipped = False
     if kind == "artifact":
         skipped = True
@@ -911,7 +886,6 @@ def main(argv=None):
         "errors": rep.errors,
         "warnings": rep.warnings,
         "counts": {"errors": len(rep.errors), "warnings": len(rep.warnings)},
-        "style_ids": ctx.get("styles"),
         "timeline": ctx.get("timeline"),
     }
 

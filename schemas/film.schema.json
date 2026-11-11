@@ -23,18 +23,7 @@
     },
     "style": {
       "type": "string",
-      "enum": [
-        "auto",
-        "tech-deep",
-        "magazine",
-        "paper",
-        "vivid",
-        "mono",
-        "cinema",
-        "lo-fi",
-        "epic"
-      ],
-      "description": "风格包 id：一套决定画风+配乐+旁白+节奏。“auto”= 按内容自动选；不写这个键 = v0.4 legacy 行为（逐样本兼容）。枚举真值来自 stylekit.STYLES，新增风格时先改那边再改这里"
+      "description": "**已废弃（v1.0.1）**：不再有内置风格表，这个键不决定任何外观，写了也不生效（保留只为了让老剧本继续通过契约校验）。外观的唯一来源是 work/design.json（propose.py --confirm 冻结，渲染前由 designkit.design_to_plan 解析）；没有设计就渲染会明确报错，而不是回落到某个默认风格。这里**故意不放 enum**：v1.0.1 起没有任何合法风格 id 可列，列一份清单只会误导 IDE 补全。"
     },
     "engine": {
       "type": "string",

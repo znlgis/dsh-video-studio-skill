@@ -87,6 +87,93 @@ def _sha(obj, n=16):
     return hashlib.sha1(_canonical(obj).encode("utf-8")).hexdigest()[:n]
 
 
+
+# ============================================================================
+# 片间去重：设计台账（v1.0.2）
+# ============================================================================
+#
+# 用户原则 5：**不同视频的整体风格不能大面积重复**。v1.0.1 的"每条视频都不同"
+# 靠的是采样 nonce —— 同一 brief 两次采样确实不同，但**没有记住已经交付过什么**：
+# 连续拍同题材的三条片，仍有概率撞到相近的配色/版式组合（设计空间大，但不是保证）。
+# 台账把"最近交付过的设计"记在用户级目录里，提案时主动避开它们：
+#   · 只看**离散维度**（配色/母题/转场/缓动/编号/配乐/声线/情绪/版式/调式），
+#     与 propose 展示给用户的"设计距离"同一口径；
+#   · 默认开启，可用 --no-ledger 或环境变量 VIDEO_STUDIO_LEDGER=off 关闭；
+#   · 路径可用环境变量覆盖（写文档/做测试时指到临时目录，不要去动用户真实台账）。
+# 为什么默认开启：用户不会主动想起"帮我避开上一部片"；默认关闭等于这个功能不存在。
+_LEDGER_ENV = "VIDEO_STUDIO_LEDGER"
+
+
+def ledger_path():
+    """台账文件路径：环境变量优先，否则 ~/.dsh/video-studio/design-ledger.json。"""
+    raw = str(os.environ.get(_LEDGER_ENV) or "").strip()
+    if raw.lower() in ("off", "0", "false", "no"):
+        return ""
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".dsh", "video-studio", "design-ledger.json")
+
+
+def ledger_load(limit=60):
+    """读最近 limit 条设计记录（读不到/写坏都返回空表：台账不该阻塞出片）。"""
+    path = ledger_path()
+    if not path:
+        return []
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = data.get("designs") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("design"), dict)][-int(limit):]
+
+
+def ledger_record(design, work=None, label=""):
+    """把一份已确认的设计记进台账（去重：同一指纹只保留最新一条）。"""
+    path = ledger_path()
+    if not path:
+        return False
+    try:
+        import designkit as _DK
+        fp = _DK.design_fingerprint(design)
+    except Exception:                                       # noqa: BLE001
+        return False
+    rows = ledger_load(limit=500)
+    rows = [r for r in rows if r.get("fingerprint") != fp]
+    rows.append({"fingerprint": fp, "label": str(label or design.get("label") or ""),
+                 "at": _now(), "work": os.path.abspath(str(work)) if work else "",
+                 "design": design})
+    rows = rows[-500:]
+    try:
+        _atomic_write(path, json.dumps({"schema": 1, "designs": rows},
+                                       ensure_ascii=False))
+        return True
+    except OSError:
+        return False
+
+
+def ledger_min_distance(designs, recent):
+    """这批候选与"最近交付过的设计"之间的最小设计距离（离散维度数）。"""
+    if not recent:
+        return None
+    import designkit as _DK
+    worst = 99
+    for d in designs or []:
+        for r in recent:
+            try:
+                n = int(_DK.design_distance(d, r["design"]).get("n", 0))
+            except Exception:                               # noqa: BLE001
+                continue
+            worst = min(worst, n)
+    return None if worst == 99 else worst
+
+
+# 与上一部片至少要差这么多维，才算"看得出不是同一套"（与候选两两约束同口径）。
+LEDGER_MIN_GAP = 2
+# 撞车时最多重采几轮（每轮都是一次全新 nonce 采样，成本 = 一次采样，毫秒级）。
+LEDGER_RETRIES = 4
 def proposal_path(work):
     return os.path.join(str(work), PROPOSAL_FILE)
 
@@ -145,6 +232,75 @@ def _load_script(path):
 _NEGATIVE_WORDS = ("不要", "不想要", "别用", "别", "避开", "排除", "避免", "去掉", "不用")
 
 
+
+# ---------------------------------------------------------------- 时长解析（v1.0.2）
+# brief 里最常见的硬要求之一就是时长（"做个 2 分钟的""60 秒短视频"）。v1.0.1 之前
+# 它**完全不生效**：_brief_of 只填 topic/must_have/avoid，duration_target 恒为 None，
+# 连 design.structure.target_sec 都不会有值。用户以为要求被接住了，成片却按台词长度来。
+# 这里把它解析出来：① 影响候选的段落数（designkit 按目标时长决定 segments）；
+# ② 渲染时对账"目标 vs 实测"，差超过 15% 当场告警——**不截断旁白**，只把事实说清。
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_number(text):
+    """把"九十 / 一百二十 / 半"这类简单中文数字转成 float；认不出返回 None。"""
+    s = str(text or "").strip()
+    if not s:
+        return None
+    if s == "半":
+        return 0.5
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    total, section = 0.0, 0
+    for ch in s:
+        if ch in _CN_DIGITS:
+            section = _CN_DIGITS[ch]
+        elif ch == "十":
+            section = (section or 1) * 10
+        elif ch == "百":
+            section = (section or 1) * 100
+        else:
+            return None
+    return float(total + section)
+
+
+def parse_duration(text):
+    """从一句话里解析时长（秒）。认不出返回 None。
+
+    支持：「90秒」「2分钟」「2.5分钟」「一分半」「3分30秒」「1分30秒」「两分钟」。
+    为什么只认这些：宁可比对少认，也不要猜错——猜错会让成片段落数按错误时长排，
+    用户更难发现。认不出的句子不会被静默吞掉：整句仍作为 topic 参与题材理解。
+    """
+    import re as _re
+    s = str(text or "")
+    best = None
+    m = _re.search(
+        r"([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十百]+)\s*分(?:钟)?\s*"
+        r"(半|([0-9]+|[零一二两三四五六七八九十百]+)\s*秒)?", s)
+    if m:
+        mins = _cn_number(m.group(1))
+        if mins is not None:
+            secs = 0.0
+            if m.group(2) == "半":
+                secs = 30.0
+            elif m.group(3):
+                v = _cn_number(m.group(3))
+                secs = float(v) if v is not None else 0.0
+            best = mins * 60.0 + secs
+    if best is None:
+        m = _re.search(r"([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十百]+)\s*秒", s)
+        if m:
+            v = _cn_number(m.group(1))
+            if v is not None:
+                best = float(v)
+    if best is None or best <= 0:
+        return None
+    if best < 3.0 or best > 1800.0:
+        return None            # 与 designkit 的契约范围一致（3–1800 秒）
+    return round(best, 2)
 def _brief_of(text, script):
     """把用户一句话变成 brief dict。剧本的标题是隐含 topic（避免空 brief）。
 
@@ -180,7 +336,9 @@ def _brief_of(text, script):
                 continue                       # 认不出来的短句留给 topic，由上层提示
             neg = any(w in seg for w in _NEGATIVE_WORDS)
             (avoid if neg else must).append(seg)
-    return {"topic": topic, "duration_target": None,
+    # v1.0.2：时长要求也要接住（以前恒为 None，用户写了「2 分钟」等于没写）。
+    dt = parse_duration(text)
+    return {"topic": topic, "duration_target": dt,
             "must_have": must, "avoid": avoid}
 
 
@@ -232,7 +390,7 @@ def _fill_diversity(rows, designkit):
 
 
 def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out=False,
-                  with_audio=False):
+                  with_audio=False, no_ledger=False):
     """生成一版提案（rev = 已有最大 rev + 1），落盘并打印人读摘要。"""
     designkit = _designkit()
     previewkit = _previewkit()
@@ -244,7 +402,23 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
     feedback = str(brief_text or "").strip() if rev > 1 else ""
 
     # v1.0 起唯一的出方案方式是**按 brief 现场采样**：没有预设、没有模板可套。
+    #
+    # v1.0.2 片间去重：读台账里最近交付过的设计，若这批候选与其中某一份"太像"
+    # （离散维度差距 < LEDGER_MIN_GAP），换 nonce 重采一次，最多试 LEDGER_RETRIES 轮，
+    # 取"最后一批"里与历史距离最大的那组。重试仍近就**明说**（不静默放过）。
+    recent = [] if no_ledger else ledger_load()
+    if no_ledger and not json_out:
+        print("   片间去重: 已用 --no-ledger 关闭（本次不与历史设计比对）")
     designs = designkit.sample_designs(brief, n=n, seed=seed)
+    ledger_gap = ledger_min_distance(designs, recent)
+    if recent and ledger_gap is not None and ledger_gap < LEDGER_MIN_GAP:
+        for _try in range(max(1, int(LEDGER_RETRIES))):
+            cand = designkit.sample_designs(brief, n=n, seed=seed)
+            gap = ledger_min_distance(cand, recent)
+            if gap is not None and gap > (ledger_gap or 0):
+                designs, ledger_gap = cand, gap
+            if ledger_gap is not None and ledger_gap >= LEDGER_MIN_GAP:
+                break
     # 认不出来的要求：采样器不会替你"悄悄放宽"，但也不会因此失败，而是挂在候选上。
     # 这里汇总一次，人读摘要里必须说出来——用户提的要求没生效，他得知道。
     unmatched = []
@@ -256,6 +430,9 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
         raise SystemExit("[proposal] 采样器只给了 %d 个候选（至少要 2 个才能算'多方案'）"
                          % len(designs))
 
+    if not json_out and brief.get("duration_target"):
+        print("   目标时长: %.1fs（按 brief 解析；成片时长仍由实测旁白决定，渲染阶段会对账）"
+              % float(brief["duration_target"]))
     outdir = rev_dir(work, rev)
     os.makedirs(outdir, exist_ok=True)
 
@@ -277,6 +454,18 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
                      row["preview"]["secs"], row["preview"]["sheet"]))
 
     _fill_diversity(rows, designkit)
+    # 台账距离：< LEDGER_MIN_GAP 说明"这批候选和最近交付的某部片太像"。
+    # 不阻断出片（用户可能就是想沿用同一套），但必须在摘要里说出来——
+    # 这正是原则 5 要的"不要大面积重复"，而用户自己不会去比对上一部片。
+    if not json_out and recent:
+        print("   片间去重: 已对照最近 %d 部片（最接近的一对差 %d 维，要求 >=%d；台账 %s）"
+              % (len(recent), ledger_gap if ledger_gap is not None else -1,
+                 LEDGER_MIN_GAP, ledger_path() or "关闭"))
+    if ledger_gap is not None and ledger_gap < LEDGER_MIN_GAP:
+        print("   ! 这批候选与最近交付过的设计最接近的一对只差 %d 个维度（建议 ≥%d）："
+              % (ledger_gap, LEDGER_MIN_GAP))
+        print("     已有 %d 部片的台账：%s" % (len(recent), ledger_path()))
+        print("     想强制避开：--revise \"换个完全不同的方向\"；想忽略：--no-ledger")
     wall = round(time.time() - t_all0, 2)
     # 并排对比图必须**无条件**产出：之前它写在 `if not json_out` 分支里，于是
     # `--json` 调用（机读、被 CI 或上层脚本用）永远拿不到 _compare.png，
@@ -294,6 +483,10 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
         "chosen": None,
         "seed": seed,
         "wall_s": wall,
+        # 片间去重证据：这批候选与"最近交付过的设计"的最小维度距离。
+        # None = 没有台账（第一次出片 / 已用 --no-ledger 关闭）。
+        "ledger": {"path": ledger_path() or None, "recent": len(recent),
+                   "min_gap": ledger_gap, "want_gap": LEDGER_MIN_GAP},
         "candidates": rows,
     }
     path = proposal_path(work)
@@ -409,6 +602,9 @@ def confirm(work, candidate, by="user", note="", json_out=False,
     _atomic_write(proposal_path(work), json.dumps(prev, ensure_ascii=False, indent=1))
     _atomic_write(os.path.join(str(work), "design.json"),
                   json.dumps(design, ensure_ascii=False, indent=1))
+    # 片间去重台账：**确认**（= 真的要出片了）才记，草稿候选不记。
+    # 记的是设计本身（自足 JSON），不是路径；同一指纹只留最新一条。
+    ledger_record(design, work=work, label=cands[cid].get("label") or "")
     if not json_out:
         print("== 已确认候选 %s（%s）" % (cid, cands[cid].get("label")))
         if prev.get("scriptHash"):
@@ -418,7 +614,7 @@ def confirm(work, candidate, by="user", note="", json_out=False,
     return prev
 
 def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=False,
-           with_audio=False):
+           with_audio=False, no_ledger=False):
     """不满意就重出：新 rev 不覆盖旧 rev，feedback 原文留存（这就是"迭代"的审计）。"""
     if not str(feedback or "").strip():
         raise SystemExit("[proposal] --revise 需要一段要求（例如：更冷一点、女声、节奏快些）")
@@ -428,7 +624,7 @@ def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=Fal
     script = _load_script(script_path)
     return make_proposal(str(feedback), script, work, n=n, seed=seed,
                          n_frames=n_frames, json_out=json_out,
-                         with_audio=with_audio)
+                         with_audio=with_audio, no_ledger=no_ledger)
 
 
 def diff(work, rev_a, rev_b, json_out=False):
@@ -567,9 +763,22 @@ def main(argv=None):
     ap.add_argument("--with-audio", action="store_true",
                     help="给每个候选附一段 12 秒样音（离线；配乐由 musicgen 生成）")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON")
+    ap.add_argument("--no-ledger", action="store_true",
+                    help="忽略片间去重台账（不读也不写；默认开启，路径见 --show-ledger）")
+    ap.add_argument("--show-ledger", action="store_true",
+                    help="打印台账路径与最近几条已交付设计（排查为什么这次避开了某方向）")
     a = ap.parse_args(argv)
 
     try:
+        if a.show_ledger:
+            path = ledger_path()
+            rows = ledger_load(limit=20)
+            print("[台账] %s" % (path or "已关闭（--no-ledger / VIDEO_STUDIO_LEDGER=off）"))
+            for r in rows:
+                print("  %s  %-22s  %s" % (r.get("at") or "", (r.get("label") or "")[:22],
+                                           r.get("fingerprint") or ""))
+            print("  共 %d 条（最近 20 条）" % len(rows))
+            return 0
         if a.diff:
             diff(a.work, a.diff[0], a.diff[1], json_out=a.json)
             return 0
@@ -596,13 +805,13 @@ def main(argv=None):
         if a.revise is not None:
             revise(a.work, a.revise, a.script, n=a.n, seed=a.seed,
                    n_frames=a.n_frames, json_out=a.json,
-                   with_audio=a.with_audio)
+                   with_audio=a.with_audio, no_ledger=a.no_ledger)
             return 0
         if a.brief or os.path.exists(a.script):
             script = _load_script(a.script)
             make_proposal(a.brief, script, a.work, n=a.n, seed=a.seed,
                           n_frames=a.n_frames, json_out=a.json,
-                          with_audio=a.with_audio)
+                          with_audio=a.with_audio, no_ledger=a.no_ledger)
             return 0
         ap.print_help()
         return 0

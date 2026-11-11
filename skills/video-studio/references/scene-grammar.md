@@ -29,9 +29,9 @@ v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选
        │  ① 场景语法：这段内容该长什么样（由内容决定，不由风格决定）
        ▼
     scene_type ∈ {hero, statement, list, stat, compare, process, quote, chapter, chart, outro}
-       │  ② 视觉语言包：这套风格怎么画（motion / motif / transition / typography / bias）
+       │  ② 设计（design.json）：这套设计怎么画（motion / motif / transition / typography / bias）
        ▼
-    stylekit.VISUAL_LANGUAGES[style_id]
+    work/design.json 的 visual 五组签名（designkit.design_to_plan 转成 plan）
        │  ③ 片内编排：同一部片里连续段落怎么不"复制粘贴"（变体轮换 / 装饰密度 / 相位，确定性）
        ▼
     draw_frame(...) → PIL.Image
@@ -42,7 +42,7 @@ v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选
 |---|---|---|---|
 | 叙事 kind | 作者写 `lines[].kind` | hook / body / quote / outro / emphasis / calm | 换旁白语气与配乐能量（voicekit / musicgen 读它） |
 | 场景 type | grammar 按内容打分，或作者显式写 `lines[].type` | `work/storyboard.json`、timeline 的 `scene_type` | 换构图（10 个绘制器之一） |
-| 视觉语言 | 风格 id（`style`） | `work/style.json` 的 `language` | 换这套风格的骨架参数（母题 / 转场 / 字距 / 重心） |
+| 设计 visual | `work/design.json`（由 `propose.py --confirm` 冻结） | `work/style.json` 的 `language` 与 `layout_cycle` | 换母题 / 转场 / 字距 / 重心 / 版式轮换 / 字幕样式 |
 
 **为什么没有新增 kind 值**：kind 同时是 voicekit 的语气 id 与 filmcheck 的 `KINDS`
 （两者是同一组 6 个值）。把 hero/stat 塞进 kind 会撞语气枚举，也让"引语"和"引语构图"
@@ -54,7 +54,7 @@ v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选
 坐标基于 1920×1080；正文底界 860（下方是字幕带），HUD 顶部 ≤96。
 "最短时长"是 `grammar.MIN_DUR`（`skills/video-studio/scripts/grammar.py:49`）的硬门槛，
 低于它按降级表换类型（见 §3.3）。类型名单与顺序在 `grammar.SCENE_TYPES`（grammar.py:30），
-绘制器注册表在 `assets/scenes.py:1979`（`_DRAWERS`）。
+绘制器注册表在 `assets/scenes.py` 的 `_DRAWERS`（搜这个名字，行号会漂）。
 
 | 类型 | 构图 / 重心 | 吃哪些字段 | 持续动效 | 自动选型特征 | 最短 |
 |---|---|---|---|---|---|
@@ -111,7 +111,7 @@ v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选
 
 几个刻意的取舍（都是实测反例逼出来的，别"优化"掉）：
 
-- **关键词只看叙述文字，不看 `items`**。反例：模板片第 3 段正文讲"画质三件事"，
+- **关键词只看叙述文字，不看 `items`**。反例：示例片第 3 段正文讲"画质三件事"，
   条目里写的是 `rawvideo -> libx264 CRF17`，`->` 命中顺序词表，整段被误判成"流程轴"——
   画面上一条横轴连着四个不相干的要点。条目是载荷不是叙事。
 - **`hero`/`outro` 的结构分刻意低于字段分**：开场如果带 5 条要点，观众要看的是要点，
@@ -217,19 +217,25 @@ timeline 顶层再加一个 `storyboard: {"type_counts": ...}` 摘要。
 变体号、密度档、相位都**不按时间/帧号/随机数**派生——同一稿子同一结果，
 这是"可复现"的一部分。改 `chapter` 字段会改变 `variant_of` 的输入，进而改变变体号。
 
-## 7. legacy 边界：不写 `style` = v0.4 三个老绘制器
+## 7. 没有 design 就没有画面（v1.0.1 起没有 legacy 路径）
 
-`film.json` 不写 `style` 字段时整条 v0.9 链路都不参与：
+v1.0.1 删掉了 legacy 外观：不写 `style` 不再「走 v0.4 三个老绘制器」，而是**直接报错**并给两步迁移指引。
+现在整条链路只认 `work/design.json`：
 
-- `render.st_layout` 不调用 `grammar.plan_scenes`，不写 `work/storyboard.json`，
-  timeline 里也不会出现 `scene_type` 等字段；
-- `scenes.draw_frame`（`assets/scenes.py:2003`）读 `plan["legacy"]` 为真，
-  直接走 `_LEGACY_DRAWERS`（scenes.py:232，hook / body / outro 三个 v0.4 绘制器），逐字节不变；
-- 金帧基线（`skills/video-studio/assets/golden_frames.json`）就是钉这条的：
-  legacy 项目跑出来的 3 帧像素与基线一致，改坏了立刻红。
+- `render.st_layout` 调 `grammar.plan_scenes`，按 `design.visual.layout_cycle` 做**按章节的版式轮换**，
+  写 `work/storyboard.json`（每段的 type / variant / decor / layout / reason 都可审计）；
+- `scenes.draw_frame` 只走 10 类构图绘制器（`_DRAWERS`），没有 legacy 分支；
+- 字幕样式来自 `design.visual.subtitle`（v1.0.2），字号/位置/背板/圆角不再写死；
+- 金帧基线 `assets/golden_frames.json` 绑的是固定 fixture 设计（`assets/design_fixture.json`），
+  不是「某套内置风格」——改绘制代码后按 `tools/golden_frames.py --write` 重录。
 
-想让老项目享受新构图，写 `"style": "auto"` 或任意风格 id 即可；
-但注意这会同时换掉配色/配乐/旁白（v0.5 的风格包是整体生效的），做好重看一遍的准备。
+没有 design 时的正确做法（脚本留在技能目录里，零拷贝）：
+
+```bash
+python <SKILL_DIR>/scripts/propose.py --brief "题材/要求" --script film.json --work work
+python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage all
+```
 
 ## 8. 加第 11 类构图（8 步）
 
@@ -256,17 +262,17 @@ timeline 顶层再加一个 `storyboard: {"type_counts": ...}` 摘要。
 7. **`selfcheck.py` 第 54 条（`scripts/selfcheck.py:1526`）会自动兜底**：它断言 grammar / filmcheck / scenes.`_DRAWERS` /
    schema enum 四处**集合相等**（顺序允许不同）。这四份真值来源必须同时改，漏一处立刻红。
 8. **`tools/silhouette_qa.py` 的 `SCENE_CONTENT` 补一段合成内容**（给足该类型的原料字段），
-   再跑一次剪影门禁确认新类型在 8 套风格下也"看得出来"。这一步不做，等于新加的构图
+   再跑一次剪影门禁（`--selftest` / `--designs N`）确认新类型在不同现场设计下也"看得出来"。这一步不做，等于新加的构图
    没有进入 G13 的覆盖范围。
 
-跑完的验证顺序：`python selfcheck.py`（52–55 条）→ `python tools/ci_check.py`
-（语法/包内容/文档路径）→ `python tools/silhouette_qa.py`（28 对仍全过）。
+跑完的验证顺序：`python selfcheck.py`（**67 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影）
+→ `python <REPO>/tools/ci_check.py`（语法/包内容/文档路径）→ `python <REPO>/tools/silhouette_qa.py`（不同设计两两仍可区分）。
 
 ## 9. 常见误用
 
 | 现象 | 原因 | 修法 |
 |---|---|---|
-| 分镜表里一段都没变，全是 list | 没有写 `style`（走 legacy），grammar 根本没跑 | 写 `"style": "auto"` 或某个风格 id |
+| 分镜表里一段都没变，全是 list | 没有 `work/design.json`，或 grammar 没跑 | 写 先 `propose.py --confirm` 冻结设计；再 `--stage layout` 看分镜表 |
 | 某段想要数字卡，结果画成列表 | 没有 `stats[]`，文本里的数字是"2024 年"（年份被排除）或没有单位 | 显式写 `stats[]`；或让那句话带"数字 + 单位" |
 | 写了 `type: "stats"` 却没生效，还报错 | `type` 是枚举，`stats` 才是字段名；写错值 filmcheck 报 ERROR | 改 `type` 为 10 类之一，数据放 `stats[]` |
 | 对比段左右两栏一栏空 | 只有 1 条 `items`（对半分不出来），或 `sides{}` 只写了一侧 | 补到 ≥2 条，或显式写 `sides` 两侧 |
@@ -294,8 +300,7 @@ timeline 顶层再加一个 `storyboard: {"type_counts": ...}` 摘要。
   但当前只有 hero / statement / list / stat 用它，其余六类构图唯一。
   这条不修的话，"每类型 3 个变体"只在四类上成立。
 - **部分视觉语言字段"已声明、已体检、但绘制器没读"**：`motion.enter`、`motion.push`、
-  `typography.align`、`typography.ratio`（以及 `layout_cycle`）在
-  `stylekit.VISUAL_LANGUAGES` 里声明、`stylekit.visual_lint` 会查范围，
+  `typography.align`、`typography.ratio`由 `designkit.validate_design` 校验范围，
   但 `assets/scenes.py` 当前不读它们——写了不会报错，也不会改变画面。
   详见 [style-packs.md](style-packs.md) 的"视觉语言包"一节。
 - **场景数据超容量会被截断**：`stats` >3 / `series` >6 / `steps` >5 / `sides` 每侧 >3

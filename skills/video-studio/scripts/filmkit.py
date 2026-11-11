@@ -612,40 +612,101 @@ def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
     return wrap_cn(text, f, max_w), f
 
 
+def subtitle_kwargs(plan):
+    """从已解析的计划里取字幕样式参数（v1.0.2）。
+
+    返回可直接 ``draw_subtitle(..., **kw)`` 的 dict；计划里没有 subtitle 时返回空 dict
+    （= 模块默认值 = 过去写死的行为，老项目逐像素不变）。
+
+    为什么放在 filmkit 而不是 render：**参考帧渲染路径**（qavmaf 的 _draw_ref_frame）
+    与主渲染路径必须用同一份字幕参数，否则同源的两帧字幕字号不同，VMAF 会被
+    系统性拉低（实测：dv 变的 46px 默认 vs 52px 设计，同源参考帧 VMAF 91.3，
+    换了正确参数后回到 96+）。一份实现放这里，两条路径都调它。
+    """
+    sub = plan.get("subtitle") if isinstance(plan, dict) else None
+    if not isinstance(sub, dict):
+        return {}
+    kw = {}
+    if sub.get("size") is not None:
+        kw["size"] = int(sub["size"])
+    if sub.get("y") is not None:
+        kw["y"] = int(sub["y"])
+    if sub.get("align") in ("center", "left"):
+        kw["align"] = sub["align"]
+    if sub.get("plate_alpha") is not None:
+        kw["plate_alpha"] = int(sub["plate_alpha"])
+    if sub.get("radius") is not None:
+        kw["radius"] = int(sub["radius"])
+    if sub.get("color") is not None:
+        kw["color"] = sub["color"]
+    if sub.get("max_lines") is not None:
+        kw["max_lines"] = int(sub["max_lines"])
+    if sub.get("family"):
+        kw["family"] = sub["family"]
+    return kw
+
 def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None,
-                  theme=None, family=None, words=None):
+                  theme=None, family=None, words=None, align="center",
+                  plate_alpha=None, radius=10, color=None, max_lines=2):
     """烧字幕。v0.5.0 加 theme（stylekit 主题）与 family（字体族）；
-    theme=None 时与 v0.4 逐像素一致。v0.8 加 words（按词边界折行）。"""
+    theme=None 时与 v0.4 逐像素一致。v0.8 加 words（按词边界折行）。
+
+    v1.0.2 加 align / plate_alpha / radius / color / max_lines（全部可选，
+    默认值 = 过去写死的行为，所以老调用逐像素不变）。为什么加：字幕样式过去是
+    **模块常量**，任何两条片子的字幕带都一模一样 —— 这正是用户说的"大面积重复"。
+    现在这些参数由 design.json 的 visual.subtitle 决定（见 designkit.subtitle_of）。
+    """
     if not text or alpha <= 0.01:
         return img
     if band_w is None:
         band_w = SUB_BAND[2] - SUB_BAND[0]
     th = theme if isinstance(theme, dict) else None
     fam = family or (th or {}).get("family") or "sans"
-    lines, f = fit_sub_lines(text, max_w=band_w, size=size, family=fam, words=words)
-    lines = lines[:2]                       # 硬约束：最多两行
+    try:
+        max_lines = max(1, min(3, int(max_lines)))
+    except (TypeError, ValueError):
+        max_lines = 2
+    lines, f = fit_sub_lines(text, max_lines=max_lines, max_w=band_w, size=size,
+                             family=fam, words=words)
+    lines = lines[:max_lines]
     lh = int(f.size * 1.32)
-    cx = (SUB_BAND[0] + SUB_BAND[2]) // 2
     total_h = lh * len(lines)
+    if align == "left":
+        cx = SUB_BAND[0] + 34
+    else:
+        cx = (SUB_BAND[0] + SUB_BAND[2]) // 2
     base_y = SUB_BAND[3] - total_h if y is None else y
     base_y = max(SUB_BAND[1], min(base_y, SUB_BAND[3] - total_h))
     d = ImageDraw.Draw(img, "RGBA")
     widest = max(text_w(l, f) for l in lines)
-    bx0 = cx - widest / 2 - 34
-    bx1 = cx + widest / 2 + 34
+    if align == "left":
+        bx0 = cx - 34
+        bx1 = cx + widest + 34
+    else:
+        bx0 = cx - widest / 2 - 34
+        bx1 = cx + widest / 2 + 34
     by0 = base_y - 16
     by1 = base_y + total_h + 16
+    if color is not None:
+        ink_rgb = tuple(int(x) for x in color)[:3]
+    elif th is None:
+        ink_rgb = (245, 248, 252)
+    else:
+        ink_rgb = tuple(th["ink"])
+    ink = tuple(ink_rgb) + (int(255 * alpha),)
     if th is None:
-        plate = (0, 0, 0, int(150 * alpha))
-        ink = (245, 248, 252, int(255 * alpha))
+        _pa = 150 if plate_alpha is None else int(plate_alpha)
+        plate = (0, 0, 0, int(_pa * alpha))
     else:
         # 浅色主题不能"黑底白字"：背板取 bg2 半透，字取 ink
-        plate = tuple(th["bg2"]) + (int(170 * alpha),)
-        ink = tuple(th["ink"]) + (int(255 * alpha),)
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=10, fill=plate)
+        _pa = 170 if plate_alpha is None else int(plate_alpha)
+        plate = tuple(th["bg2"]) + (int(_pa * alpha),)
+    if plate[3] > 0:
+        d.rounded_rectangle([bx0, by0, bx1, by1], radius=int(radius), fill=plate)
     for i, ln in enumerate(lines):
         lw = text_w(ln, f)
-        d.text((cx - lw / 2, base_y + i * lh), ln, font=f, fill=ink)
+        x = (cx - 34 + 34) if align == "left" else (cx - lw / 2)
+        d.text((x, base_y + i * lh), ln, font=f, fill=ink)
     return img
 
 
@@ -1511,66 +1572,42 @@ def resolve_theme(script, scene=None):
     优先级：scene["theme"]（同明暗族才允许） > script 里解析出的风格主题。
     stylekit 不在时退回内置 tech-deep（只为了让老工作目录少一个文件也能跑）。
     """
-    try:
-        ST = _stylekit()
-        plan = script.get("_style")
-        if not isinstance(plan, dict):
-            plan = ST.resolve_script_style(script)
-        # 设计路径的计划自带完整主题；只有老计划才回查内置表（同 render._theme_for）
-        # v1.0.1：内置主题表已删除，主题只能来自计划本身
-        th = plan.get("theme")
-        if not isinstance(th, dict) or not th:
-            return _FALLBACK_THEME
-        th = dict(th)
-        # scene["theme"] 覆盖（"这一段换一套主题"）已随内置主题表一起消失：
-        # 没有命名主题就没有"按名字换"这件事。老剧本带 scene.theme 时静默忽略即可
-        # —— 它是可选装饰字段，不是契约字段，为此报错会让老项目无法渲染。
-        return th
-    except Exception:                                       # noqa: BLE001
-        return _FALLBACK_THEME
+    plan = script.get("_style") if isinstance(script, dict) else None
+    if not isinstance(plan, dict):
+        raise ValueError(
+            "resolve_theme：剧本里没有已解析的设计计划（script[_style]）。\n"
+            "  v1.0.1 起本技能不提供任何内置主题：每一版外观都必须现场生成并由人确认。\n"
+            "  请用 python propose.py --brief \"题材\" --script <film.json> --n 3，"
+            "\n  再 --confirm --candidate A 冻结设计；渲染侧走 render.resolve_style(script, work)。")
+    # 设计路径的计划自带完整主题；v1.0.1 起没有内置主题表可回查。
+    th = plan.get("theme")
+    if not isinstance(th, dict) or not th:
+        raise ValueError("resolve_theme：计划里没有 theme 字段（plan 来自 %r）——"
+                         "它不是 designkit/render 产出的计划，取不到主题"
+                         % (plan.get("generator") or plan.get("style"),))
+    # scene["theme"] 覆盖（"这一段换一套命名主题"）已随内置主题表一起消失：
+    # 可选装饰字段，静默忽略（它不是契约字段，为此报错会让老项目无法渲染）。
+    return dict(th)
 
 
 def style_plan(script):
-    """解析剧本的风格计划（含 legacy 判定）。stylekit 缺失时返回 legacy 计划。"""
-    try:
-        ST = _stylekit()
-        plan = script.get("_style")
-        return plan if isinstance(plan, dict) else ST.resolve_script_style(script)
-    except Exception:                                       # noqa: BLE001
-        return {"legacy": True, "style": "legacy", "theme_id": "tech-deep",
-                "music": {"style": "legacy", "bpm": script.get("bpm") or 120.0,
-                          "key": (script.get("music") or {}).get("key") or "Dm",
-                          "mood": "steady",
-                          "seed_effective": int((script.get("music") or {}).get("seed", 7) or 7)},
-                "voice": {"map": {}, "policy": {"auto": False, "jitter": 0.0, "max_distinct": 2}},
-                "pacing": {"lead": float(script.get("lead", 0.62)),
-                           "tail": float(script.get("tail", 0.92)),
-                           "min_dur": float(script.get("min_dur", 3.2)),
-                           "hold": float(script.get("hold", 0.0)),
-                           "item_stagger": 0.32}}
+    """取已解析的风格计划；**不做 legacy 回落**（v1.0.2 起 fail-closed）。
 
-
-# v0.4 的深蓝橙，作为"没装 stylekit 也能出片"的兜底（与 assets/scenes.py 的老 THEME 同值）
-_FALLBACK_THEME = {
-    "id": "tech-deep", "label": "科技深蓝", "keywords": (),
-    "bg": (7, 14, 26), "bg2": (17, 33, 54), "surface": (26, 42, 64),
-    "ink": (240, 245, 252), "muted": (150, 174, 200), "dim": (120, 142, 168),
-    "accent": (243, 132, 60), "accent2": (86, 170, 232),
-    "good": (108, 178, 110), "bad": (226, 96, 92), "rule": (255, 255, 255),
-    "vignette": 0.40, "vignette_tint": (0, 0, 0), "grain": 5.0, "grain_freq": 0.31,
-    "texture": "dots", "texture_alpha": 0.045,
-    "family": "sans",
-    "scale": {"display": (96, "bold"), "heading": (64, "bold"), "sub": (38, "light"),
-              "body": (34, "reg"), "kicker": (28, "bold"), "chip": (27, "reg"),
-              "brand": (23, "reg")},
-    "line_gap": 1.30, "tracking": 0.0,
-    "layout": "left-stack",
-    "card": {"radius": 14, "fill_a": 16, "outline_a": 28, "pad": 34, "h": 96, "gap": 118},
-    "safe_bias": 0,
-    "ease": "out3", "entrance_dx": 0, "entrance_dy": 26, "push": 0.04,
-    "item_stagger": 0.32, "transition": "black", "hud": "chip-left",
-    "qa": {"luma_max": 0.030, "flicker_thresh": 6.0, "dark": True},
-}
+    以前这里 except Exception 后返回一份手写的 legacy 计划（120BPM / Dm / 固定节奏），
+    等于把"没有设计"伪装成"老项目正常出片"，也是模板残留（v1.0.1 原则：不提供任何模板）。
+    现在只认一种情况：script["_style"] 已经是计划（render.resolve_style 挂好的）；
+    否则明确报错并给两步迁移指引。
+    """
+    plan = script.get("_style") if isinstance(script, dict) else None
+    if isinstance(plan, dict):
+        return plan
+    raise ValueError(
+        "style_plan：剧本里没有已解析的风格计划（script[_style]）。\n"
+        "  v1.0.1 起没有「不写设计就走老外观」这条兼容路径了。\n"
+        "  正确用法：\n"
+        "    python propose.py --brief \"题材\" --script <film.json> --n 3\n"
+        "    python propose.py --confirm --candidate A\n"
+        "    python render.py --script <film.json> --stage all")
 
 
 # ---------------------------------------------------------------- 程序化音源

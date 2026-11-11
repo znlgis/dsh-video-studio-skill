@@ -147,8 +147,11 @@ def _web_entry(script):
     if not os.path.exists(entry):
         raise SystemExit(
             "[缺少 web 页面] %s\n"
-            "  把 <SKILL_DIR>/assets/web/ 整个目录拷到项目里（cp -r <SKILL_DIR>/assets/web ./web），"
-            "或在 film.json 里写 web.entry 指向你自己的页面。" % entry)
+            "  web 引擎需要**你自己的页面**（本技能不提供模板）。\n"
+            "  PIL 路线不需要页面，零拷贝就能出片（--engine pil）。\n"
+            "  想先跑通 web 链路可拷示例页：\n"
+            "    cp -r <SKILL_DIR>/assets/web ./web   # 示例页只有 3 段占位场景，不是出片模板\n"
+            "  或在 film.json 里写 web.entry 指向你自己的页面。" % entry)
     return entry
 
 
@@ -337,9 +340,41 @@ def _plan_from_design(script, work, verbose=True):
         raise SystemExit("[设计体检失败] %s\n  - %s"
                          % (design.get("id") or "(无 id)", "\n  - ".join(bad)))
     plan = DK.design_to_plan(design)
+    _apply_audio_overrides(script, plan)
     if verbose:
         print("   设计: %s（%s）" % (plan.get("style"), (design.get("pitch") or "")[:60]))
     return plan
+
+
+def _apply_audio_overrides(script, plan):
+    """把 design.audio 里的音量/音效参数填进 script 的 music/sfx **缺省位**（v1.0.2）。
+
+    为什么需要：design.json 里 audio.music.gain_db / duck_db 与 audio.sfx.enabled /
+    density / gain_db 一直被 validate_design 接受、却从来没有被任何渲染代码读过——
+    用户改了它们，成片一模一样（audit 实测：enabled=false 仍出 8 条音效）。
+
+    优先级（明确且可预期）：**film.json 显式写了的 > design 的值 > 模块内置默认**。
+    只填缺省位，绝不覆盖剧本里的显式写法——用户手里的 film.json 永远是最终裁决权。
+    """
+    ov = plan.get("audio_overrides") if isinstance(plan, dict) else None
+    if not isinstance(ov, dict):
+        return
+    mus_ov = ov.get("music") if isinstance(ov.get("music"), dict) else {}
+    sfx_ov = ov.get("sfx") if isinstance(ov.get("sfx"), dict) else {}
+    mus = script.get("music")
+    if mus_ov:
+        if not isinstance(mus, dict):
+            mus = {}
+            script["music"] = mus
+        for k, v in mus_ov.items():
+            mus.setdefault(k, v)
+    sfx = script.get("sfx")
+    if sfx_ov:
+        if not isinstance(sfx, dict):
+            sfx = {}
+            script["sfx"] = sfx
+        for k, v in sfx_ov.items():
+            sfx.setdefault(k, v)
 
 
 def resolve_style(script, work=None, verbose=True):
@@ -438,8 +473,24 @@ def _print_style(plan):
               % (mf.get("kind"), tr.get("kind"), float(tr.get("dur") or 0.0),
                  float(ty.get("tracking") or 0.0), ty.get("number"),
                  float(bi.get("x") or 0.0), float(bi.get("y") or 0.0)))
+    # v1.0.2 修：这里以前无条件读 m["style"] —— 而 designkit 自 v1.0.1 起明确不再写
+    # 这个键（配乐风格表已删），于是公开命令 `--stage style` 100% KeyError: "style"。
+    # 现在按「参数化配乐」的真实身份打印：调式 + BPM + 调性 + mood。
+    _music_id = m.get("arranger") or m.get("style") or ("%s %gBPM" % (m.get("scale", "?"), m.get("bpm", 0)))
     print("        配乐: %s  BPM %g（%s）  调性 %s（%s）  mood %s"
-          % (m["style"], m["bpm"], m["bpm_source"], m["key"], m["key_source"], m["mood"]))
+          % (_music_id, m["bpm"], m["bpm_source"], m["key"], m["key_source"], m["mood"]))
+    _sub = plan.get("subtitle") if isinstance(plan.get("subtitle"), dict) else None
+    if _sub:
+        _y = _sub.get("y")
+        print("        字幕: %s %dpx 对齐=%s 背板α=%d 圆角=%d 最多%d行"
+              % ("y=%s" % _y if _y is not None else "底部安全区",
+                 int(_sub.get("size") or 46), _sub.get("align") or "center",
+                 int(_sub.get("plate_alpha") if _sub.get("plate_alpha") is not None else 170),
+                 int(_sub.get("radius") if _sub.get("radius") is not None else 10),
+                 int(_sub.get("max_lines") or 2)))
+    _cyc = plan.get("layout_cycle") or []
+    if len(_cyc) >= 2:
+        print("        版式轮换: %s（按章节轮换，防全片一张版式）" % " -> ".join(map(str, _cyc)))
     if v["map"]:
         print("        旁白: %s" % "  ".join("%s=%s" % kv for kv in sorted(v["map"].items())))
     p = plan["pacing"]
@@ -638,6 +689,26 @@ def st_layout(script, work, lines=None):
             print("     %-6s %-7s %r" % (lid, fld, chars))
     for s in tl["scenes"]:
         print("   %-8s %7.2f-%7.2f  %s" % (s["id"], s["start"], s["end"], s["text"][:40]))
+    # ---- 目标时长对账（v1.0.2）----
+    # brief 里写的「2 分钟 / 60 秒」过去只影响 design.structure.segments 与 target_sec，
+    # 而成片时长由 TTS 实测决定 —— 用户以为"我要求了时长"，实际拿到 23s。
+    # 不改时长（截断旁白或拉长留白都是坏做法），但**必须当场说出来差多少**，
+    # 并给出可执行的做法（加台词 / 调 hold / 减台词）。
+    target = (plan or {}).get("target_sec")
+    if target:
+        try:
+            target = float(target)
+        except (TypeError, ValueError):
+            target = None
+    if target and target > 0:
+        diff = float(tl["total"]) - target
+        pct = diff / target * 100.0
+        print("   目标时长 %.1fs / 实际 %.2fs（%+.1fs，%+.0f%%）"
+              % (target, tl["total"], diff, pct))
+        if abs(pct) > 15.0:
+            print("   [WARN] 与目标时长差超过 15%：成片时长由**实测旁白**决定，不收口就要改文案。"
+                  "\n          想变长：加台词或调大 film.json 的 hold / lead / tail；"
+                  "\n          想变短：删减台词（hold 只会加留白，不会缩短旁白）。")
     return tl
 
 
@@ -677,6 +748,15 @@ def st_cues(script, work, tl, engine="pil"):
     # scenes.py 里的 cues() 钩子：允许直接返回 [{at,type,...}] 或调用 bus.add(...)
     n_hook = 0
     mod = None
+    # v1.0.2 修：scenes.py 的 cues() 常要读主题/视觉语言（assets 版就调 resolve_script_style）。
+    # 单跑 `--stage cues` 时前面没有 stage 把 script["_style"] 挂好，钩子就会去解析"设计"
+    # 并直接 raise —— 公开命令 100% 崩，报错还指向"先去提案"（其实设计已确认）。
+    # 这里在调用钩子前解析一次（幂等，已挂 _style 时直接复用）。
+    if script.get("_scenes") and os.path.exists(script["_scenes"]) and not isinstance(script.get("_style"), dict):
+        try:
+            script["_style"] = resolve_style(script, work)
+        except SystemExit:
+            pass                      # 没设计：cues 阶段不因它失败，钩子里真需要会自己报错
     if script.get("_scenes") and os.path.exists(script["_scenes"]):
         try:
             mod = load_module(script["_scenes"])
@@ -1148,6 +1228,29 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
     return True
 
 
+# ---------------------------------------------------------------- 字幕样式（v1.0.2）
+_SUB_CACHE = {}
+
+
+def _sub_kw(script):
+    """从已解析的 plan 里取字幕参数（缓存按 script 对象身份，连续帧不重复解析）。
+
+    v1.0.2：字幕样式由 design.json 的 visual.subtitle 决定；参考帧渲染路径
+    （qavmaf._draw_ref_frame）必须调用同一个 filmkit.subtitle_kwargs(plan)，
+    否则两帧字幕参数不同会把同源好片的 VMAF 拉低。
+    """
+    key = id(script)
+    cached = _SUB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    plan = script.get("_style") if isinstance(script.get("_style"), dict) else None
+    kw = K.subtitle_kwargs(plan)
+    if len(_SUB_CACHE) > 8:            # 批量渲染会跨很多 script：别无限长
+        _SUB_CACHE.clear()
+    _SUB_CACHE[key] = kw
+    return kw
+
+
 # ---------------------------------------------------------------- 渲染
 def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True):
     """渲染 [f0, f1) 帧区间到 out_path。纯函数：同一帧号永远画出同一张图。"""
@@ -1173,7 +1276,8 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
             _THEME_CACHE.update(k=id(script), th=th)
         _hold = script.get("sub_max_hold")
         frame = K.draw_subtitle(frame, K.sub_at(scenes, t, _hold), theme=th,
-                                words=K.sub_words_at(scenes, t, _hold))
+                                words=K.sub_words_at(scenes, t, _hold),
+                                **_sub_kw(script))
         fade = 1.0
         if t < 0.5:
             fade *= K.ease_out(t / 0.5)
@@ -1564,8 +1668,15 @@ def _qa_gates(lg, rep, deep, tl, work):
         ns = len(deep.get("sync") or [])
         judged = (deep.get("sync_info") or {}).get("judged")
         sync_note = ("同步查了 %s 条" % judged) if judged is not None else "同步未判（没写 visual_at）"
-        ok9 = nf == 0 and nb == 0 and ns == 0
-        detail9 = "闪烁 %d · 空窗 %d · 同步超差 %d（%s）" % (nf, nb, ns, sync_note)
+        # v1.0.2：门禁要按 **deep.errors** 判，而不是按 flicker 条数。
+        # qa_frames 会把"块内像素有增有减"（文字入场/母题动画/镜头缓推）的候选从
+        # flicker 降级进 warnings（见 FLICKER_AGREE_MIN），此时 flicker 仍非空但已不成问题；
+        # 按条数判会让降级形同虚设（零拷贝首片实测：降级后仍判 fail）。
+        # errors 里同时也包含空窗与同步超差，所以只看 errors 不会漏判。
+        n_err = len([e for e in (deep.get("errors") or []) if e])
+        ok9 = n_err == 0
+        detail9 = "问题 %d 条（闪烁候选 %d 已按符号一致度分档）· 空窗 %d · 同步超差 %d（%s）" % (
+            n_err, nf, nb, ns, sync_note)
         if ok9 and not judged and os.environ.get("QA_REQUIRE_SYNC"):
             # 与 SKILL 的 QA_REQUIRE_SYNC 同义：要求"真的查过"，而不是"没报错"
             lg.fail("G9", "帧级深检（闪烁/空窗/同步超差）",
@@ -1823,7 +1934,8 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
                                            int(round(sec * tl["fps"])))
                 _hold = ref_script.get("sub_max_hold")
                 fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, _hold), theme=th,
-                                     words=K.sub_words_at(tl["scenes"], sec, _hold))
+                                     words=K.sub_words_at(tl["scenes"], sec, _hold),
+                                     **_sub_kw(ref_script))
                 refs.append((k, fr))
             except Exception as e:      # noqa: BLE001
                 print("   [WARN] 参考帧渲染失败:", e)
@@ -1959,7 +2071,8 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
         _hold = script.get("sub_max_hold")
         fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, _hold),
                              theme=_theme_for(script),
-                             words=K.sub_words_at(tl["scenes"], tg, _hold))
+                             words=K.sub_words_at(tl["scenes"], tg, _hold),
+                             **_sub_kw(script))
         p = os.path.join(outdir, "%s_%05.1f.png" % (sid, float(lt)))
         fr.save(p)
         made.append(p)
@@ -2265,12 +2378,50 @@ def _proposal_gate(a):
     return True
 
 
+# ---------------------------------------------------------------- 场景模块定位
+def _builtin_scenes() -> str:
+    """本技能内置的场景绘制模块路径（装成插件后在包内 skills/video-studio/assets/scenes.py）。"""
+    cand = (Path(__file__).resolve().parent.parent / "assets" / "scenes.py")
+    return str(cand) if cand.exists() else ""
+
+
+def _resolve_scenes(scenes_arg, script_path) -> str:
+    """定位场景模块，按优先级：显式 --scenes > 剧本同目录 scenes.py > 技能内置 scenes.py。
+
+    为什么要这条回退链（v1.0.2）：旧流程要求用户把 assets/scenes.py 拷进工作目录，
+    即「提供一份模板代码」——与 v1.0.1「不提供任何模板」直接冲突，而且用户每部片都得
+    重拷一份 98KB 的绘制代码。现在把内置渲染器当**默认能力**：工作目录里没有 scenes.py
+    时直接用它出片；需要改画面再写自己的 scenes.py（显式指定或用同目录约定）。
+    """
+    if scenes_arg:
+        p = Path(scenes_arg).resolve()
+        if p.exists():
+            return str(p)
+        raise SystemExit(
+            "[缺少场景模块] --scenes 指向的 %s 不存在。\n"
+            "  不写 --scenes 时会自动用剧本同目录的 scenes.py 或技能内置渲染器；"
+
+            "只想用内置的就去掉 --scenes。" % p)
+    cand = Path(script_path).resolve().parent / "scenes.py"
+    if cand.exists():
+        return str(cand)
+    builtin = _builtin_scenes()
+    if builtin:
+        return builtin
+    raise SystemExit(
+        "[缺少场景模块] 找不到 %s，也找不到技能内置渲染器（%s）。\n"
+        "  装成插件时内置渲染器应在 <包>/skills/video-studio/assets/scenes.py；"
+
+        "请检查插件包是否完整，或显式传 --scenes 指向你自己的 scenes.py。" % (cand, _builtin_scenes() or "missing"))
+
+
 # ---------------------------------------------------------------- main
 def main():
     _setup_stdio()
     ap = argparse.ArgumentParser(description="video-studio 编排器")
     ap.add_argument("--script", default="film.json")
-    ap.add_argument("--scenes", default="scenes.py")
+    ap.add_argument("--scenes", default="",
+                    help="场景绘制模块（默认依次找：<剧本目录>/scenes.py、本技能内置的 scenes.py）")
     ap.add_argument("--out", default="out/film.mp4")
     ap.add_argument("--work", default="work")
     ap.add_argument("--stage", default="all", choices=STAGES)
@@ -2328,7 +2479,7 @@ def main():
     if engine not in ("pil", "web"):
         raise SystemExit("engine 只能是 pil 或 web，收到 %r" % engine)
     script["_engine"] = engine
-    script["_scenes"] = str(Path(a.scenes).resolve())
+    script["_scenes"] = _resolve_scenes(a.scenes, a.script)
 
     # ---- 门禁账本（v0.6.0）----
     global _LEDGER
@@ -2475,21 +2626,27 @@ def main():
             raise SystemExit("[前置] %s 不是合法 JSON（%s），重新跑 --stage layout" % (tl_p, e)) from e
 
     def load_scenes(strict=True):
-        """加载场景模块：strict=False 时失败只 WARN（qa 缺参考帧也要能跑）。"""
+        """加载场景模块：strict=False 时失败只 WARN（qa 缺参考帧也要能跑）。
+
+        v1.0.2：路径用 main() 里解析好的 script["_scenes"]（显式 --scenes / 剧本同目录 /
+        技能内置三档回退），不能再用原始 a.scenes —— 缺省时它是空串，会变成
+        `load_module("")` 这种 "NoneType has no attribute loader" 的怪错误。
+        """
+        scenes_path = script.get("_scenes") or _resolve_scenes(a.scenes, a.script)
         try:
-            mod = load_module(a.scenes)
+            mod = load_module(scenes_path)
         except Exception as e:                              # noqa: BLE001
             if strict:
                 raise SystemExit("[场景模块加载失败] %s：%s\n"
                                  "  --scenes 要指向定义 draw_frame() 的 scenes.py"
-                                 % (a.scenes, e)) from e
-            print("   [WARN] 场景模块加载失败（%s），跳过场景函数参考帧: %s" % (a.scenes, e))
+                                 % (scenes_path, e)) from e
+            print("   [WARN] 场景模块加载失败（%s），跳过场景函数参考帧: %s" % (scenes_path, e))
             return None
         if not hasattr(mod, "draw_frame"):
             if strict:
                 raise SystemExit("[场景模块错误] %s 没有 draw_frame(scene, t_local, dur, t_global, script, frame)"
-                                 % a.scenes)
-            print("   [WARN] %s 没有 draw_frame()，跳过场景函数参考帧" % a.scenes)
+                                 % scenes_path)
+            print("   [WARN] %s 没有 draw_frame()，跳过场景函数参考帧" % scenes_path)
             return None
         return mod
 

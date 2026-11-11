@@ -1,20 +1,26 @@
 # -*- coding: utf-8 -*-
-"""scenes.py — 场景绘制模板（v0.5.0：画风随内容变化）。
+"""scenes.py — 技能内置的场景渲染器（v1.0.2：默认渲染路径 + 自定义场景的范例）。
+
+⚠ 这**不是**给用户拷走改的模板：v1.0.2 起 render.py 不写 --scenes 时会自动回落到本文件，
+用户工程目录里只需要一个 film.json。想改画面时，在剧本同目录放一个自己的 scenes.py
+（或 --scenes 显式指定），它会被优先发现；本文件就是那份自写场景的**参考实现**：
+10 类构图 / 8 种母题 / 6 种转场 / 35 字段主题 / 版式轮换 / 字幕参数全部从计划里读。
 
 唯一约定：提供 draw_frame(scene, t_local, dur, t_global, script, frame) -> PIL.Image
-  scene   : timeline.json 里的一段（含 id/text/sub/start/end/dur）
+  scene   : timeline.json 里的一段（含 id/text/sub/start/end/dur 与 grammar 注入的
+            scene_type / scene_variant / scene_decor / scene_layout / scene_reason）
   t_local : 本段内已经过秒数
   dur     : 本段总秒数
   t_global: 全片秒数
+  script  : 剧本 dict（含 _style 计划、_total 总时长）
   frame   : 全片帧号（确定性：同一帧号必须画出同一张图）
 
-v0.5.0 画风主题化
-----------------
-剧本里写了 style（或 render.py 把 stylekit 解析出的计划塞进 script["_style"]）时，
-本文件从 stylekit 的主题包里取配色 / 材质 / 字体族 / 版式 / 缓动 / HUD / 镜头缓推，
-8 套风格各长一个样（深蓝科技 / 暖白杂志 / 手绘纸感 / 活力撞色 / 极简黑白 /
-电影青橙 / 暖灰薄荷 / 深黑鎏金）。没写 style 的老项目 = legacy：
-走下面原封不动的 v0.4 绘制函数，逐字节可复现（基线三帧 sha256 由 selfcheck 比对）。
+画风从哪来
+----------
+render.py 把 designkit.design_to_plan() 的计划塞进 script["_style"]（主题 / 视觉语言 /
+版式轮换 / 配乐 / 声线 / 节奏 / 字幕样式）。本文件从这份计划里取配色、材质、字体族、
+版式、缓动、HUD、镜头缓推——**没有任何内置风格表**（v1.0.1 已全部删除）：
+同一份代码画出来是什么样，完全由现场采样并确认过的 design.json 决定。
 
 铁律（决定画质与可复现性）：
   1. 不许用 random / time.time()；要随机用 K.hash2 / K.hash3 / vnoise(seed)

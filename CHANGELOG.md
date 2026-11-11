@@ -6,6 +6,78 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.0.2 — 审查修复：把"文档写着支持、实际不生效"的一批缺陷修掉；零拷贝出片；片内/片间双重反重复（2026-11-11）
+
+> 本轮是**全项目审查**（文档 / 脚本 / 可用性 / 成本四个方向并行实测）后的修复版。
+> 审查结论很不客气：v1.0.1 把"模板"删了，但**模板时代的硬约束和死路径还留着**——
+> 最典型的是"从零到第一部片"这一步在文档里 100% 卡死，而三条公开命令里有两条直接崩。
+> 本版不新增"功能好看"，只做四件事：**让用户说的话真的生效 / 让首片真的能跑出来 /
+> 让片子之间和片子内部不再大面积重复 / 让删掉的能力明确失败而不是假通过**。
+
+### P0：从零到第一部片（门槛）
+
+| 问题（实测） | 修法 |
+|---|---|
+| **quickstart 照抄必崩**：SKILL §1 让人 `cp assets/film.json + scenes.py` 当模板，拷贝清单缺 `designkit/previewkit/grammar/propose` → `selfcheck` 41 PASS / 8 FAIL（全部 `No module named designkit`）、`render --stage all` 退出 1 | **零拷贝主路径**：脚本直接跑技能目录里的，`render --stage all` 不再需要工作目录里有脚本或 `scenes.py`（`--scenes` 缺省时依次找 `<剧本目录>/scenes.py` → 技能内置 `assets/scenes.py`）。工程目录里只剩 `film.json` + `work/` + `out/` |
+| **带约束的 brief 约一半概率直接失败**：配色候选去重按 24° 分桶，而 must_have「深蓝」把色相窗口压到 52°，n=3 需要 3 个不同桶 → 「深蓝」8/20 成功、「暖纸色+女声」0/20 | 去重改为**色相距离 + 结构差异**分档（<6° 必换；<12° 时要求 ≥3 个维度不同）；失败信息记录真实原因并给出 `--n 2` / 放宽 brief / `--seed` 三条退路。实测 6 种常见 brief × 10 次 = **0 失败** |
+
+### P0：公开命令必崩（"文档支持"变"真的能跑"）
+
+| 问题 | 修法 |
+|---|---|
+| `render.py --stage style` 100% `KeyError: "style"`（`_print_style` 读 `m["style"]`，而 `design_to_plan` 已删该键；`--stage all` 不调用它，所以自检/CI 全绿发现不了） | 按参数化配乐的真实身份打印（调式/BPM/调性/mood），并顺带打印字幕样式与版式轮换 |
+| `render.py --stage cues` 单跑 100% 崩（未挂 `_style` 就把 script 交给 `scenes.cues()`，钩子回落解析设计并 raise） | `st_cues` 调钩子前幂等解析一次 `resolve_style(script, work)` |
+| `stylekit.py --list/--show` `NameError: ALL_STYLE_IDS`；`--lint` 空表 `exit 0`（**假通过**）；`style="auto"` 调不存在的 `pick_style` | CLI 三个动作改成"明确说明能力已随模板删除 + exit 2"；`resolve_script_style` 统一 raise 并给两步迁移指引；删掉 8.6 KB 死代码 |
+| `qavmaf.py --selftest` rc=1（合成剧本无设计） | selftest 用 `designkit.sample_designs(seed=1)` **现场造设计**（不引入写死主题），11/11 PASS |
+| `grammar.py --help` 被当文件名（`FileNotFoundError`） | 加 argparse，`--help` exit 0，原有用法输出逐字不变 |
+| `filmcheck.py` 对 `style` 仍读已清空的风格表，报「找不到 stylekit.py」误导 WARN | 改成 inert 键：接受但明确提示"v1.0.1 起不生效，外观来自 work/design.json" |
+
+### 反重复（用户原则 5）：片内 + 片间两道
+
+| 机制 | 说明 |
+|---|---|
+| **片内版式轮换** `visual.layout_cycle`（新） | 以前 `visual.layout` 是单值 → 全片 8 屏同一骨架。现在按**章节**轮换（同章内稳定、换章才换），`designkit` 默认派生 2–3 种；`storyboard.json` 每段 `layout` 可审计。实测：4 段片子 `center-stack → split-right → left-stack → center-stack` |
+| **字幕样式进设计** `visual.subtitle`（新） | 以前字号/位置/背板/圆角是 `filmkit` 的模块常量，**任何两条片子的字幕带一模一样**。现在 `size / y / align / plate_alpha / radius / family / color / max_lines` 全部可写（缺省 = 过去的固定值，老 design.json 逐像素不变） |
+| **片间去重台账**（新） | `propose.py --confirm` 把已确认设计记进 `~/.dsh/video-studio/design-ledger.json`；下次提案读台账，与最近交付的设计差距 <2 维时自动换 nonce 重采并**明说**。`--no-ledger` 关闭、`--show-ledger` 查看、`VIDEO_STUDIO_LEDGER` 重定向路径 |
+| 修掉"配乐"多样性轴恒失效 | `_AXES` 读已删除的 `audio.music.style` → 配乐维恒 None。改成 `调式/BPM档/情绪` 复合键 |
+
+### 其他"写了不生效"修复
+
+- **`design.audio.*` 现在真的落进渲染**：`music.gain_db / duck_db`、`sfx.enabled / density / gain_db` 以前只被校验、从不被读（实测 `sfx.enabled=false` 仍出 8 条音效）。现在由 `design_to_plan` 产出 `audio_overrides`，`render` 填进 script 的缺省位。优先级：**film.json 显式 > design > 内置默认**。
+- **`filmkit.resolve_theme / style_plan` 不再静默回落**：以前 `except Exception` 后返回一份写死的 v0.4 深蓝橙主题 + 120BPM/Dm（模板残留 + 吞错）。现在明确 raise 并给迁移指引，`_FALLBACK_THEME` 整块删除。
+- **G11 VMAF 误杀好片**：参考帧渲染路径没传设计字幕参数（主路径传了），同源两帧字幕字号不同 → 实测 VMAF **91.33 fail**；参数打通后 **97.20 pass**。共享实现 `filmkit.subtitle_kwargs(plan)`，两条路径同一份。
+- **G9 闪烁误杀文字动画**：新增"块内符号一致度"判据（真闪白整块同向 0.75–1.0；文字逐字入场/母题动画有增有减 0.42）。低于阈值**降级为 warning 并保留全部数值**，不静默放过；G9 门禁改为按 `deep.errors` 判而不是按 flicker 条数（否则降级形同虚设）。实测零拷贝首片 t=5.867s 的标题入场不再 fail。
+- **`--list-palettes` 直接 KeyError**（v1.0.1 改成连续空间后 CLI 仍读旧键名）；`--list-palettes` 现在打印"连续空间采样点"，并说明**这不是可选清单**。
+- **`filmcheck` 的 style 分支**不再误报 `stylekit.py` 缺失。
+
+### 文档与契约
+
+- `schemas/design.schema.json`：新增 `visual.subtitle`（8 字段）与 `visual.layout_cycle`；`size/fps` 标注"本版仅支持 16:9，与 film.json video 冲突时报错"。
+- `schemas/film.schema.json`：删掉 8 个已废弃的 style 枚举值，只留 `type: string` + 弃用说明。
+- `skills/video-studio/references/*.md`、`SKILL.md`、`README.md`、`package.json`、`marketplace-entry.json`：清除"模板/内置风格/拷 assets"叙事，改为"零拷贝 + 现场生成"；同步 selfcheck 条数与门禁说明。
+- **删除 `docs/` 里的 v0.5/v0.9 快照图**（6 张风格对比图 + `demo-results.json`）：它们是“8 套内置风格”时代的产物，
+  与 v1.0.1「不提供任何模板」直接冲突，且已经**不能复现**（那套选型逻辑已删除）。README 不再用海报证明效果，
+  改成「命令 + 你机器上的实测输出」；历史图片仍可从 git 历史取出（`git log -- docs/styles`）。
+- `assets/film.json` 明确定位为**测试夹具**（删除已废弃的 `style` 字段，注释说明它不是给用户抄的模板）；金帧基线随之重录（像素 3/3 一致）。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `selfcheck.py` | **66 PASS / 0 FAIL / 0 SKIP**（v1.0.1 是 60/0/1；新增 61–66 六条护栏：字幕样式、版式轮换、约束采样鲁棒性、已删除 API fail-closed、design.audio 贯通、片间去重台账） |
+| `tools/ci_check.py` | **12/12** |
+| `tools/silhouette_qa.py`（G13） | 重写为**零模板时代**版本（v2.0.0）：`--designs N` 现场采样设计 → 渲染 → 两两比结构；新增 `--selftest` 3/3 PASS（确定性 / 正控制 / 负控制）。`--designs 4` 实测 6/6 对可区分 |
+| `qavmaf.py --selftest` | 11/11 PASS |
+| `qa_frames.py --selftest` | 22/22 PASS |
+| 零拷贝端到端（空目录只有 film.json） | `propose (2.3s) → confirm (0.1s) → render --stage all` 成功出片；G11 VMAF 97.08 pass、G12 ASR 召回 0.885 pass |
+| 同一 brief 连拍两次 | 配色色相 / 母题 / 版式 / 字幕字号 / BPM 全部不同（受配色约束时色相仍落在约束窗口内） |
+
+### 已知边界（如实说）
+
+- **竖屏（9:16）仍然不支持**：安全区与版式按横屏像素写死，`film.json video` 写竖屏会明确报错（不是静默裁切）。
+- **片间去重是"软保证"**：台账只比对离散维度（配色/母题/转场/缓动/编号/配乐/声线/情绪/版式/调式），连续量（色相 ±、字号 ±）的细微差别不算；重采 4 轮仍近时只告警不阻断。
+- **`--engine web` 仍需自己的页面**：PIL 路线已零拷贝；web 路线的页面逻辑天生在页面脚本里，不会内置。
+
 ## 1.0.1 — 清除全部模板：仓库只提供生成视频的技术，不提供任何模板（2026-11-11）
 
 > 定位是用户拍板的：**本仓库提供"生成视频的技术支持"，协助用户用专业的方式生成视频，不提供任何模板**。

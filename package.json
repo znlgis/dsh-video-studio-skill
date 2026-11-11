@@ -1,7 +1,7 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "1.0.1",
-  "description": "Video Studio skill plugin for DeepSeek Harness: style-pack driven code-generated Chinese videos — one style id decides palette/typography/music style/voice persona/pacing, measured TTS timeline with word-level boundaries, deterministic PIL/browser rendering (16:9 landscape, 720p/1080p), programmatic SFX and score, cue-driven sound sync, ffmpeg encoding, sample-level mixing, batch production and multi-layer QA gates (preflight, full-film VMAF/SSIM, ASR readback).",
+  "version": "1.0.2",
+  "description": "Video Studio skill plugin for DeepSeek Harness: proposal-first, zero-template code-generated Chinese videos — run the skill's scripts in place (no copying) and keep only a film.json in your project; each brief is sampled into several distinct design candidates (no built-in style packs) and frozen into a design DSL after user confirmation; visual.subtitle / visual.layout_cycle make caption style and per-chapter layout adjustable; a cross-film design ledger keeps delivered videos from repeating; measured TTS timeline, deterministic PIL/browser rendering, programmatic SFX and score, cue-driven sound sync, sample-level mixing, ffmpeg encoding, batch production and multi-layer QA gates (preflight, full-film VMAF/SSIM, ASR readback).",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -22,18 +22,11 @@
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
-    "docs/demo-pil-sheet.png",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md",
     "skills",
     "!skills/**/__pycache__",
     "!skills/**/*.pyc",
-    "docs/styles/sheet-8-styles.png",
-    "docs/styles/sheet-before-after.png",
-    "docs/styles/sheet-ai.png",
-    "docs/styles/sheet-craft.png",
-    "docs/styles/sheet-night.png",
-    "docs/styles/demo-results.json",
     "schemas",
     "tools/estimate.py",
     "tools/ci_check.py",
@@ -64,7 +57,13 @@
     "score",
     "字幕",
     "视频",
-    "配音"
+    "配音",
+    "design-dsl",
+    "proposal-first",
+    "no-template",
+    "subtitles",
+    "layout",
+    "subtitles-style"
   ],
   "repository": {
     "type": "git",

@@ -635,9 +635,16 @@ def _check_web_page(script, engine, errors, warnings, checks):
     entry = _web_entry(script)
     if not os.path.isfile(entry):
         tpl = _skill_web_template()
-        hint = ("把技能自带的模板页整目录拷到 %s（模板：%s），或写 film.json 的 web.entry "
-                "指向你自己的页面" % (os.path.dirname(entry), tpl)) if tpl else \
-            "把 <SKILL_DIR>/assets/web 拷到项目 web/，或写 film.json 的 web.entry"
+        # v1.0.2 wording: assets/web is a demo page for smoke-testing the web path, not a template.
+        # This skill ships no templates: web-path films need the user own page (PIL path is zero-copy).
+        if tpl:
+            hint = ("（web 引擎需要**你自己的页面**：把技能自带的**示例页**拷到 %s 只能跑通链路，"
+                    "它只有 3 段占位场景、不是给你改字就出片的模板；正片请写自己的页面，"
+                    "或在 film.json 写 web.entry 指向它。示例页：%s）"
+                    % (os.path.dirname(entry), tpl))
+        else:
+            hint = ("写 film.json 的 web.entry 指向你自己的页面；或改用 PIL 路线"
+                    "（--engine pil，不需要任何页面，零拷贝即可出片）")
         _err(errors, "web_page_missing", "engine=web 但入口页不存在：%s（%s）"
              % (entry, hint), "web_page")
         _check(checks, "web_page", "fail", entry)

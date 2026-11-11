@@ -81,6 +81,10 @@ FLICKER_ISO = 1.5       # 孤立性比值：当前帧异常度 >= 1.5 x 前后�
 # "回到原位"闸门：|F[t+1]-F[t-1]| 必须小于 1.6 x 中间帧偏离量。
 # 单帧闪烁 ≈ 0（前后几乎相同）；加速运动 ≈ 2 以上（前后差更多）→ 排除。
 FLICKER_RETURN_RATIO = 1.6
+# 符号一致度下限：块内像素"同向"变化的比例。真闪白/闪黑整块同向（0.75–1.0）；
+# 文字入场 / 母题动画 / 镜头缓推是有增有减的纹理变化（实测 0.42）。
+# 低于此值不判 error（降级 warning 供人复核）——v1.0.2 修掉零拷贝首片的 G9 误杀。
+FLICKER_AGREE_MIN = 0.60
 # 与已登记视觉事件（闪白/震屏/冲击环）重合多久内视为"设计好的重击"，不计 error
 FLICKER_EXPLAIN_WIN = 0.2
 # 转化为"可解释设计事件"的 event.kind（小写匹配；cues.json §4.2 的 events 由页面导出）
@@ -366,11 +370,16 @@ def sample_frames(path, w=160, h=90, from_s=0.0, to_s=None) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
-def _block_max(diff, block) -> tuple[float, tuple[int, int, int, int], float]:
-    """把 (h,w) 差异图按 block×block 分块取均值最大，返回 (最大均值, bbox, 该块中值)。
+def _block_max(diff, block, signed=None) -> tuple:
+    """把 (h,w) 差异图按 block×block 分块取均值最大，返回 (最大均值, bbox, 该块中值, 符号一致度)。
 
     中值是复核线索：整块一起变亮（真单帧事件）时中值也高；只有小块元素在动时
     均值被少数像素拉高、中值仍接近 0（见 references/frame-qa.md 的 16.933 s 案例）。
+
+    v1.0.2 加符号一致度（signed 传带符号的二阶差分时才算）：整块**同向**变亮/变暗
+    = 真闪白/闪黑；文字逐字入场、母题动画、镜头缓推产生的只是**有增有减**的纹理变化，
+    符号一致度低。实测（v1.0.2 零拷贝首片）：t=5.867s 被误报的块 score 51.5 / median 44.5，
+    但符号一致度只有 0.42；同一位置人为注入 +50 灰闪白后一致度 0.75。
     """
     h, w = diff.shape
     b = max(1, int(block))
@@ -387,7 +396,14 @@ def _block_max(diff, block) -> tuple[float, tuple[int, int, int, int], float]:
     bb = (x0, y0, x1, y1)
     blk = diff[y0:y1, x0:x1]
     med = float(np.median(blk)) if blk.size else 0.0
-    return float(means[r, c]), bb, med
+    agree = None
+    if isinstance(signed, np.ndarray) and signed.shape == diff.shape:
+        sblk = signed[y0:y1, x0:x1].astype(np.float64)
+        if sblk.size:
+            m = float(sblk.mean())
+            # 与"块内平均方向"同向的像素占比：整块同向变亮 ≈ 1.0，纹理/运动互有增减 ≈ 0.5
+            agree = float(np.mean(np.sign(sblk) == np.sign(m))) if m != 0 else 0.0
+    return float(means[r, c]), bb, med, agree
 
 
 def _block_peak(diff, block) -> float:
@@ -434,10 +450,11 @@ def _scan_full(path, w=SAMPLE_W, h=SAMPLE_H, block=FLICKER_BLOCK, fps=None):
         if len(history) > lag:
             history.pop(0)
         if prev2 is not None:
-            diff = np.abs(prev1 - (prev2 + fr) * 0.5) * 255.0
-            s, bb, med = _block_max(diff, block)
+            signed = (prev1 - (prev2 + fr) * 0.5) * 255.0
+            diff = np.abs(signed)
+            s, bb, med, agree = _block_max(diff, block, signed=signed)
             scores.append(float(s))
-            boxes.append((bb, med))
+            boxes.append((bb, med, agree))
             # 同一个块上算"前后两帧彼此差多少"，用于区分闪烁与加速运动
             if bb:
                 x0, y0, x1, y1 = bb
@@ -502,7 +519,9 @@ def _flicker_from_scores(scores, boxes, fps, thresh, returns=None, suppressed=No
             continue
         if s < FLICKER_ISO * max(p, q):
             continue
-        bb, med = boxes[t - 1] if 0 <= t - 1 < len(boxes) else ((0, 0, 0, 0), 0.0)
+        box = boxes[t - 1] if 0 <= t - 1 < len(boxes) else ((0, 0, 0, 0), 0.0, None)
+        bb, med = box[0], box[1]
+        agree = box[2] if len(box) > 2 else None
         r = None
         if returns is not None and t < len(returns):
             r = float(returns[t])
@@ -522,6 +541,7 @@ def _flicker_from_scores(scores, boxes, fps, thresh, returns=None, suppressed=No
                     "bbox": [int(v) for v in bb],
                     "ratio": round(s / max(p, q, 1e-9), 2),
                     "median": round(float(med), 2),
+                    **({"agree": round(float(agree), 2)} if agree is not None else {}),
                     **({"return": round(r, 2)} if r is not None and math.isfinite(r) else {})})
     return out
 
@@ -1079,13 +1099,28 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
         fl["expected"] = any(abs(fl["t"] - te) <= FLICKER_EXPLAIN_WIN for te in explained_times)
 
     errors = []
+    textured = []
     for fl in flicker:
         if fl.get("expected"):
             continue
         bb = fl.get("bbox") or [0, 0, 0, 0]
-        errors.append("单帧闪烁 t=%.3fs score=%.1f（孤立比值 %.2f，块中值 %.2f，异常块 %d,%d–%d,%d，阈值 %.1f）"
-                      % (fl["t"], fl["score"], fl.get("ratio", 0.0), fl.get("median", 0.0),
-                         bb[0], bb[1], bb[2], bb[3], FLICKER_THRESH))
+        msg = ("t=%.3fs score=%.1f（孤立比值 %.2f，块中值 %.2f，异常块 %d,%d–%d,%d，阈值 %.1f）"
+               % (fl["t"], fl["score"], fl.get("ratio", 0.0), fl.get("median", 0.0),
+                  bb[0], bb[1], bb[2], bb[3], FLICKER_THRESH))
+        # v1.0.2：符号一致度 = 块内像素是否**同向**变亮/变暗。
+        # 真闪白/闪黑整块同向（实测 0.75–1.0）；文字逐字入场、母题动画、镜头缓推
+        # 是"有增有减"的纹理变化（实测 0.42）。后者以前会被判成闪烁，让新用户首片
+        # 就 fail 在 G9（零拷贝自测实测：t=5.867s 标题逐字入场被误判）。
+        # 处理：低于阈值不静默放过，降级为 warning 并保留全部数值，交给人工复核。
+        fl["sign_agree"] = fl.get("agree")
+        if fl.get("agree") is not None and float(fl["agree"]) < FLICKER_AGREE_MIN:
+            textured.append(msg + ("，符号一致度 %.2f < %.2f → 判为纹理/动画扰动"
+                                   % (float(fl["agree"]), FLICKER_AGREE_MIN)))
+            continue
+        errors.append("单帧闪烁 " + msg)
+    for msg in textured:
+        warnings.append("疑似非闪烁（块内像素有增有减，像是文字/母题动画）：" + msg
+                        + "；若画面确有单帧闪白，调低 FLICKER_AGREE_MIN 或登记设计事件")
     explained = sum(1 for fl in flicker if fl.get("expected"))
     if explained:
         warnings.append("已排除 %d 处与已登记视觉事件（闪白/震屏/冲击环）重合的单帧闪烁；"

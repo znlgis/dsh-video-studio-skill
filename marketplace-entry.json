@@ -20,14 +20,18 @@
     "字幕",
     "配音",
     "宣传片",
-    "style packs",
-    "风格包",
-    "voice persona",
-    "配乐风格"
+    "design DSL",
+    "proposal-first",
+    "zero-template",
+    "设计 DSL",
+    "提案优先",
+    "零模板",
+    "字幕样式",
+    "版式轮换"
   ],
   "description": {
-    "en": "Code-generated Chinese video skill plugin: script, measured TTS timeline, cue-driven programmatic SFX and score, deterministic PIL/browser frame rendering, ffmpeg encoding, sample-level mixing, and four-layer QA gates (container / signal / temporal / page). v0.5 style packs make each film look and sound different; v0.7 content fingerprints vary harmony/motif/drums and SFX seeds per film; v0.7.1 voice-first mixing guarantees narration clarity (12 dB SNR guard). v0.8 word-level TTS timestamps, configurable frame size/fps, batch production, and three new blocking gates (render-time resource preflight, full-film VMAF, ASR read-back). v0.8.1 is a full-project audit: 60+ fixes to gates that printed [FAIL] but exited 0, gates that computed with the wrong subtitle line-breaking, and config keys nobody read.",
-    "zh": "中文视频生成技能插件：写剧本 → 实测时长排轴 → 提示点驱动配乐与音效 → PIL 或浏览器逐帧渲染 → ffmpeg 编码 → 采样级混音 → 四层质检（容器 / 信号 / 时间 / 页面）。可做宣传片、报告转视频、配音配字幕。 v0.5 风格包让每部片的画风、配乐、旁白随内容变化；v0.7 内容指纹参与配乐结构与音效种子，跨片不再雷同；v0.7.1 旁白优先混音（12 dB SNR 兜底）保证台词清晰。v0.8 词级时间戳、画幅/帧率参数化、批量生产，以及三道新阻断门禁（渲前资源预检 / 全片 VMAF / ASR 回读）。v0.8.1 是全项目深审：修掉 60+ 处「stdout 打了 [FAIL] 却 exit 0」「门禁自己按错误口径算」「配置写了没人读」这类看着没问题、其实没在查的缺陷。"
+    "en": "Code-generated Chinese video skill plugin, proposal-first and zero-template. You keep only a film.json in your project and run the skill scripts in place (no copying). Each brief is sampled into several distinct design candidates (no built-in style packs); the user confirms one and it is frozen into a design DSL. visual.subtitle controls caption style and visual.layout_cycle rotates layouts per chapter, while a cross-film design ledger keeps delivered videos from repeating. Pipeline: script, measured TTS timeline, cue-driven programmatic SFX and score, deterministic PIL/browser frame rendering, ffmpeg encoding, sample-level mixing, and multi-layer QA gates (preflight / full-film VMAF+SSIM / ASR read-back). v1.0.2 adds zero-copy rendering, custom caption style, per-chapter layout rotation and cross-film dedup; 67 self-check assertions and 12 repo checks are green.",
+    "zh": "中文视频生成技能插件：提案优先、零模板。工程目录里只需要一个 film.json，技能脚本留在技能目录里直接跑，不用拷贝任何脚本或模板。每个 brief 现场采样出多个互不相同的设计方案（没有内置风格表），用户确认后才冻结成设计 DSL。design 里的 visual.subtitle 控制字幕样式、visual.layout_cycle 按章节轮换版式；片间去重台账记录交付过的设计，让不同片不重复。管线：写剧本 → 实测 TTS 时长排轴 → 提示点驱动配乐与音效 → PIL/浏览器逐帧渲染 → ffmpeg 编码 → 采样级混音 → 多层质检（渲前预检 / 全片 VMAF+SSIM / ASR 回读）。v1.0.2 带来零拷贝出片、可定制字幕样式、片内版式轮换与片间去重；自检 67 条、仓库体检 12 项全绿。"
   },
   "install": "dsh plugin --profile desktop add @dsh-gis/dsh-video-studio-skill",
   "added": "2026-11-06"

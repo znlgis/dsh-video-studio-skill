@@ -592,205 +592,31 @@ def _warn_auto_style_once():
 
 
 def resolve_script_style(script):
-    """解析整份剧本的最终风格计划（纯函数、确定性、可直接 json.dump）。
+    """已删除：v1.0.1 起本技能没有内置风格表，这里只剩「明确报错 + 迁移指引」。
 
-    优先级（从高到低）：
-      1. script["style"]                全片锁定（不是 "auto" 就生效）
-      2. script["visual"]["theme"]      等价于锁 style（主题与风格 1:1）
-      3. 自动：关键词 + 指纹
-    配乐 BPM / 调性 / 情绪、旁白声线映射、节奏都能被 film.json 单独覆盖。
+    历史：v1.0.1 之前本函数按 8 套内置 STYLES 解析出一份风格计划
+    （主题 + 配乐 + 声线 + 节奏 + 版式轮换）。模板删掉后它已经没有可解析的对象——
+    但 v1.0.1 只删了表，没删这条函数，于是留下三个死分支：
+    `pick_style` / `STYLES[sid]` / `THEMES[...]`，任何一个被调用都是 NameError/KeyError，
+    连 `style="auto"` 都直接崩（v1.0.2 实测）。
+
+    为什么保留函数而不是删掉：`filmkit.style_plan` / `scenes.py` / `preflight` /
+    `qavmaf` 里还有「拿不到 plan 时回退到这里」的调用点。保留一个明确报错的入口，
+    那些点会得到一句能照着做的指引；删掉函数只会得到 AttributeError。
+    真正的计划只有两个来源：designkit.design_to_plan（work/design.json）或
+    render.resolve_style（已解析好的 script["_style"]）。
     """
-    fp = fingerprint(script)
-    vis = script.get("visual") if isinstance(script.get("visual"), dict) else {}
-    mus = script.get("music") if isinstance(script.get("music"), dict) else {}
-    voce = script.get("voice") if isinstance(script.get("voice"), dict) else {}
-
-    has_style_field = "style" in script
-    raw = script.get("style")
-    raw_s = str(raw).strip().lower() if raw is not None else ""
-    if not has_style_field and not vis.get("theme") and not mus.get("style"):
-        # v1.0 / D3：**legacy 路径已移除**。以前"不写 style"会静默落到 v0.4 的固定外观
-        # （同一套皮肤 + 120BPM/Dm），这是同质化的另一半根因；D3 决定不再兼容它。
-        # 报错必须给出可执行的下一步，否则用户只知道"跑不动"。
-        raise ValueError(
-            '这个剧本没有指定设计：v1.0 起「不写 style 就走老外观」的兼容路径已移除。\n'
-            '  正确做法（两步）：\n'
-            '    1) python propose.py --brief "题材/要求" --script <film.json> --n 3\n'
-            '    2) python propose.py --confirm --candidate A      # 冻结成 work/design.json\n'
-            '  想以出厂预设为起点：python propose.py --preset tech-deep --script <film.json>\n'
-            '  （没有预设：v1.0.1 起不提供任何模板）')
-    elif raw_s in ("", "auto", "default"):
-        if vis.get("theme"):
-            sid = str(vis["theme"])
-            source = "visual.theme"
-            reason = ["film.json visual.theme 指定"]
-        else:
-            # v1.0 / D3：**自动选型已停用**。
-            # 这一条是"每部片都长一个样"的机制性根因（选出来的身份又确定又不透明），
-            # 但它还有大量老调用方（render._plan_from_design 之外的兼容路径、scorekit、
-            # check 脚本）在跑，所以这里先降级为"显式警告 + 继续工作"，而不是直接抛错——
-            # 直接抛会让 100+ 个依赖点同时变红，反而没人敢继续迁移。
-            # 真正的主路径是 work/design.json（由 propose.py --confirm 产出）。
-            _warn_auto_style_once()
-            sid, reason = pick_style(script)
-            source = "auto"
-    else:
-        sid = str(raw).strip()
-        if sid == LEGACY_STYLE:
-            # 显式写 "legacy" 也是同一个坑：它只是"不写设计"的另一种写法。
-            # 两套语义必须一起消失，否则用户会以为"显式写 legacy 还能用"。
-            raise ValueError(
-                'style="legacy" 已移除（v1.0 / D3）：它等价于"不要设计"，而 v1.0 起设计是必填的。\n'
-                '  改用：python propose.py --brief "题材/要求" --script <film.json>，再 --confirm 选一个。')
-        source = "explicit"
-        reason = ["film.json style 指定"]
-    get(sid)                       # 未知 id 在这里就炸，不要等到渲染 300 帧后
-    pack = STYLES[sid]
-
-    # ---- 配乐：风格 / BPM / 调性 / 情绪 ----
-    music_style = str(mus.get("style") or "").strip().lower()
-    if music_style in ("", "auto", "default"):
-        music_style = sid if not is_legacy(sid) else LEGACY_STYLE
-    mpack = pack["music"]
-    ladder = tuple(mpack["bpm_ladder"])
-    bpm_raw = mus.get("bpm", script.get("bpm"))
-    if isinstance(bpm_raw, str) and bpm_raw.strip().lower() == "auto":
-        bpm_raw = "auto"
-    if bpm_raw in (None, "", "auto"):
-        if is_legacy(sid):
-            bpm, bpm_source = 120.0, "legacy"          # v0.4 的缺省值，必须是 120
-        else:
-            bpm = float(_pick_from_pool(ladder, fp["tempo"], salt="bpm:" + sid))
-            bpm_source = "style_ladder"
-    else:
-        bpm, bpm_source = float(bpm_raw), "explicit"
-
-    key_raw = mus.get("key")
-    if key_raw in (None, "", "auto"):
-        if is_legacy(sid):
-            key, key_source = "Dm", "legacy"           # v0.4 的缺省值，必须是 Dm
-        else:
-            key = _pick_from_pool(mpack["keys"], fp["tempo"], salt="key:" + sid) or "Dm"
-            key_source = "style_pool"
-    else:
-        key, key_source = str(key_raw), "explicit"
-
-    mood = str(mus.get("mood") or "").strip().lower()
-    if mood in ("", "auto", "default"):
-        mood, mood_source = str(mpack.get("mood") or "steady"), "style"
-    else:
-        mood_source = "explicit"
-
-    seed_raw = mus.get("seed", script.get("seed", 7))
-    try:
-        seed = abs(int(seed_raw if seed_raw is not None else 7))
-    except (TypeError, ValueError):
-        seed = 7
-    seed_from_content = _as_bool(mus.get("seed_from_content"), default=(not is_legacy(sid)))
-    if seed_from_content:
-        seed_effective = (seed * 1000003 + int(fp["full"], 16)) % (2 ** 31 - 1)
-    else:
-        seed_effective = seed
-
-    # ---- 旁白：声线映射 + 策略 ----
-    # v1.0 / D3：voicekit 已删掉 persona 身份表，只认 edge voice id。
-    # 而 STYLES 表里存的仍是老 persona 名（young_male 之类）——所以这里必须翻译一次。
-    # 不翻译的话，走到 voicekit 就是"style_plan.voice.map['hook'] 不是 edge voice id"。
-    style_voice = pack["voice"]
-    voice_map = {}
-    if not is_legacy(sid):
-        for kind in ("hook", "body", "quote", "outro"):
-            dv = style_voice.get(kind)
-            if dv:
-                voice_map[kind] = _persona_to_voice_id(dv)
-    explicit_map = voce.get("map") if isinstance(voce.get("map"), dict) else {}
-    voice_map.update({str(k): str(v) for k, v in explicit_map.items() if v})
-    policy = {
-        "auto": _as_bool(voce.get("auto"), default=(not is_legacy(sid))),
-        "jitter": float(voce.get("jitter", 0.0 if is_legacy(sid) else 0.35)),
-        "max_distinct": int(voce.get("max_distinct", 2 if is_legacy(sid) else 3)),
-        "rate_range": (-15, 12),
-        "pitch_range": (-8, 8),
-        "cps_band": (3.6, 5.6),
-    }
-    if isinstance(voce.get("rate_range"), (list, tuple)) and len(voce["rate_range"]) == 2:
-        policy["rate_range"] = (int(voce["rate_range"][0]), int(voce["rate_range"][1]))
-    if isinstance(voce.get("cps_band"), (list, tuple)) and len(voce["cps_band"]) == 2:
-        policy["cps_band"] = (float(voce["cps_band"][0]), float(voce["cps_band"][1]))
-
-    # ---- 节奏 ----
-    sp = pack["pacing"]
-    pacing = {
-        "lead": float(script.get("lead", sp["lead"])),
-        "tail": float(script.get("tail", sp["tail"])),
-        "min_dur": float(script.get("min_dur", sp["min_dur"])),
-        "hold": float(script.get("hold", sp["hold"])),
-        "item_stagger": float(THEMES[pack["theme"]]["item_stagger"]),
-    }
-    explicit_pace = script.get("pacing") if isinstance(script.get("pacing"), dict) else {}
-    for k in ("lead", "tail", "min_dur", "hold", "item_stagger"):
-        if explicit_pace.get(k) is not None:
-            pacing[k] = float(explicit_pace[k])
-
-    # ---- 版式轮换：按 chapter 轮换骨架（同一章节内不变，避免每句都跳） ----
-    layouts = list(pack["layouts"]) or ["left-stack"]
-    chapters = []
-    for ln in script.get("lines") or []:
-        ch = str(ln.get("chapter") or "")
-        if ch not in chapters:
-            chapters.append(ch)
-    explicit_layout = str(vis.get("layout") or "").strip()
-    if explicit_layout:
-        layout(explicit_layout)
-        chap_layout = {ch: explicit_layout for ch in chapters}
-    else:
-        chap_layout = {ch: layouts[i % len(layouts)] for i, ch in enumerate(chapters)}
-
-    # theme_overrides 走带校验的合并（颜色支持 "#rrggbb"，非法值在这里就报错，
-    # 不要等到 scenes.py 渲到第 300 帧才 int("#") 崩——见 apply_theme_overrides）
-    theme = apply_theme_overrides(THEMES[pack["theme"]], vis.get("theme_overrides"))
-    # visual.layout 是"显式换整片版式"：旧的实现只把它写进 chapter_layout，而
-    # PIL 路线渲染读的是 theme["layout"]、web 路线读 layout_default —— 两条路线都不看
-    # chapter_layout，于是这条文档化的覆盖等于没写（v0.8 深审实测：visual.layout=
-    # split-right 的帧与默认帧 sha256 完全相同）。这里补写 theme["layout"] 与 layout_default，
-    # 让两条路线都跟着走；theme_overrides 更具体，它显式写了 layout 时以它为准。
-    if explicit_layout and "layout" not in (vis.get("theme_overrides") or {}):
-        theme["layout"] = explicit_layout
-    if explicit_layout:
-        chap_layout = {ch: str(theme["layout"]) for ch in chapters}
-
-    return {
-        "version": 1,
-        "generator": "stylekit 0.5.0",
-        "style": sid,
-        "style_name": pack["name"],
-        "style_source": source,
-        "style_reason": list(reason),
-        "legacy": bool(is_legacy(sid)),
-        "fingerprint": fp,
-        "theme_id": pack["theme"],
-        "theme_label": THEMES[pack["theme"]]["label"],
-        # 主题字典随计划一起返回：scenes.py 的 _scene_theme 优先用它（含 theme_overrides），
-        # 也方便 render.py 直接传给 draw_subtitle/write_ass，不必再按 id 查一次。
-        "theme": theme,
-        "layout_default": str(theme["layout"]) if explicit_layout else layouts[0],
-        "chapter_layout": chap_layout,
-        "music": {
-            "style": music_style,
-            "bpm": bpm, "bpm_source": bpm_source,
-            "key": key, "key_source": key_source,
-            "mood": mood, "mood_source": mood_source,
-            "seed": int(seed), "seed_effective": int(seed_effective),
-            "seed_from_content": bool(seed_from_content),
-        },
-        "voice": {
-            "map": voice_map,
-            "default": voce.get("default"),
-            "policy": policy,
-        },
-        "pacing": pacing,
-    }
-
+    raw = script.get("style") if isinstance(script, dict) else None
+    extra = ("（收到 style=%r）" % (raw,)) if raw not in (None, "") else ""
+    raise ValueError(
+        "这个剧本没有可解析的设计%s：v1.0.1 起本技能不提供任何内置风格/模板，\n"
+        "  「写 style 走内置外观」与「不写 style 走老外观」两条路都已删除。\n"
+        "  正确做法（两步）：\n"
+        "    1) python propose.py --brief \"题材/要求\" --script <film.json> --n 3\n"
+        "    2) python propose.py --confirm --candidate A    # 冻结成 work/design.json\n"
+        "  然后 python render.py --script <film.json> --stage all\n"
+        "  （设计也可以手写 work/design.json，字段契约见 schemas/design.schema.json）"
+        % extra)
 
 # ============================================================================
 # 七、门禁：主题体检（对比度 / 明暗 / 结构）
@@ -895,71 +721,44 @@ def blend_theme(a, b, p):
 
 
 # ============================================================================
-# 九、CLI：看风格、看主题、跑门禁
+# 九、CLI：v1.0.1 起没有可列/可看的风格（模板已删）
 # ============================================================================
+#
+# 这个 CLI 以前有 --list / --show / --lint 三个动作，列的是内置 STYLES 表。
+# v1.0.1 删表时漏掉了这里，于是：--list/--show 直接 NameError: ALL_STYLE_IDS，
+# --lint 在空表上一条都不检查却 exit 0 —— 后者是最坏的一种：**假通过**。
+# 本版把三个动作改成「明确说明能力已迁移 + 非零退出码」，并把 lint_all / _describe
+# 一并删掉（留着就是死代码，下一个人会以为它还能用）。
 
 
-def _describe(sid):
-    pack = STYLES[sid]
-    th = THEMES[pack["theme"]]
-    lines = [
-        "[%s] %s  （theme=%s / layouts=%s）" % (sid, pack["name"], pack["theme"],
-                                                ",".join(pack["layouts"])),
-        "  tags      : %s" % "、".join(pack["tags"]),
-        "  keywords  : %s" % "、".join(th["keywords"]),
-        "  music     : %s 调池=%s  BPM 梯度=%s  mood=%s"
-        % (pack["music"]["scale"], ",".join(pack["music"]["keys"]),
-           ",".join(str(b) for b in pack["music"]["bpm_ladder"]), pack["music"]["mood"]),
-        "  voice     : %s" % ", ".join("%s=%s" % (k, v) for k, v in pack["voice"].items() if v),
-        "  pacing    : lead=%.2f tail=%.2f min_dur=%.1f"
-        % (pack["pacing"]["lead"], pack["pacing"]["tail"], pack["pacing"]["min_dur"]),
-        "  palette   : bg=%s bg2=%s ink=%s accent=%s"
-        % (th["bg"], th["bg2"], th["ink"], th["accent"]),
-        # 与 theme_lint 同口径：bg/bg2 两端取最差（旧版打中点值，会掩盖端点不达标）
-        "  contrast  : ink %.2f / muted %.2f / dim %.2f / accent %.2f（bg/bg2 最差端）"
-        % (bg_contrast(th, "ink"), bg_contrast(th, "muted"),
-           bg_contrast(th, "dim"), bg_contrast(th, "accent")),
-        "  font      : family=%s display=%spx hud=%s"
-        % (th["family"], th["scale"]["display"][0], th["hud"]),
-    ]
-    bad = theme_lint(th)
-    lines.append("  lint      : %s" % ("PASS" if not bad else "FAIL -> " + "；".join(bad)))
-    return "\n".join(lines)
+def _explain_removed(what):
+    print("[stylekit] %s 已随内置风格表一起删除（v1.0.1：本技能不提供任何模板）。" % what,
+          file=sys.stderr)
+    print("  现在没有「可选外观清单」，每一版外观都是现场生成的：", file=sys.stderr)
+    print("    python propose.py --brief \"题材/要求\" --script <film.json> --n 3", file=sys.stderr)
+    print("    python propose.py --confirm --candidate A      # 冻结 work/design.json", file=sys.stderr)
+    print("  想看某个设计长什么样 / 是否合规：", file=sys.stderr)
+    print("    python designkit.py --lint <design.json>", file=sys.stderr)
+    print("    python propose.py --show A", file=sys.stderr)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="风格包：列出 / 查看 / 体检")
-    ap.add_argument("--list", action="store_true", help="列出所有风格")
-    ap.add_argument("--show", metavar="ID", help="查看某个风格的完整字段")
-    ap.add_argument("--lint", action="store_true", help="全部内置主题走对比度门禁")
+    ap = argparse.ArgumentParser(
+        description="风格包工具（v1.0.1 起无内置风格：本命令只解释迁移，不再列外观清单）")
+    ap.add_argument("--list", action="store_true", help="（已移除）列出内置风格")
+    ap.add_argument("--show", metavar="ID", help="（已移除）查看某个内置风格")
+    ap.add_argument("--lint", action="store_true", help="（已移除）批量体检内置主题")
     ap.add_argument("--json", action="store_true", help="配合 --show 输出 JSON")
     a = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:                                   # noqa: BLE001
         pass
-    if a.show:
-        # 未知 id 以前是 KeyError traceback，现在给可用清单 + exit 2（与 render.py 的口径一致）
-        if a.show not in STYLES:
-            print("[未知风格] %r；可用：%s" % (a.show, " / ".join(ALL_STYLE_IDS)), file=sys.stderr)
-            return 2
-        if a.json:
-            import json
-            print(json.dumps({"style": STYLES[a.show],
-                              "theme": THEMES[STYLES[a.show]["theme"]]},
-                             ensure_ascii=False, indent=1, default=str))
-        else:
-            print(_describe(a.show))
-        return 0
-    if a.lint:
-        bad = lint_all()
-        for sid in STYLE_IDS:
-            print(("FAIL " if sid in bad else "PASS ") + sid
-                  + ("" if sid not in bad else "  " + "；".join(bad[sid])))
-        return 1 if bad else 0
-    for sid in ALL_STYLE_IDS:
-        print(_describe(sid))
-        print("")
+    if a.show or a.list or a.lint:
+        _explain_removed("--list / --show / --lint")
+        # 退出码 2：与 render.py 的「未知取值」口径一致（不是 1 的「跑失败」）。
+        return 2
+    ap.print_help()
     return 0
 
 

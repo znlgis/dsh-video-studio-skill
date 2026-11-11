@@ -164,6 +164,12 @@ _PALETTE_ANCHOR = {
     "ink-paper":  (60.0,  False),
 }
 _HUE_WINDOW = 26.0          # 锚点附近 ±26°（再宽就不像"深蓝"了，再窄等于恢复成枚举）
+# 多个候选之间的"底色必须看得出不一样"的色相最小间距（度）。
+# 为什么是 12° 而不是"配色族"：v1.0.1 删掉风格表后没有族可枚举；12° 是并排看图时
+# 人眼能稳定分辨的色相下限附近（再小就成了同一片底色的细微偏色）。约束收窄时
+# 可选色相窗口只有 52° 宽，12° 间距仍能放下 3–4 个候选，不会像"24° 分桶"那样
+# 在 n=3 时大半概率采样失败。
+_PALETTE_KEEP_GAP = 12.0
 
 
 def _hue_gap(a, b):
@@ -308,7 +314,29 @@ _THEME_FIELD_KEYS = _theme_field_keys()
 
 
 _VISUAL_KEYS = ("palette", "family", "typography", "motif", "transition", "motion",
-                "bias", "layout", "hud", "size", "fps")
+                "bias", "layout", "layout_cycle", "hud", "size", "fps", "subtitle")
+# 字幕参数（v1.0.2）：以前字幕字号 / 位置 / 背板 / 圆角全写死在 filmkit.draw_subtitle，
+# 于是**任何两条片子**的字幕带都一模一样 —— 恰好是用户原则 5 说的"大面积长时间重复"。
+# 现在这些参数进设计 DSL（可选，缺省 = 过去的行为，老 design.json 逐像素不变）。
+_SUBTITLE_DEFAULTS = {
+    "size": 46, "y": None, "align": "center", "plate_alpha": 170,
+    "radius": 10, "family": None, "color": None, "max_lines": 2,
+}
+_SUBTITLE_KEYS = tuple(_SUBTITLE_DEFAULTS.keys())
+_SUBTITLE_ALIGNS = ("center", "left")
+_FONT_FAMILIES_FOR_SUB = ("sans", "serif", "kai", "round")
+
+
+def subtitle_of(design):
+    """design -> 补齐默认值后的字幕参数（渲染侧只需读这个，不要各写一份默认值）。"""
+    out = dict(_SUBTITLE_DEFAULTS)
+    vis = design.get("visual") if isinstance(design, dict) else None
+    sub = vis.get("subtitle") if isinstance(vis, dict) else None
+    if isinstance(sub, dict):
+        for k in _SUBTITLE_KEYS:
+            if k in sub and sub[k] is not None:
+                out[k] = sub[k]
+    return out
 _TYPO_KEYS = ("tracking", "line_gap", "number", "ratio", "align")
 _MOTIF_KEYS = ("kind", "density", "detail")
 _TRANS_KEYS = ("kind", "dur")
@@ -916,6 +944,49 @@ def validate_design(design):
         elif vis["fps"] not in FPSES:
             bad.append("visual.fps=%r 不在 %s 里" % (vis["fps"], FPSES))
 
+    # 版式轮换（v1.0.2）：片内按章节轮换版式，防"全片一张版式"。
+    # 不写 = 由 design_to_plan 按设计指纹自动派生一套轮换（老 design.json 行为不变，
+    # 因为 plan 里没有 layout_cycle 时 grammar 仍走 layout_default）。
+    if "layout_cycle" in vis and vis["layout_cycle"] is not None:
+        cyc = vis["layout_cycle"]
+        if not isinstance(cyc, (list, tuple)) or not cyc:
+            bad.append("visual.layout_cycle 必须是非空字符串数组（元素取自 %s）"
+                       % " / ".join(LAYOUTS))
+        else:
+            for i, name in enumerate(cyc):
+                if name not in LAYOUTS:
+                    bad.append("visual.layout_cycle[%d]=%r 不是可用版式（可用：%s）"
+                               % (i, name, " / ".join(LAYOUTS)))
+            if len(set(str(x) for x in cyc)) < 2:
+                bad.append("visual.layout_cycle 至少要有 2 种不同版式（只有一种等于不轮换）")
+
+    # 字幕样式（v1.0.2）：可选；不写 = 过去写死的值（逐像素不变）。
+    sub = vis.get("subtitle")
+    if sub is not None:
+        if not isinstance(sub, dict):
+            bad.append("visual.subtitle 必须是 dict")
+        else:
+            _only(sub, _SUBTITLE_KEYS, "visual.subtitle", bad)
+            if "size" in sub and sub["size"] is not None:
+                _int_of(sub["size"], "visual.subtitle.size", bad, 20, 96)
+            if "y" in sub and sub["y"] is not None:
+                _int_of(sub["y"], "visual.subtitle.y", bad, 0, 1030)
+            if "align" in sub and sub["align"] is not None:
+                _enum_of(sub["align"], _SUBTITLE_ALIGNS, "visual.subtitle.align", bad)
+            if "plate_alpha" in sub and sub["plate_alpha"] is not None:
+                _int_of(sub["plate_alpha"], "visual.subtitle.plate_alpha", bad, 0, 255)
+            if "radius" in sub and sub["radius"] is not None:
+                _int_of(sub["radius"], "visual.subtitle.radius", bad, 0, 48)
+            if "family" in sub and sub["family"] is not None:
+                _enum_of(sub["family"], _FONT_FAMILIES_FOR_SUB, "visual.subtitle.family", bad)
+            if "color" in sub and sub["color"] is not None:
+                try:
+                    ST._color_of(sub["color"], "visual.subtitle.color")
+                except Exception as e:                   # noqa: BLE001
+                    bad.append("visual.subtitle.color 不是颜色（[r,g,b] 或 \"#rrggbb\"）：%s" % e)
+            if "max_lines" in sub and sub["max_lines"] is not None:
+                _int_of(sub["max_lines"], "visual.subtitle.max_lines", bad, 1, 3)
+
     # ---- audio ----
     au = design.get("audio")
     if not isinstance(au, dict):
@@ -1042,7 +1113,15 @@ def design_to_plan(design):
         "theme": th,
         "language": lang,
         "layout_default": vis["layout"],
+        # 片内版式轮换（v1.0.2）：grammar 在 chapter_layout 为空时按章节轮换这个序列。
+        # 没有这个键（老 design.json）时 grammar 行为与过去完全一致。
+        "layout_cycle": list(vis.get("layout_cycle") or []),
         "chapter_layout": {},
+        # 字幕样式（v1.0.2）：render/filmkit 只读这一份，不再各自写默认值。
+        "subtitle": subtitle_of(design),
+        # 目标时长（可能为 null）：只用于"实测 vs 目标"提示，不改变 TTS 决定的真实时长。
+        "target_sec": (None if design.get("structure", {}).get("target_sec") is None
+                       else float(design["structure"]["target_sec"])),
         "music": {
             # v1.0.1：不再有 "style" 这个键 —— 配乐由 musicgen 现场编排，
             # 没有"曲风表"可指向。老设计里残留的 style 字段被忽略。
@@ -1068,6 +1147,18 @@ def design_to_plan(design):
                 "pitch_range": (-8, 8),
                 "cps_band": (3.6, 5.6),
             },
+        },
+        # ---- 声音参数（v1.0.2）----
+        # design.audio.music.gain_db / duck_db 与 audio.sfx.* 以前**只被校验、从不被读**：
+        # 用户改了 design.json 里的音量/音效开关，渲染结果一模一样（实测 enabled=false
+        # 仍出 8 条音效）。现在原样交给 render，由它填进 script 的 music/sfx 缺省位
+        # （film.json 显式写了就仍以 film.json 为准）。
+        "audio_overrides": {
+            "music": {k: float(mu[k]) for k in ("gain_db", "duck_db") if mu.get(k) is not None},
+            "sfx": {k: (bool(au["sfx"][k]) if k == "enabled" else
+                       (str(au["sfx"][k]) if k == "density" else float(au["sfx"][k])))
+                    for k in ("enabled", "density", "gain_db")
+                    if isinstance(au.get("sfx"), dict) and au["sfx"].get(k) is not None},
         },
         "pacing": {
             "lead": float(pa["lead"]),
@@ -1138,13 +1229,33 @@ def _voice_key(design):
 
 
 # 维度顺序固定（展示与 diff 都按它）。前 7 个是任务要求的底线，后 3 个是额外观测项。
+def _music_key(design):
+    """design -> 配乐身份（"调式/速度档/情绪"复合键）。
+
+    v1.0.2 修：这里以前读 audio.music.style —— 那是"配乐风格表"时代的字段，
+    v1.0.1 删掉风格表后采样器不再产出它，于是这一维**恒为 None**，两个候选
+    永远"配乐相同"，SKILL §0.5 承诺的"候选至少在含配乐在内的 2 个维度上不同"
+    实际少了一维（也是重采样失败率偏高的原因之一）。
+    现在用参数化配乐真正决定听感的三件事做签名：调式 + BPM 档（±6 归一）+ 情绪。
+    """
+    mu = _dig(design, ("audio", "music")) or {}
+    if not isinstance(mu, dict):
+        return None
+    bpm = mu.get("bpm")
+    try:
+        bucket = int(round(float(bpm) / 6.0))
+    except (TypeError, ValueError):
+        bucket = None
+    return "%s/%s/%s" % (mu.get("scale"), bucket, mu.get("mood"))
+
+
 _AXES = (
     ("palette", _palette_key),
     ("motif", lambda d: _dig(d, ("visual", "motif", "kind"))),
     ("transition", lambda d: _dig(d, ("visual", "transition", "kind"))),
     ("ease", lambda d: _dig(d, ("visual", "motion", "ease"))),
     ("number", lambda d: _dig(d, ("visual", "typography", "number"))),
-    ("music", lambda d: _dig(d, ("audio", "music", "style"))),
+    ("music", _music_key),
     ("voice", _voice_key),
     ("mood", lambda d: _dig(d, ("audio", "music", "mood"))),
     ("layout", lambda d: _dig(d, ("visual", "layout"))),
@@ -1467,6 +1578,14 @@ def _voice_ids_of(design):
     return [str(x) for x in ids if isinstance(x, str) and x]
 
 
+def _by_id(rows, did):
+    """从已接受候选里按 id 取回设计对象（找不到返回一个空 dict：让距离判据退化为"全不同"）。"""
+    for row in rows or ():
+        if isinstance(row, dict) and row.get("id") == did:
+            return row
+    return {}
+
+
 def _design_value(design, cat):
     """design 在某个约束类别上的取值（声线要求"整条片子的声线都是这一性别"）。"""
     if cat == "palette":
@@ -1629,6 +1748,40 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     align = ALIGNS[(h("align") + index) % len(ALIGNS)]
     font_family = FONT_FAMILIES[(h("family") + index) % len(FONT_FAMILIES)]
 
+    # ---- 片内版式轮换（v1.0.2，原则 5）----
+    # 以前一章只能用一种版式：design 的 visual.layout 是单值 → grammar 把它当"全片默认"，
+    # 于是 8 段片子 8 屏都是同一个骨架（左标题右卡片 / 居中大字 / 右标题左卡片 里挑一个），
+    # 观众看到的是"长时间重复"。现在默认派生 2–3 种版式的轮换序列，
+    # 由 grammar 按**章节**轮换（同一章内稳定，换章才换版式）。
+    # 用户仍可在 design.visual.layout_cycle 里显式指定（会覆盖这里）。
+    _others = [x for x in LAYOUTS if x != layout]
+    _rot = (h("layout_rot") + index * 3) % len(_others)
+    _others = _others[_rot:] + _others[:_rot]
+    cycle_len = 2 if h("layout_n") % 2 == 0 else 3
+    layout_cycle = [layout] + _others[:max(0, cycle_len - 1)]
+
+    # ---- 字幕样式（v1.0.2，原则 2/5）----
+    # 过去字幕字号/位置/背板/圆角是 filmkit 里的模块常量：任何两条片子字幕都一模一样，
+    # 是"跨片同质化"里最稳定的一条重复。现在进设计（可选字段，写进 design.json 可改）。
+    # 取值范围都留在"好看"的区间内：字号 40–56、背板透明度 96–208、圆角 2–24。
+    sub_size = 40 + (h("subsize") % 5) * 4                    # 40..56
+    sub_align = "center" if h("subalign") % 4 else "left"     # 多数居中，偶尔左对齐
+    sub_y = None if h("suby") % 3 else (560 + (h("suby2") % 9) * 40)  # 1/3 概率抬高
+    subtitle = {
+        "size": int(sub_size),
+        "align": sub_align,
+        "plate_alpha": int(96 + (h("subalpha") % 8) * 14),    # 96..194
+        "radius": int(2 + (h("subr") % 4) * 6),               # 2..20
+        "max_lines": 2 if h("sublines") % 4 else 1,
+    }
+    if sub_y is not None:
+        subtitle["y"] = int(sub_y)
+    _sub_fam = h("subfam") % 3
+    if _sub_fam == 0:
+        subtitle["family"] = font_family                     # 与大标题同族
+    elif _sub_fam == 1:
+        subtitle["family"] = "sans"                          # 字幕用黑体（可读性最好）
+
     hue_shift = ((h("hue") % 161) - 80) / 10.0          # -8.0 .. +8.0 度
     target_shift = ((h("sv") % 9) - 4) / 100.0          # -0.04 .. +0.04
     palette = _solve_palette(family, hue_shift, target_shift)
@@ -1702,9 +1855,11 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
                        "push": push, "breathe_hz": breathe},
             "bias": {"x": x, "y": y, "inset": inset},
             "layout": layout,
+            "layout_cycle": list(layout_cycle),
             "hud": hud,
             "size": "1920x1080",
             "fps": 30,
+            "subtitle": subtitle,
         },
         "audio": {
             "voice": {"mode": "edge_id", "id": picks[0], "map": vmap,
@@ -1763,17 +1918,22 @@ def sample_designs(brief, n=3, seed=None):
         problems = None
         too_close = None
         violated = None
+        why_not = []
         for attempt in range(_MAX_RESAMPLE):
+            why_not = []
             cand = _make_design(brief, i, seed, attempt, domain, unmatched)
             problems = validate_design(cand)
             if problems:
+                why_not.append("没过校验：%s" % problems[0])
                 continue
             violated = _constraint_problems(cand, must, avoid)
             if violated:
+                why_not.append("违反 brief 约束：%s" % violated[0])
                 continue
             too_close = [o["id"] for o in out
                          if design_distance(cand, o)["n"] < 2]
             if too_close:
+                why_not.append("与前序候选不足 2 维差异：%s" % " / ".join(too_close))
                 continue
             # 底色必须和已接受候选**拉开色相**。为什么单独管这一条：
             # design_distance 会在"母题/转场/缓动/编号"上找到足够的差异，
@@ -1781,23 +1941,55 @@ def sample_designs(brief, n=3, seed=None):
             # 实测样例（v1.0）：A=近黑金·电影遮幅 / B=近黑金·细线页眉 —— 并排图里第一眼
             # 就是同一个片子的两种排法，用户不会认为那是两个方案。
             # 底色是整屏第一眼信息，必须先分叉。
-            # 阈值 24°（≈人眼能分辨的色相差下限）：连续空间里不像 8 个离散族那样天然分开，
-            # 必须显式挡一道，否则"随机取色"偶尔会撞出两个几乎同色的候选。
+            #
+            # v1.0.2 修：这里以前按"配色族"（色相量化到 24° 一档）判重。问题是有
+            # must_have 配色约束时，可选色相被压到 ±26° 窗口里，24° 分桶只剩 2–3 档，
+            # n=3 要求 3 个不同族 → 重采样 50 次成功率约一半；"暖纸色+女声"这类
+            # 常见组合实测 20/20 全失败（brief 本身完全合理）。现在改成直接比**底色
+            # 色相距离**：窗口内只要彼此 ≥ _PALETTE_KEEP_GAP 度就算两片不同底，
+            # 约束不再和判重打架，候选数量也不再受"分桶数"限制。
             if out:
-                key = _palette_family_of(cand)
-                if key is not None and any(_palette_family_of(o) == key for o in out):
+                hue = _design_bg_hue(cand)
+                clash = None
+                min_gap = 360.0
+                if hue is not None:
+                    for o in out:
+                        oh = _design_bg_hue(o)
+                        if oh is None:
+                            continue
+                        gap = _hue_gap(hue, oh)
+                        min_gap = min(min_gap, gap)
+                        if gap < _PALETTE_KEEP_GAP:
+                            clash = (o["id"], gap)
+                            break
+                # 分档判重（v1.0.2 再修）：brief 把配色约束到窗口里时（如"深蓝"= 210°±26°），
+                # 52° 的窗口放不下"3 个两两差 12°"的底色 —— 硬要求会让 n=3 有近一半概率
+                # 采样失败（实测 19/40）。所以分两档：
+                #   · 色相差 < 6°：无论别的维度多不同，并排看都是同一片底色 -> 必须换；
+                #   · 色相差 < 12°：只有在**结构差异够强**（≥3 个维度不同）时才接受，
+                #     这正是"第一眼是不同方案"的判据（底色接近但版式/母题/转场/字体全变）。
+                if clash is not None and (min_gap < 6.0 or design_distance(cand, _by_id(out, clash[0]))["n"] < 3):
+                    why_not.append("底色色相与前序候选 %s 只差 %.1f°（色相差太小，并排看是同一片）"
+                                   % (clash[0], clash[1]))
                     continue
             chosen = cand
             break
         if chosen is None:
+            detail = ("\n  最后一次被拒的原因：%s" % why_not[0]) if why_not else ""
             if violated:
-                raise ValueError("第 %d 个候选重采样 %d 次仍不满足 brief 约束：\n  - %s%s"
-                                 % (i + 1, _MAX_RESAMPLE, "\n  - ".join(violated), hint))
+                raise ValueError(
+                    "第 %d 个候选重采样 %d 次仍不满足 brief 约束：\n  - %s%s\n"
+                    "  怎么办：① 放宽 brief（去掉一条 must_have/avoid）；"
+                    "② 减少候选数 --n 2；③ 用 --seed 固定后重试。"
+                    % (i + 1, _MAX_RESAMPLE, "\n  - ".join(violated), hint))
             if problems:
-                raise ValueError("第 %d 个候选重采样 %d 次仍没过校验：\n  - %s%s"
-                                 % (i + 1, _MAX_RESAMPLE, "\n  - ".join(problems), hint))
-            raise ValueError("第 %d 个候选重采样 %d 次仍与前序候选不足 2 维差异（最像 %s）%s"
-                             % (i + 1, _MAX_RESAMPLE, " / ".join(too_close or []), hint))
+                raise ValueError("第 %d 个候选重采样 %d 次仍没过校验：\n  - %s%s%s"
+                                 % (i + 1, _MAX_RESAMPLE, "\n  - ".join(problems), hint, detail))
+            raise ValueError(
+                "第 %d 个候选重采样 %d 次仍与前序候选太像（最像 %s）%s%s\n"
+                "  怎么办：① 减少候选数 --n 2；② 放宽 brief 里收窄可选域的约束；"
+                "③ 用 --seed 固定后重试。"
+                % (i + 1, _MAX_RESAMPLE, " / ".join(too_close or ["?"]), hint, detail))
         out.append(chosen)
     return out
 
@@ -1860,17 +2052,23 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.list_palettes:
+        # v1.0.2 修：这里以前读 r["family"]/r["bg"]/r["accent_hue"]，而 _palette_rows()
+        # 在 v1.0.1 改成连续色相空间后返回的是 hue/dark/ink_hex/... —— 键名对不上，
+        # 命令直接 KeyError: 'family'（--json 分支反而正常，所以自检没发现）。
+        # 现在按行里真实存在的键打印，并说明"这不是可选清单"。
         rows = _palette_rows()
         if a.json:
             print(json.dumps(rows, ensure_ascii=False, indent=1))
         else:
-            print("配色族（%d）：" % len(rows))
+            print("配色采样示例（%d 个点，不是可选清单）：" % len(rows))
+            print("  底色 = (色相 h°, 饱和 s, 明度 v) 连续空间里的一点；h 可在 0–360 任意取，"
+                  "下面只是均匀散开的样点。")
             for r in rows:
-                print("  %-11s %-6s %s  bg=%s bg2=%s surface=%s  accent_hue=%3d°  "
-                      "ink=%s accent=%s"
-                      % (r["family"], r["label"], "暗" if r["dark"] else "亮",
-                         _hex(r["bg"]), _hex(r["bg2"]), _hex(r["surface"]),
-                         int(r["accent_hue"]), r["ink_hex"] or "-", r["accent_hex"] or "-"))
+                extra = ("  ERROR=%s" % r["error"]) if r.get("error") else ""
+                print("  %-12s h=%6.1f s=%.2f v=%.2f  bg=%s surface=%s ink=%s accent=%s%s"
+                      % (r["label"], r["hue"], r["sat"], r["val"],
+                         r["bg_hex"] or "-", r["surface_hex"] or "-",
+                         r["ink_hex"] or "-", r["accent_hex"] or "-", extra))
         return 0
 
     if a.lint:

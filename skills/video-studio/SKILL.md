@@ -51,6 +51,12 @@ python propose.py --brief "<题材/受众/时长/语气>" --script film.json --n
 4. **没有内置模板可套**（v1.0.1）：`design.json` 的所有字段都开放（35 字段主题 + 五组视觉语言签名 +
    声音/配乐/节奏），配色是**连续色相空间**里的任意一点，不是从若干套现成外观里挑。
    每次提案都是现场生成——同一个 brief 连拍两次会得到不同设计（要复现就传 `--seed`）。
+5. **片间去重台账（v1.0.2，默认开启）**：`--confirm` 会把冻死的设计记进
+   `~/.dsh/video-studio/design-ledger.json`（最多 500 条），下次提案主动避开最近交付过的外观——
+   候选与台账里任一部片的**设计距离 < 2 维**时自动换 nonce 重采并告警。
+   这是"不同片不重复"从"靠随机"变成"有记忆"的落地机制。`--show-ledger` 查台账、
+   `--no-ledger` 本次忽略、环境变量 `VIDEO_STUDIO_LEDGER` 改路径或设 `off` 关闭。
+   台账读写失败一律当空表，**永不阻塞出片**。
 
 **只有一种情况可以跳过提案**：纯修复 / 纯重渲（不改内容、不改设计，只修音画不同步或重出片）。
 这种情况下用 `--require-proposal` 之外的方式跑，并在回复里说明"本次未提案，因为…"。
@@ -80,144 +86,155 @@ python render.py --script film.json --stage all     # 前提：work/design.json 
 
 ---
 
-## 1. 五步上手（最快路径）
+## 1. 五步上手（零拷贝：不拷脚本，不拷模板）
 
-> 下文的 `<SKILL_DIR>` 指**本次加载技能时 `skill` 工具回报的 `resourceBase.path`**。装成插件后它就是
+> **v1.0.2 起这条路径没有任何"拷贝"动作。** 技能脚本留在技能目录里直接执行；
+> 你的工程目录里只需要一个 `film.json`（外加运行产生的 `work/` 与 `out/`）。
+>
+> `<SKILL_DIR>` 指**本次加载技能时 `skill` 工具回报的 `resourceBase.path`**。装成插件后它就是
 > 本插件包内的 `skills/video-studio/`（profile 的 `node_modules/@dsh-gis/dsh-video-studio-skill` 是链接）。
 > 找不到时按名字定位：`find ~ -path '*/skills/video-studio/scripts/filmkit.py'`。
 >
 > `<REPO>` 指**包根**（仓库根，或装好后 profile 里的 `node_modules/@dsh-gis/dsh-video-studio-skill/`），
-> 即 `<SKILL_DIR>` 往上两级。**`tools/` 与 `schemas/` 在 `<REPO>` 下，不在 `<SKILL_DIR>` 下**：
-> 本节的 `cp <SKILL_DIR>/scripts/...` 把技能拷成 `myfilm/` 之后，那个工作目录里**没有** `tools/`，
-> 所以 `tools/estimate.py` 这类仓库工具要按 `<REPO>/tools/...` 调用（或从包/仓库里取一份过来）。
+> 即 `<SKILL_DIR>` 往上两级。`tools/` 与 `schemas/` 在 `<REPO>` 下，**不在** `<SKILL_DIR>` 下。
 
 ```bash
-# 1) 建工作目录，拷模板
+# 1) 只写一个 film.json（工程目录里唯一需要你手写的文件）
 mkdir -p myfilm && cd myfilm
-cp <SKILL_DIR>/assets/film.json .            # 剧本模板（改文字即可）
-cp <SKILL_DIR>/assets/scenes.py .            # 场景模板（改画面即可）
-#    v0.6.0 起 gates.py（门禁账本）与 stagewatch.py（阶段新鲜度）是**必需**的：
-#    render.py 直接 import 它们，少一个就是 ModuleNotFoundError。
-cp <SKILL_DIR>/scripts/{filmkit.py,stylekit.py,render.py,selfcheck.py,gates.py,stagewatch.py} .
-# 可选（v0.3）：要程序化音效就拷 sfxkit；要走浏览器渲染再拷 webengine.py + assets/web/
-cp <SKILL_DIR>/scripts/{sfxkit.py,voicekit.py,qa_frames.py,musicgen.py} .
-#    musicgen.py 是配乐编排器（v1.0.1：没有风格表，按参数现场生成）；scorekit.py 只是
-#    它的合成原语库（和声/律动/混音/落盘），不参与「选曲风」，不拷它 musicgen 照样出配乐。
-#    v0.8.0 起渲染前预检 / 全片 VMAF / ASR 回读是三个**可选模块**：
-#    拷了才有对应门禁（G0 / G11 / G12）；不拷就记 skipped 并写明原因，不会让渲染失败。
-#    但"skipped != 通过"——交付前请确认这三项是被你**主动**跳过的。
-cp <SKILL_DIR>/scripts/{preflight.py,qavmaf.py,qaasr.py} .
-cp -r <SKILL_DIR>/assets/web ./web
+cat > film.json <<'JSON'
+{
+  "title": "我的片子",
+  "lines": [
+    {"id": "l01", "kind": "hook",  "chapter": "01 · 开场",
+     "text": "这是用代码从零生成的画面与声音。", "sub": "零素材，全代码生成", "big": "零素材，全代码生成"},
+    {"id": "l02", "kind": "body",  "chapter": "02 · 正文", "kicker": "PIPELINE",
+     "text": "整条管线只有五步：写剧本、生成旁白、排时间轴、逐帧渲染、混音合成。",
+     "sub": "五步成片，每步落盘", "big": "五步成片",
+     "items": [{"text": "剧本 film.json"}, {"text": "旁白"}, {"text": "时间轴"}, {"text": "逐帧渲染"}, {"text": "混音"}]},
+    {"id": "l03", "kind": "outro", "chapter": "99 · 收尾",
+     "text": "先定脚本，再定声音，最后才是画面。", "sub": "顺序比努力重要", "big": "顺序比努力重要"}
+  ]
+}
+JSON
+#    lines[].text = 朗读文本（自然口语）；sub = 上屏字幕（短）；kind = hook/body/quote/outro/emphasis/calm
+#    v1.0 起画风/配乐/声线/节奏全部由 design 决定，film.json 里**没有** style 字段可写。
+#    契约校验（可选，几秒）：
+python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先跑一次自检：58 条回归护栏（v1.0 新增 56–58），20 秒内出结论（不联网；可选模块缺失会标 SKIP）
-python selfcheck.py
+# 2) 先自检一次环境（可选；67 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
+python <SKILL_DIR>/scripts/selfcheck.py
 
-# 3) 【v0.5 新步骤】先确认风格，再改文字
-#    film.json 的 "style": "auto" 会按内容自动选一套（画风+配乐+旁白一起变）；
-#    想锁定就写死风格 id。这条命令打印"为什么选这套"与"视觉语言"（v0.9），并落盘 work/style.json。
-python render.py --script film.json --stage style
+# 3) 【v1.0 铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
+python <SKILL_DIR>/scripts/propose.py \
+       --brief "AI 大模型的三年，30 秒科普，深蓝" \
+       --script film.json --work work
+#    产出 3 个候选：各自一份 design + 静帧联系表（work/proposals/rev1/_compare.png）+ 设计距离，
+#    2 秒级出结果、全程离线。看并排图，挑一个。
 
-# 3b) 改 film.json 的 lines[].text / sub / big / items
-#    v0.9：每段还能写 type（10 类构图之一）与 quote/by/stats/series/steps/sides；
-#    不写就由 grammar 按内容选。排完轴看分镜：--stage layout 会打印"每段为什么是这个构图"，
-#    并落 work/storyboard.json（详见 <SKILL_DIR>/references/scene-grammar.md）。
-#    text = 朗读文本（自然口语）；sub = 上屏字幕（短，一行优先）
+# 4) 确认候选，冻结设计（work/design.json）——此后渲染只认这份设计
+python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work
+#    不满意就换一个：--revise "再冷一点，少装饰，换女声"（新 rev，旧 rev 留着眼 diff）
+#    想复现某一次：首次提案时加 --seed 42（不传 seed = 每次新 nonce，这是"每片不同"的来源）
 
-# 4) 母版预览（P6）：先只渲几张关键帧看构图/配色，别一上来渲全片
-#    全新目录下的第一条命令也能跑：缺 tts.json / timeline.json 会自动补跑
-#    （tts 要联网合成一次旁白），并打印 [stills] 说明自己在补哪一步。
-python render.py --script film.json --scenes scenes.py --work work --stage stills \
+# 5) 先看静帧，再出全片；--scenes 不写就用技能内置渲染器
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage stills \
        --stills "l01:3,l02:5,l03:2.5"
+#    → work/stills/_sheet.png：用 read_image 亲眼看，别跳过
 
-# 4.5) 【v0.6】先算成本再开渲：帧数 / 各阶段耗时 / 磁盘 / 分块建议
-#      项目原则是"成本敏感"，而在此之前开渲前拿不到任何数字。
-#      （--json 可机读；有 work/timeline.json 时用真实时长，否则按字数粗估并标注）
-# 注意：estimate.py 是**仓库/包里的工具**（<REPO>/tools/），不在 skills/video-studio/ 里，
-#      quickstart 拷出来的 myfilm/ 也不会有它；想用就按包根路径调用，或从包/仓库里复制过来。
-python <REPO>/tools/estimate.py --script film.json --jobs 4
-#    【v0.8 必看】estimate 已经算进新增的三道门禁，预演时间不再只是渲染时间：
-#    29 s 模板片从 v0.7 的 total 28.4 s 变成 37.5–83.0 s（vmaf 单阶段 12.6 s 起）。
-#    预演给的是**区间上界**（悲观侧），实测全链约 47.3 s —— 别把区间上界当承诺。
-#    要压回原来的量级：在 film.json 写 "qa": {"vmaf": {"mode": "off"}}——estimate 与
-#    render.py 都读这个字段，G11 记 skipped。注意 estimate **没有** --vmaf 参数：
-#    --vmaf off|sample 是 render.py 的命令行开关，加在 estimate 上会直接报错；
-#    而 --vmaf sample 只是每 5 帧取 1（仍然跑 VMAF，pass/fail 照判），只有 off 才 skipped。
-
-# 5) 一条命令出片（TTS→排版→混音→渲染→合成→质检）
-python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
-#    【v0.8 会变慢，别以为卡死】一条 29.011 s / 870 帧的模板片实测：
-#      · 全链 --stage all：47.3 s（v0.7 约 28 s），其中 frames 12.5 s、qa 23.9 s
-#      · 渲前资源预检（G0）        < 1 s（查字形/字体/已有 TTS 音频是否可解析）
-#      · 全片 VMAF+SSIM（G11）      14.2 s（参考帧要按场景函数重渲一遍 870 帧）
-#      · ASR 回读（G12）            8.7 s（faster-whisper small / CPU；没装就 skipped）
-#    —— **qa 已经超过渲染本身**（23.9 s vs 12.5 s）。同一台机器负载不同能差近 2×，
-#       别把单次秒数当承诺；12 分钟片按 0.4× 实时外推 VMAF ≈ 5 分钟。
-#    想先快速看画面：--preview 15（只渲前 15 秒出 mp4+gif，不写交付账本）；
-#    想省掉 VMAF：--vmaf off 或 film.json 的 "qa": {"vmaf": {"mode": "off"}}（记 skipped）。
-#    web 引擎没有可重渲的参考帧，G11 恒 skipped——这不是漏查，是路线限制。
-
-# 6) 亲眼看质检抽出的帧
-#    work/qa/sheet.png      联系表（全片调性）
-#    work/qa/snap_*.png     全分辨率静帧
-
-# 7) 【v0.6 新步骤】看机器可读的交付结论，然后签核
-#    out/QC-REPORT.md 是**交付凭据**：gate matrix 分 pass / fail / skipped 三档，
-#    skipped 表示"本次没执行"，不等于通过。以前这些只活在 stdout 里，会话一断就没了。
-cat out/QC-REPORT.md
-python render.py --script film.json --work work --stage accept --gate stills    # 看过静帧了
-python render.py --script film.json --work work --stage accept --gate release   # 成片验收过了
-# 签核绑内容指纹：改了剧本 / scenes.py / 引擎，旧签核自动失效，要重新看、重新签。
-# 交付前想强制：加 --strict-gates（skipped 也算失败）。
+python <SKILL_DIR>/scripts/render.py --script film.json --work work \
+       --out out/film.mp4 --stage all
+#    TTS→排版→配乐→音效→混音→逐帧→编码→质检 一条龙；中间产物全在 work/，可断点续跑。
 ```
 
-分阶段跑（**每个 stage 只做自己的事**，不会再顺手重渲全片）：
+**关于 `--scenes`（v1.0.2 的零拷贝关键）**：`render.py` 不写 `--scenes` 时的定位顺序是
+**① 剧本同目录的 `scenes.py` → ② 技能内置 `assets/scenes.py`**。所以默认情况下你什么都不用写、
+也不用拷，内置渲染器直接出片；**只有想改画面**时才在剧本同目录放一个自己的 `scenes.py`
+（实现下面的 `draw_frame` 与可选的 `cues()`），它会被自动发现——也可以显式 `--scenes my_scenes.py`。
+内置渲染器源码就是最好的范例：`<SKILL_DIR>/assets/scenes.py`。
+
+```python
+# 真实签名（六个参数，少一个都会崩）：`scenes.draw_frame`
+def draw_frame(scene, t_local, dur, t_global, script, frame):
+    # scene    : 这一段在 timeline 里的字典（id / kind / scene_type / sub / big / items / stats ...）
+    # t_local  : 段内时间（秒，0..dur）——入场/持续动效都按它在段内推进
+    # dur      : 这一段的总时长（秒）
+    # t_global : 全片时间（秒）——跨段的连续动效（镜头缓推、呼吸）用它
+    # script   : 整份剧本/计划字典（plan、主题色、words 等；有缓存，别原地改）
+    # frame    : 绝对帧号（整数）——需要确定性噪声/相位时用它，别用 time()
+    return img   # PIL.Image，必须 1920x1080 RGB（用 K.new_frame() 起手最稳）
+```
+
+> 写自定义 `scenes.py` 时先抄 `<SKILL_DIR>/assets/scenes.py` 的一个绘制器（`_draw_hero` 之类），
+> 它已经把纯函数、缓存排版、预烘焙底版这些坑都绕过一遍了。
+
+**为什么先提案**：v1.0.1 起没有"内置风格"可选，外观由 `design.json` 决定。
+同一个 brief 连拍两次会得到不同设计（配色/母题/转场/配乐/声线都可能不同），
+所以流程必须是"生成方案 → 人确认 → 冻结 → 出片"；不确认就渲染，`render.py` 会打提案警告
+（加 `--require-proposal` 则直接失败）。设计契约见 [references/proposal.md](references/proposal.md)。
+
+**分阶段跑**（每个 stage 只做自己的事，落盘后可单独重跑）：
 
 ```bash
-python render.py ... --stage style    # 只解析风格 -> work/style.json（画风/配乐/旁白/节奏一次定死）
-python render.py ... --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
-python render.py ... --stage layout   # 只排时间轴 -> timeline.json / sub.srt / sub.ass（含 hold 停留窗口；v0.9 还选构图、打印分镜、落 work/storyboard.json）
-python render.py ... --stage cues     # 只出提示点 -> work/cues.json（声音跟着画面走）
-python render.py ... --stage score    # 只出配乐 -> work/music.wav（musicgen 现场编排）
-python render.py ... --stage sfx      # 只出音效轨 -> work/sfx.wav（sfxkit，按 cues.json）
-python render.py ... --stage audio    # 只混音 -> audio.wav（旁白+配乐+音效，音效响时配乐让位）
-python render.py ... --stage frames   # 只渲染帧 -> silent.mp4（--engine pil|web，--jobs N 分块并行）
-python render.py ... --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
-python render.py ... --stage qa       # 只质检（只读输入，只写 work/qa/）+ 帧级深检
-python render.py ... --stage stills   # 只渲母版静帧 + 联系表
-python render.py ... --stage accept --gate stills   # 【v0.6】人工签核一道闸（写 work/signoff.json）
-python render.py ... --stage explain  # 【v0.6】只报"哪些阶段过时了、为什么、该跑什么"，不跑任何 stage
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage style   # 解析已确认的 design，打印主题/视觉语言/版式轮换/字幕样式
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage tts      # 只合成旁白 + 实测时长（带输入校验的缓存）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage layout   # 只排时间轴 + 选构图，落 timeline.json / sub.srt / storyboard.json
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage cues     # 只出提示点 -> work/cues.json
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage score    # 只出配乐 -> work/music.wav（musicgen 现场编排）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage sfx      # 只出音效轨（sfxkit，按 cues.json）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage audio    # 只混音（旁白+配乐+音效，旁白优先）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage frames   # 只渲染帧（--engine pil|web，--jobs N 分块并行）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa       # 只质检（只读输入，只写 work/qa/）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage stills   # 只渲母版静帧 + 联系表
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage accept --gate stills   # 人工签核一道闸（写 work/signoff.json）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage explain  # 只报"哪些阶段过时、为什么、该跑什么"，不跑任何 stage
 ```
 
 `--stage all` 的完整顺序：`style → tts → layout → cues → score → sfx → audio → frames → mux → qa`。
 **任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
 
-长片渲染（分块并行 + 断点续跑）：
+**开渲前先算成本**（可选；`estimate.py` 是仓库工具，按 `<REPO>` 调用）：
 
 ```bash
-python render.py ... --stage frames --jobs 4        # 4 进程按绝对帧号分块
-python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
+python <REPO>/tools/estimate.py --script film.json --jobs 4
+```
+
+它给帧数/各阶段耗时/磁盘/分块建议（`--json` 可机读），是**区间上界**不是承诺；
+有 `work/timeline.json` 时用真实时长，否则按字数粗估。要省掉全片 VMAF 就在 `film.json` 写
+`"qa": {"vmaf": {"mode": "off"}}`（estimate 与 render 都读这个字段，G11 记 skipped）。
+
+**看交付凭据再签核**：
+
+```bash
+cat out/QC-REPORT.md     # gate matrix 分 pass / fail / skipped 三档；skipped = 本次没执行，不等于通过
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage accept --gate release
+```
+
+签核绑内容指纹：改了剧本 / `scenes.py` / 设计，旧签核自动失效，要重新看、重新签。
+交付前想强制（skipped 也算失败）：加 `--strict-gates`。
+
+**长片渲染**（分块并行 + 断点续跑）：
+
+```bash
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage frames --jobs 4
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage frames --jobs 4 --resume
 ```
 
 > 分块落在 `work/segments/`，按 `seg_<起始帧>_<结束帧>.mp4` 命名；拼接前会**显式检测缺口**，
 > 缺块直接报错，不允许"少一段也能出片"。默认 chunk 按 `总帧数 / jobs / 4` 向整秒取整（jobs=4、
 > 900 帧时约 8 秒一段），可用 `film.json` 的 `chunk_frames` 覆盖。
 >
-> **改台词 / 改 scenes.py / 改编码参数之后，`--resume` 会拒绝复用旧分块**（`work/segments/_plan.json`
+> **改台词 / 改 scenes.py / 改设计 / 改编码参数之后，`--resume` 会拒绝复用旧分块**（`work/segments/_plan.json`
 > 里存着计划指纹），并提示你 `rm -rf work/segments`——这是刻意的：旧分块配新时间轴会拼出
 > "画面和旁白对不上"的片子，而且时长门禁查不出来。
-
-> **v0.6.0 修了一个已发布版本里的真 bug**：`--jobs >1` 时子进程从 `_script_snapshot.json` 读剧本，
-> JSON 把主题色的 `(r,g,b)` 元组变成 `list`，而 `scenes._bg()` 拿它当缓存键 → `TypeError: unhashable type: "list"`。
-> 也就是说 **"长片并行渲染"这条 SKILL 自己教的路径此前是崩的**。现在子进程会按剧本重解风格（拿回元组），
-> `scenes.py` 的 `_bg` 键也做了冻结兜底；`selfcheck` 第 32 条专门盯这个。
 
 ## 2. 标准八阶段（P0–P7）
 
 | 阶段 | 产出 | 关键动作 | 常见错误 |
 |---|---|---|---|
-| **P0.5 定风格** | `work/style.json` | `--stage style`：按内容选风格包，打印"为什么选这套" | 跳过 → 画风/配乐/旁白全片一个样（v0.4 的通病） |
+| **P0.5 定设计** | `work/design.json` + `work/style.json` | `propose.py` 出方案 → `--confirm` 冻结设计；`--stage style` 只解析已确认的设计并打印主题/视觉语言/版式轮换/字幕 | 跳过 → `render.py` 报错（没有 design 就没有外观）；不确认就渲染会打提案警告 |
 | **P0 定基准** | `CONVENTIONS.md` | 分辨率/帧率/时长/BPM→帧换算一次算死，全项目引用同一份 | 各文件自己写 `150` 这种魔数 → 幕边界对不齐 |
-| **P1 写剧本** | `film.json` | 每句拆 `text`（朗读）与 `sub`（字幕）；每段一个 `kind`；定 `style`（auto 或风格 id） | 一个字段两头用 → 字幕太长或读起来生硬；不写 style → 每部片长一个样 |
+| **P1 写剧本** | `film.json` | 每句拆 `text`（朗读）与 `sub`（字幕）；每段一个 `kind`；可选 `lines[].type` 锁定构图 | 一个字段两头用 → 字幕太长或读起来生硬；**别写 `style`**（不再影响画面，外观由 `work/design.json` 决定） |
 | **P2 事实核查** | `FACTS.md` | 上屏的每个数字/年份有出处编号；建"不能上屏"黑名单 | 跳过这步 → 画面和旁白数字打架，评论区第一条就是你错了 |
 | **P3 TTS** | `work/tts/*.mp3` + `tts.json` | edge-tts 逐句合成，`ffmpeg -f f32le` 实测时长，磁盘缓存 | 按字数估时长 → 字幕漂移 |
 | **P4 排时间轴** | `work/timeline.json` + `sub.srt` | `dur = lead + 实测语音 + tail`，句读必须在本段内 | 段太短 → 旁白被下一段截断 |
@@ -225,22 +242,23 @@ python render.py ... --stage frames --jobs 4 --resume   # 中断后只补缺块
 | **P6 母版** | 3 张静帧 | 先渲 3 帧看构图/配色/字重，定了再渲全片 | 直接渲全片 → 36000 帧后发现字体丑 |
 | **P7 成片** | `out/film.mp4` | rawvideo→libx264 CRF18 + 两遍 loudnorm 到 -16 LUFS | 码率过低/响度 -25 LUFS → "像草稿" |
 
-> 注：`filmkit` / `render.py` 的默认是 `crf=18`，但**自带模板 `assets/film.json` 写的是 17**。
+> 注：`filmkit` / `render.py` 的默认是 `crf=18`；
+> `assets/film.json` 只是**测试夹具**（跑通全链与金帧/门禁回归用，不是给你抄的模板），它写的是 17。
 > 自己写剧本时不写 `crf` 就是 18；追求更锐利的文字可以写 17（体积约 +30%）。
 
 ## 3. 渲染引擎怎么选
 
 | 场景 | 选型 | 实测速度 | 适合 |
 |---|---|---|---|
-| 图文/数据/科普/UI 风 | **PIL（numpy+cv2 辅助）** — `filmkit` 默认 | 40–80 fps @1080p30（模板片 75） | 绝大多数中文科普片、报告转视频 |
+| 图文/数据/科普/UI 风 | **PIL（numpy+cv2 辅助）** — `filmkit` 默认 | 40–80 fps @1080p30（示例片 75） | 绝大多数中文科普片、报告转视频 |
 | 需要流畅矢量/粒子/3D/纸纹质感 | **无头浏览器 Canvas2D/WebGL + CDP 截图 → image2pipe**（`webengine.py`） | 80–130 ms/帧（核显，PNG 截图） | 纪录片级长片、需要复杂视觉语言 |
 
 > 上面两行是**本机空载**实测口径（换机、重负载画面都会变；详见 §12）。别把区间当保证。
 | 纯数据动画 | **manim**（若已安装） | 视场景而定 | 数学/公式推导 |
 
-> **v0.5 注意**：风格包的主题化目前只覆盖 **PIL 引擎**（`engine: pil`，默认）。
-> `--engine web` 的页面（`assets/web/`）仍是 v0.4 的深蓝橙配色，不跟随 `style`；
-> 用 web 引擎时画风不会随内容变化，但配乐与旁白**照样**跟随风格包（它们不依赖渲染引擎）。
+> **设计只覆盖 PIL 引擎**（`engine: pil`，默认）：`work/design.json` 的配色/字体/版式/母题
+> 由 `assets/scenes.py` 读取。`--engine web` 的页面由**你自己**写（`assets/web/` 只是能跑通的示例页，
+> 不是出片模板），画面不跟随设计；但配乐与旁白**照样**跟随 `design.json`（它们不依赖渲染引擎）。
 
 **默认走 PIL**：依赖少（numpy+Pillow 就够）、启动快、确定性强、调试成本低。
 需要"一镜到底的粒子形变 / 实时着色器质感"才上浏览器方案——**v0.3 起它是真的可用了**，不再是"文档里说有"：
@@ -337,19 +355,24 @@ python render.py ... --engine web --stage cues   # 自动导出 work/cues.json
 **为什么值得多写这一层**：改一句台词、加一个停留窗口、把 BPM 从 120 改成 100，
 所有音效仍然贴着画面，不需要重新对时间。纯手工"在 12.5 秒放一声"的方案，改一次节奏就全废。
 
-### 5.3 配乐（scorekit）
+### 5.3 配乐（musicgen 编排；scorekit 只是合成原语）
 
-> **v0.5 起先看 §5.5。** 配乐的"身份"（调式/调性/BPM/进行/音色/律动）由风格包决定，
-> 你通常只需要在 film.json 写 `"style": "auto"` 或一个风格 id，不用手调下面这些参数。
+> 配乐的"身份"（调式/调性/BPM/情绪）由 `design.json` 的 `audio.music` 决定（§5.5），
+> 下面这些都是**可选**的底层覆盖；不写就听设计的。
+
+`film.json` 里仍可手调这些底层参数（`bpm: "auto"` 表示按 design 的 BPM 走）：
 
 ```json
 "bpm": "auto",
-"music": {"enabled": true, "mode": "score", "style": "auto", "mood": "auto",
+"music": {"enabled": true, "mode": "score", "mood": "auto",
           "key": "auto", "seed": 7, "seed_from_content": true,
-          "gain_db": -1.5, "duck_db": 3.0,
+          "gain_db": -12, "duck_db": 4.0,
           "sections": [{"at": "l01", "name": "intro", "energy": 0.3},
                        {"at": "l03", "name": "drive", "energy": 0.8}]}
 ```
+
+> `music.style` 是已删除字段（v1.0.1 起没有配乐风格表），写了也不参与渲染；
+> 配乐的调式/调性/BPM/情绪/seed 由 `design.json` 的 `audio.music` 决定，`musicgen` 现场编排。
 
 - **一张和弦表贯穿全片**，段落之间只换"色彩与能量"，不换调——这是"听起来像一首曲子"而不是"一堆配乐"的关键。
 - `energy` 控制律动层数（pad / bass / kick / hat / arp）与亮度；安静段比律动段低 4–8 dB。
@@ -388,110 +411,198 @@ python -c "import sfxkit; print(sfxkit.render('whoosh', dur=1.2).shape)"
    它的定位是**环境声**：基准电平要比同刻配乐低 10 dB 以上。
 3. **音量一律在成片混音里量**，不要按配方内部音量推断——混音时每个音效会先按峰值归一，配方里的"响"是没用的。
 
-### 5.5 风格包：画风 + 配乐 + 旁白一起变（v0.5 新增）
+### 5.5 设计 DSL：外观的唯一来源（v1.0 起）
 
-**这是 v0.5 最重要的一节。** v0.4 及以前的通病是"内容换了、气质没换"：
-画风锁死在 scenes.py 的深蓝橙、配乐锁死在 Dm/120、旁白锁死在同一个 voice。
-用户的原话是「背景音乐风格都差不多、旁白声音都差不多、整体画风也差不多」。
-
-v0.5 引入 **风格包**：一个 `style` id **同时**决定画风、配乐、旁白声线和节奏。
-
-```json
-{"style": "auto"}
-```
-
-- `"auto"` = 按标题/章节/正文关键词自动选；零命中时按内容指纹稳定落桶
-  （同一份稿子永远同一个风格，不同稿子大概率不同）。
-- 写死 id 就锁定：`tech-deep` / `magazine` / `paper` / `vivid` / `mono` / `cinema` / `lo-fi` / `epic`。
-- **不写 `style` 字段 = `legacy`**：画风/配乐/旁白全部等于 v0.4，配乐逐样本一致（老项目无痛）。
-
-查表与环境：
+**没有"内置风格"可选。** v1.0.1 删掉了全部风格表（`STYLES` / `THEMES` / `VISUAL_LANGUAGES` / `presets/`），
+v1.0.2 也没有 `style` 字段：`film.json` 里写任何 `style` 值都不再影响画面。
+外观的唯一来源是 `work/design.json`——由 `propose.py` 现场采样、你 `--confirm` 之后冻结。
 
 ```bash
-python stylekit.py --list          # 8 套风格（含画风/配乐/旁白/节奏与对比度）
-python stylekit.py --show cinema   # 单套风格的完整字段
-python render.py ... --stage style # 用某份 film.json 解析风格并打印"为什么选这套"
+python <SKILL_DIR>/scripts/propose.py --brief "科技发布会，深蓝，要遮幅" --script film.json --work work
+python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work   # -> work/design.json
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage style   # 看这份设计到底定成什么样
 ```
 
-| 风格 | 画风 | 配乐 | 旁白 |
+`design.json` 的六块（完整契约见 [references/proposal.md](references/proposal.md) 与
+`<REPO>/schemas/design.schema.json`）：
+
+| 块 | 决定什么 | 关键字段 |
+|---|---|---|
+| `structure` | 段落数与目标时长 | `segments` / `beats` / `hold_policy` / `target_sec` |
+| `visual` | 画面：配色、字体、版式、动效、装饰、字幕 | 见下面的字段表 |
+| `audio` | 配乐参数、声线、音效密度 | `music`（调式/BPM/调性/情绪/seed）/ `voice` / `sfx` |
+| `pacing` | 节奏 | `lead` / `tail` / `min_dur` / `hold` / `item_stagger` |
+| `id` / `label` | 指纹与中文标签 | `design:<hash>` / 一句中文立意 |
+| `pitch` | 说清"这个方案想干成什么样" | 中文一句话 |
+
+`visual` 的字段（`design.json` 可手改，改完用 `python <SKILL_DIR>/scripts/designkit.py --lint work/design.json` 校验）：
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `palette` | 11 个颜色角色 | **连续色相空间**里的一点（`hsv` 求解），每套都必须过 `theme_lint` 对比度体检 |
+| `family` | `sans` / `serif` / `kai` / `round` | 字族 |
+| `typography` | `tracking` / `line_gap` / `number`（8 种编号写法）/ `ratio` / `align` | 排版 |
+| `motif` | 8 种装饰母题 × 密度 | 母题决定"框长什么样"（`brackets` / `hairlines` / `handdrawn` / `slabs` / `minimal` / `letterbox` / `signal` / `rays`） |
+| `transition` | 6 种段界转场 + 时长 | `dip` / `wash` / `paper` / `wipe` / `cut` / `iris` |
+| `motion` | `ease`（4 档）/ `enter` / `push` / `breathe_hz` | 镜头缓推与入场 |
+| `bias` | `x` / `y` / `inset` | 整体重心偏移 |
+| `layout` | `left-stack` / `center-stack` / `split-right` | 默认版式 |
+| `layout_cycle` | 版式数组（v1.0.2，可选） | 按章节轮换，见下 |
+| `hud` | `chip-left` / `corner-line` / `none` | 页眉装饰 |
+| `size` / `fps` | `1920x1080` / `30` | 本版只做 16:9 横屏（可下采样到 720p） |
+| `subtitle` | 字幕样式（v1.0.2，可选） | 见下 |
+
+离散维度合计 **8 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族 × 7 情绪 × 2 调式 =
+774,144 种组合**，再乘配色这个连续量（色相 0–360° 任意取值，只是采样器会在锚点附近取）；
+**这个数是"字段能组合出多少种"，不是"推荐你从中挑一套"**——好看与否仍由对比度体检、分镜语法和你的目检决定。
+
+#### 5.5.1 字幕样式 `visual.subtitle`（v1.0.2，可选）
+
+以前字幕的字号 / 位置 / 背板透明度 / 圆角全是 `filmkit` 里的写死常量，于是**任何两条片子**的字幕带一模一样。
+现在它们进设计 DSL；**不写 = 补齐默认值，与过去逐像素一致**（老 `design.json` 不受影响）。
+
+```json
+"subtitle": {"size": 46, "y": 560, "align": "left", "plate_alpha": 170,
+             "radius": 10, "family": "sans", "color": [245, 245, 245], "max_lines": 2}
+```
+
+| 字段 | 默认 | 范围 / 取值 | 作用 |
 |---|---|---|---|
-| tech-deep | 深蓝渐变 + 橙 | 小调 100–124 / 琶音 + 铃声 | 男声叙述 + 青年开场 |
-| magazine | 米白 + 朱红，衬线 | 大调 88–100 / 电钢 | 女声叙述 + 权威引用 |
-| paper | 牛皮纸 + 靛青，楷体 | 大调 84–92 / 马林巴 | 软糯女声 + 男声引用 |
-| vivid | 深紫 + 柠檬黄，大字 | 大调 120–132 / 短促和弦 | 活泼女声开场 |
-| mono | 纯白 + 黑，超宽字距 | 极简 60–68 / 钢片琴 | 沉稳男声 + 女声引用 |
-| cinema | 近黑 + 青橙，扫描线 | 小调 76–84 / 弦乐铺底 | 纪录片男声 |
-| lo-fi | 暖灰 + 薄荷 | 大调 72–84 / 电钢 + 轻鼓 | 温柔女声 |
-| epic | 近黑 + 金，衬线 | 小调 88–96 / 铜管 + 人声铺 | 有力男声 |
+| `size` | `46` | 20–96 | 字幕字号 |
+| `y` | `null` | 0–1030 | 字幕带基准线；`null` = 默认贴底安全区 |
+| `align` | `center` | `center` / `left` | 对齐 |
+| `plate_alpha` | `170` | 0–255 | 字幕背板透明度（0 = 无背板） |
+| `radius` | `10` | 0–48 | 背板圆角 |
+| `family` | `null` | `sans` / `serif` / `kai` / `round`；`null` = 跟随大标题字族 | 字幕字族 |
+| `color` | `null` | `[r,g,b]` 或 `"#rrggbb"`；`null` = 默认墨色 | 字幕颜色 |
+| `max_lines` | `2` | 1–3 | 最多折几行 |
 
-**片内也要有呼吸**（不是整片一个死样子）：
+采样器默认就会在这些区间里变化（字号 40–56、背板透明度 96–194、圆角 2–20、
+多数居中偶尔左对齐、1/3 概率抬高），所以**默认出的片字幕也不会两条一模一样**。
 
-- 版式按章节轮换（同一章内不变）：left-stack / center-stack / split-right；
-- 镜头缓推、入场位移、条目落位步长都由主题决定（`item_stagger` 与 `cues()` 共用同一个值，音效不会错位）；
-- 旁白按 kind 换语气档（hook/body/quote/outro/emphasis/calm），引号句会自动换声线；
-- 配乐逐小节有能量弧线、配器渐入渐出、主奏轮换。
+#### 5.5.2 片内版式轮换 `visual.layout_cycle`（v1.0.2，可选）
 
-**三条硬约束**（违反会让片子"花"或者被门禁拦）：
+以前 `visual.layout` 是单值 → 全片所有章节同一个骨架。现在可以给一串版式，
+`grammar` 在**章节**维度上轮换：同一章内版式固定（观众视角里一章是一段整体），**换章才换版式**。
+这就是"同一视频内部不要大面积重复"的落地方式。
+
+```json
+"layout_cycle": ["split-right", "left-stack", "center-stack"]
+```
+
+- 元素只能取 `left-stack` / `center-stack` / `split-right`；**至少 2 种不同版式**（只写一种等于不轮换，
+  `designkit.validate_design` 直接报错，不静默放过）。
+- **不写**：`design_to_plan` 按设计指纹自动派生 **2–3 种**的轮换序列——默认就不会"全片一张版式"。
+- 可审计：`--stage layout` 打印每段选了哪类构图，并落 `work/storyboard.json`，
+  每段都带 `layout` 字段（哪一章用了哪个骨架一眼可查）。
+
+#### 5.5.2b 时长要求：关于「2 分钟」这类 brief 的真实语义（v1.0.2）
+
+`--brief` 里写「2 分钟」「90 秒」「一分半」「3 分 30 秒」会被解析成 `duration_target`，并落进
+`design.structure.target_sec`。它真正决定两件事：
+
+1. **候选的段落数**（`designkit` 按目标时长决定 `structure.segments`），所以 90 秒的 brief 与 30 秒的 brief，
+   候选结构本身不同；
+2. **渲染时的对账**：`render.py` 会打印「目标时长 vs 实测」，差 > 15% 时告警。
+
+**但它不会截断旁白**：成片长度仍由 TTS 实测时长决定。写完 `film.json` 的台词后如果总时长和目标差太多，
+要改的是台词量（或 `pacing` 的停留），不是指望渲染器「压到 90 秒」。
+
+#### 5.5.3 设计多样性：候选之间、以及片与片之间
+
+`propose.py` 的候选不是"换个颜色"就叫多方案。两个设计在 **10 个离散轴**上比较
+（`designkit.design_distance`）：配色 / 母题 / 转场 / 缓动 / 编号 / **配乐（调式 + BPM 档 + 情绪复合键）** /
+声线 / 情绪 / 版式 / 调式。规则：
+
+1. **候选之间**至少 **2 个轴**不同，否则重新采样（`propose` 会把"距离"打在候选表里，一眼能看出谁和谁像）。
+2. **底色必须拉开色相**：两个候选的底色色相差 < 6° 一律重采（并排看就是同一片底色）；
+   色相差 < 12° 时，只有**结构差异 ≥ 3 个轴**才接受。
+   v1.0.2 修掉了旧实现的两个坑：以前按"配色族"量化到 24° 分桶判重，带 `--brief "深蓝"` 这类约束时
+   可选色相窗口只有 52°，n=3 有近一半概率直接采样失败；现在直接比色相距离，
+   实测带约束的 brief 连跑 10 次 **10/10 成功**（含"深蓝 + 遮幅"）。
+3. **配乐轴**以前恒失效（读的是已删除的 `audio.music.style`），现在按
+   **调式 / BPM 档（±6 归一）/ 情绪** 的复合键判定——"两个候选配乐不一样"是真的在比。
+
+#### 5.5.4 片间去重台账（v1.0.2，默认开启）
+
+"每条视频都不一样"不能只靠随机：同一个题材连拍三部，仍可能撞到相近的配色/版式组合。
+`propose.py` 现在把**确认过（= 真要出片）的设计**记进用户级台账，提案时主动避开：
+
+| 项 | 值 |
+|---|---|
+| 默认路径 | `~/.dsh/video-studio/design-ledger.json`（最多保留 500 条） |
+| 环境变量 | `VIDEO_STUDIO_LEDGER` 可改路径；设为 `off` / `0` / `false` / `no` 即关闭 |
+| CLI | `--no-ledger`（本次不读不写）/ `--show-ledger`（打印路径与最近 20 条） |
+| 判据 | 这批候选与最近交付设计的最小距离 < **2 维** → 换新 nonce 重采（最多 4 轮），并在输出里告警 |
+| 记录时机 | **`--confirm` 时**才记（草稿候选不进台账） |
+
+读不到 / 写坏台账都当空表处理——**台账永远不会因为文件损坏而阻塞出片**。
+写文档或做回归时把 `VIDEO_STUDIO_LEDGER` 指到临时目录，别动用户真实台账。
+
+#### 5.5.5 三条硬约束（违反会让片子"花"或者被门禁拦）
 
 1. 同一部片**不许跨明暗族**换主题（深蓝段直接切暖白段会精确触发闪烁门禁，观众也看着像换片）。
-2. 主题必须过 `stylekit.theme_lint` 的对比度体检（ink≥7 / muted≥4.5 / dim≥3 / accent≥4.5）。
+2. 主题必须过 `stylekit.theme_lint` 的对比度体检（ink≥7 / muted≥4.5 / dim≥3 / accent≥4.5 / accent2≥4.5）。
 3. 旁白全片最多 2–3 把声音（`voice.max_distinct`），相邻句不换人——否则像广播剧而不是旁白。
 
-字段、指纹规则、加第 9 套风格的步骤见 **references/style-packs.md**。
+#### 5.5.6 已删除的东西（别照着旧文档试）
 
-### 5.5b 场景语法与视觉语言（v0.9）：换风格不再只是换色
+| 旧写法 | 现在 |
+|---|---|
+| `film.json` 写 `"style": "auto"` / 风格 id / `"legacy"` | **不再影响画面**；外观只认 `work/design.json`。没有 design 就渲染会报错并给两步指引 |
+| `stylekit.py --list` / `--show <id>` / `--lint` | **已移除**：命令会打印"内置风格表已删除"并以 **exit 2** 结束（以前的 `--list` 直接 NameError、`--lint` 在空表上假绿） |
+| `render.py --preset <id>` | 已删除（v1.0.1）。要指定外观只有两条路：自然语言 `--brief` / 直接写 `design.json` |
+| persona 声线表（`bright_female` 之类） | 已删除：`voice` 只认裸 edge voice id + 响度补偿表；`voicekit.py --list` 可看当前音色与补偿 |
+| `filmkit.resolve_theme()` / `style_plan()` 在无设计时"回落默认主题" | **不再静默回落**：直接抛错并告诉你去跑 `propose.py` → `--confirm` → `render.py --stage all` |
 
-v0.5 解决了"画风/配乐/旁白一片一样"，但只到**皮肤**层。骨架没变：当时 `assets/scenes.py`
-只有 3 个绘制器（hook / body / outro），quote / emphasis / calm 全部回落到 body，
-三个绘制器共用"背景板 → 眉标 → 大字 → 副标 → 强调线 → HUD"同一套结构。
-于是 8 套风格换完，灰度量出来的构图骨架（前景占比/重心/边缘/对称）几乎不动——
-用户说的"每个视频都差不多，只是主题和颜色不同"就是这么来的。
+外观细节（配色怎么解、主题 35 个字段、如何手写一份设计）见
+[references/style-packs.md](references/style-packs.md)——那篇现在讲的是**怎么用设计 DSL 定制外观**，
+不是"8 套风格选一套"。提案流程与契约见 [references/proposal.md](references/proposal.md)。
 
-v0.9 把这件事拆成三层**正交**的：
+### 5.5b 场景语法：同一部片内部的骨架也要变（v0.9）
+
+v0.9 起画面不只有"皮肤"（配色/字体），还有三层正交结构：
 
 | 层 | 决定什么 | 谁读它 | 产物 |
 |---|---|---|---|
 | 叙事 `kind` | 声线、语气、配乐能量 | voicekit / musicgen | 本版**没有新增 kind 值** |
 | 场景 `type`（10 类构图） | 这段画面长什么样 | `assets/scenes.py` 的 10 个绘制器（`_DRAWERS`） | timeline 的 `scene_type`、`work/storyboard.json` |
-| 视觉语言（风格 id） | 这套风格怎么画（母题/转场/字距/重心） | `stylekit.VISUAL_LANGUAGES` | `work/style.json` 的 `language` |
+| 设计 `visual` 五组签名 | 这套设计怎么画（母题/转场/字距/重心） | 设计 DSL → `work/style.json` | `work/style.json` 的 `language` 与 `layout_cycle` |
 
 场景类型有 10 个：`hero` 封面 / `statement` 金句 / `list` 要点 / `stat` 数字卡 /
 `compare` 左右对比 / `process` 流程轴 / `quote` 引语 / `chapter` 章节卡 /
 `chart` 数据条 / `outro` 收尾。**不写就不管**——grammar 按内容自动选（字段存在性 >
-关键词 > 结构位置，段长不足按固定表降级，连续同类型 ≤2 段）；
-要锁定就写行级 `lines[].type`。
+关键词 > 结构位置，段长不足按固定表降级，连续同类型 ≤2 段）；要锁定就写行级 `lines[].type`。
 
-看选型与环境：
+看选型（命令都不需要 `--scenes`，除非你要用自己的渲染器）：
 
 ```bash
-python render.py --script film.json --scenes scenes.py --work work --stage layout
-#   分镜: 4 段 / 封面×1 要点列表×2 收尾×1
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage layout
+#   分镜: 3 段 / 封面×1 要点列表×1 收尾×1
 #     l01    hook     -> hero      v0 d0  首段/开场
-#     l02    body     -> list      v0 d2  items>=3
-#     ...
-#   同时落 work/storyboard.json：每段的 type / 变体 / 装饰密度 / 理由，可审计
+#     l02    body     -> list      v1 d1  items>=3
+#     l03    outro    -> outro     v0 d0  末段/收尾
+#   同时落 work/storyboard.json：每段的 type / variant / decor / layout / 理由，可审计
 
-python render.py --script film.json --stage style
-#        视觉语言: 母题=brackets 转场=dip(0.28s) 字距=0.0 编号=dim 重心=(+0,+0)
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage style
+#   版式轮换: split-right -> left-stack（按章节轮换，防全片一张版式）
+#   视觉语言: 母题=brackets 转场=paper(0.40s) 字距=3.0 编号=cn 重心=(-60,+60)
+#   字幕: 底部安全区 44px 对齐=center 背板α=138 圆角=2 最多1行
 #   （坏配置在这里就拦，不等渲完 300 帧）
 ```
 
-**legacy 边界（必须记住）**：不写 `style` 字段 = 走 v0.4 三个老绘制器，逐字节不变，
-timeline 里不会出现场景字段。想要新构图，写 `"style": "auto"` 或任意风格 id。
+**边界（必须记住）**：
 
-**三条代价与边界**：
-
-1. **比 v0.8.1 慢，但仍在预算内**：模板片 frames 约 **19 ms/帧（54–61 fps）**，预算 25 ms；
+1. **比 v0.8.1 慢，但仍在预算内**：示例片 frames 约 **19 ms/帧（54–61 fps）**，预算 25 ms；
    v0.8.1 约 13 ms/帧（约 75 fps）。慢在 10 类构图各自多了装饰与几何。
-   0.9.0 首版还要慢一截（约 20–24 ms/帧），0.9.1 把装饰母题从"逐帧 paste（实测 5.6 ms）"
-   改成"烘焙进背景底版（1.3–2.0 ms）"才回到现在这个数。换机必须重测。
+   0.9.1 把装饰母题从"逐帧 paste（实测 5.6 ms）"改成"烘焙进背景底版（1.3–2.0 ms）"才回到现在这个数。
 2. **同一部片仍锁一个明暗族**：段界跨族会整屏换底、触发闪烁门禁，也像换片。
-3. **web 引擎不跟随**：`--engine web` 的页面由你自己写，本次没有 10 类构图，
-   画风仍只有主题色。
+3. **web 引擎不跟随场景语法**：`--engine web` 的页面由你自己写，没有 10 类构图，
+   画风也只有你页面里的颜色。
 
 选型规则、`storyboard.json` 字段、加第 11 类构图的步骤、常见误用，见
-[scene-grammar.md](references/scene-grammar.md)；五组视觉语言签名与加第 9 套风格要补什么，
-见 [style-packs.md](references/style-packs.md)。
+[scene-grammar.md](references/scene-grammar.md)；配色/母题/字幕等设计字段见
+[style-packs.md](references/style-packs.md)。
 
 ### 5.6 混音链（照着做，别自创）
 
@@ -511,10 +622,10 @@ timeline 里不会出现场景字段。想要新构图，写 `"style": "auto"` �
   这是唯一一条"混音后自己改电平"的门禁，保证换任何配乐素材都不会把旁白盖住。
 - **BGM 与音效是可选层**：它们的作用是铺情绪与打重音，不该抢字。想更安静就调低 `music.gain_db`
   或设 `music.enabled=false`；"让观众听清旁白"永远优先于"背景好听"。
-- 音效响时配乐自动让位：v0.7 起风格表默认 4.0 dB（mono 3.0 / lo-fi·magazine 3.5 /
-  cinema·epic 5.5），`film.json` 的 `music.duck_db` 显式值永远优先。旧版 `mix_film` 默认 3.0 dB，
+- 音效响时配乐自动让位：`design.json` 的 `audio.music.duck_db` 决定档位（默认 4.0 dB），
+  `film.json` 的 `music.duck_db` 显式值永远优先。旧版 `mix_film` 默认 3.0 dB，
   在段落过门时配乐几乎与音效等高——这是"配乐和音效听着像同一套"的混音侧成因，已由 `duck_default` 抬高。
-  让得太多会"音乐一抖一抖"，所以按风格分级而不是一律压狠。
+  让得太多会"音乐一抖一抖"，所以按设计分级而不是一律压狠。
 - **本项目不做母带压缩**：链路是 求和 → duck → 峰值保护 0.89 → `ffmpeg loudnorm` 两遍。
   代码里**没有压缩器**（想加请自行在 `mix_film` 之后接），所以也不存在"压太狠"的问题；
   要让重击前后有能量差，靠的是配乐分段 energy 与 `suck()`，不是压缩。
@@ -530,19 +641,19 @@ v0.7 把指纹推进到**结构层**（详见 **references/audio-variation.md**�
 
 | 层 | v0.6 | v0.7 |
 |---|---|---|
-| 配乐和声 | 风格固定进行 | 指纹决定**每两小节一次的稳定和弦替换**（不影响乐句末与片尾规则） |
-| 配乐进行 | 风格固定一套进行 | 指纹在风格自带的 calm/body/drive 三档里选一档（同风格素材，只换功能顺序） |
-| 配乐动机 | 风格固定动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
+| 配乐和声 | 固定进行 | 指纹决定**每两小节一次的稳定和弦替换**（不影响乐句末与片尾规则） |
+| 配乐进行 | 固定一套进行 | 指纹在 calm/body/drive 三档里选一档（同素材，只换功能顺序） |
+| 配乐动机 | 固定动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
 | 配乐鼓型 | 固定落点 | 指纹加 ghost kick（不与现有落点重复），clap 位置 ±0.5 拍 |
-| 出片接线 | 指纹只进 seed | `render.py` 的 `st_score` 把 `seed_effective`（含指纹）传给 `musicgen.render()`；v1.0.1 起没有 scorekit 风格路径 |
+| 出片接线 | 指纹只进 seed | `render.py` 的 `st_score` 把 `seed_effective`（含指纹）传给 `musicgen.render()` |
 | 音效 seed | `seed_base + i`（只跟 cue 顺序） | `content_seed(seed_base, style, content_fp, type, t)`（跟内容走） |
 | 提示音音高 | 硬编码 D 小调五声 | `in_key(freq, key)` 跟随配乐调性 |
 | 段落边界 | 配乐过门 + sfx 转场各响各的 | 边界前 2.2 s 内的 whoosh/riser **自动 -3 dB**（不与过门撞车） |
-| duck | 3 dB 一刀切 | 按风格 3.0–5.5 dB，配乐让得更彻底 |
+| duck | 3 dB 一刀切 | 按设计分级（默认 4.0 dB），配乐让得更彻底 |
 | 旁白优先（v0.7.1） | 配乐 -1.5 dB、无语音侧链 | 配乐 -12 dB 基线 + 人声处再压 6 dB（音效 3 dB），人声段 SNR 实测 15 dB |
 
-**向后兼容**：不写 `style` 字段（legacy）或 `sfx.content_seed: false` 时，音效走旧的
-`seed_base + i` 路径，老片逐样本不变（selfcheck 第 33 条守着这条）。
+**向后兼容**：`sfx.content_seed: false` 时音效走旧的 `seed_base + i` 路径，老片逐样本不变
+（selfcheck 第 33 条守着这条）。注意：v1.0.1 起**没有 legacy 外观**——外观永远来自 `design.json`。
 
 验收工具（改音频相关代码后必须跑）：
 
@@ -612,7 +723,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 1. **词间有空隙**：实测 edge-tts 相邻词之间有 0.1–0.3 s 不在任何事件里。所以"词时长求和"永远小于句长，
    G10 的覆盖率阈值才定在 45%（低于它才是"明显少了"），别拿 `sum(dur) == dur` 当判据。
 2. **句尾静音不在词事件里**：约 0.5 s，靠**整句实测时长**兜底。G10 只检查"末词终点离句尾不超过 0.40 s"
-   （模板片实测 0.07–0.12 s），超过它通常意味着词事件本身错位了。
+   （示例片实测 0.07–0.12 s），超过它通常意味着词事件本身错位了。
 3. **词锚点会静默退化**：`l03:w99` 不会炸，只会 WARN 后退回句偏移。**改台词后先看 stdout 有没有这条 WARN**——
    否则你会以为自己精确打到了某个词。同样的，`words=false` 或词事件为空时，字幕不会报错，只是退回整句断行。
 
@@ -625,7 +736,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（58 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（67 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -779,7 +890,7 @@ G0 / G11 / G12 三个新模块（外加 `G10` 词级）的实测数据、阈值�
 高分（≥10）但被判成运动的候选**会进 warning**（"高分异常被判为运动，建议人工复核"）——
 **门禁可以保守，但不能静默**。
 
-实测反例（本技能自带的 web 模板片）：报了 3 处闪烁，逐一逐帧查下来**全部是**
+实测反例（本技能自带的 web 示例页）：报了 3 处闪烁，逐一逐帧查下来**全部是**
 "最后一个字入场"和"交界黑场起坡"这两类加速运动；加上这道闸后归零，
 而 selftest 里注入的单帧白闪仍然能被检出——**没被削弱的门禁才叫门禁**。
 调阈值之前先确认这条闸在不在：没有它，你会把正常运动当 bug，改到死。
@@ -873,7 +984,7 @@ python render.py --batch films.json
 | 收尾 | `batch-report.json`（`phase="render"`，含每条 `exit` / `wall_s` / 日志尾）+ 退出码：全成功 `0`，**部分失败 `1`** |
 | 预检失败的退出码 | 也是 `1`（`SystemExit` 带文字，Python 的默认行为）；区别看 `batch-report.json` 的 `phase` |
 
-实测（本机，2 条 29 s 模板片，v0.8 早期一轮）：**67.2 s / 60.1 s**，各 `pass 11 · fail 0 · skipped 1`。
+实测（本机，2 条 29 s 示例片，v0.8 早期一轮）：**67.2 s / 60.1 s**，各 `pass 11 · fail 0 · skipped 1`。
 注意每条都要付 G11 的参考帧成本——批量不是"摊销"，是线性叠加。**而且瓶颈已经转到 qa**：
 单条全链实测 47.3 s 里 `qa` 占 23.9 s（见 §1 的时间表），批量时这个比例会原样复制。
 
@@ -933,45 +1044,60 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ## 9. 参考资料（按需加载）
 
+- `references/proposal.md` — **（v1.0）提案优先**：为什么先出方案、`design.json` 契约、候选采样与设计距离、`visual.subtitle` / `layout_cycle` 字段、片间去重台账、提案闸五档、常见误用
+- `references/scene-grammar.md` — **（v0.9）场景语法**：10 类构图怎么选、`storyboard.json` 字段、设计五组视觉签名、加第 11 类构图的步骤、常见误用
 - `references/pipeline.md` — 八阶段详细规格、契约 JSON 格式、目录约定、并行分工
 - `references/scene-authoring.md` — 场景函数写法、构图规则、Canvas/CDP 方案、超采样与后处理
 - `references/audio.md` — 采样级混音、程序化配乐/音效、响度链路、循环环境音、提示点系统
-- `references/audio-variation.md` — **（v0.7）片间差异**：内容指纹怎么进和声/进行/动机/鼓型，legacy 兼容与验收阈值
+- `references/audio-variation.md` — **（v0.7）片间差异**：内容指纹怎么进和声/进行/动机/鼓型与验收阈值
 - `references/sfx-design.md` — **（v0.3）音效设计**：物理拆解流程、配方表、听感诊断表、QC 规则
 - `references/web-engine.md` — **（v0.3）浏览器引擎**：页面契约、确定性时间轴、分块渲染、崩溃重开
 - `references/frame-qa.md` — **（v0.3）帧级质检**：单帧闪烁判据、画面空窗、音画同步、报告怎么读
 - `references/quality-gates.md` — 方法论 G0–G8 全部门禁、可复制代码、验收清单（文内另有「两套编号别混用」的映射说明：账本是 `G0`/`G4–G12`）
 - `references/word-timeline.md` — **（v0.8）词级时间轴**：词级契约、句时长为何仍是权威、词锚点写法与退化路径、四个真实坑
 - `references/v08-quality.md` — **（v0.8）三道新门禁**：VMAF/SSIM、ASR 回读、渲前预检的判据、阈值来源、实测数据与关闭方式（词级 G10 见 `word-timeline.md`）
-- `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/style/scenes.py 各要重跑什么
-- `references/style-packs.md` — **（v0.5）风格包**：主题/配乐/声线字段、三级指纹规则、加第 9 套风格的步骤
+- `references/change-impact.md` — **（v0.6）改动影响表**：改了 text/sub/hold/design.json/scenes.py 各要重跑什么
+- `references/style-packs.md` — **（v1.0.2 重写）设计 DSL 外观定制**：35 字段主题、连续色相配色、母题/转场/字幕/版式轮换怎么写、常见误用（不再是「风格包选一套」）
 - `references/pitfalls.md` — 20 条最佳实践 + 16 条反模式 + 3 个非确定性 bug 复盘
 
 ## 10. 脚本资产
 
+> **所有脚本都在技能目录里，直接按路径调用即可**（如 `python <SKILL_DIR>/scripts/propose.py`）。
+> 不需要拷到工程目录——v1.0.2 起的主路径是零拷贝（§1）。
+
 | 文件 | 作用 |
 |---|---|
-| `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
-| `scripts/render.py` | 编排器：**13 个 stage**（含 `accept` / `explain`）、两种引擎（`--engine pil\|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`）。v0.8 增：`--batch` 批量、`--preview N` 前 N 秒试片、`--run-id` 运行标签（`work/runs/<runId>/`）、`--vmaf full\|sample\|off`、`--no-preflight` |
+| `scripts/propose.py` | **（v1.0）提案器**：`--brief` 出 N 个候选（各带静帧联系表 + 设计距离）/ `--revise` 重出 / `--diff` 对比 / `--confirm` 冻结 `work/design.json` / `--show` 查看；v1.0.2 增片间去重台账（`--no-ledger` / `--show-ledger` / `VIDEO_STUDIO_LEDGER`） |
+| `scripts/designkit.py` | **（v1.0）设计 DSL**：`sample_designs`（确定性采样、两两 ≥2 维不同、配色色相分叉）/ `validate_design`（fail-closed）/ `design_to_plan` / `design_distance` / `subtitle_of`；CLI：`--sample` / `--lint` / `--list-palettes` |
+| `scripts/previewkit.py` | **（v1.0）离线预览**：合成时间轴 + `grammar.plan_scenes` + 场景绘制 + 联系表，不联网、不合成旁白 |
+| `scripts/grammar.py` | **（v0.9）场景语法**：按内容从 10 类构图里选 `type`，落 `work/storyboard.json`；`--help` 可查用法 |
+| `scripts/voicekit.py` | **（v1.0）旁白声线/语气计划**：裸 edge voice id + 实测响度补偿表 + 6 档 tone；`--list` 查音色表与语气档 |
+| `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区（读 `design.visual.subtitle`）/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
+| `scripts/render.py` | 编排器：**14 个 stage**（`style`/`tts`/`layout`/`cues`/`score`/`sfx`/`audio`/`frames`/`mux`/`qa`/`stills`/`accept`/`explain`/`all`）、两种引擎（`--engine pil|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`）、`--batch` 批量、`--preview N` 前 N 秒试片、`--run-id` 运行标签、`--vmaf full|sample|off`、`--no-preflight`。**`--scenes` 缺省 = 剧本同目录 `scenes.py` → 技能内置 `assets/scenes.py`** |
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
-| `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**58 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷 / 51 金帧回归。v0.9 新增 4 条：52 场景语法 / 53 视觉语言包 / 54 场景类型单真值 / 55 剪影可区分。**v1.0 新增 3 条：56 设计 DSL（采样/校验/转计划/fail-closed）/ 57 预设下沉（presets → design）/ 58 提案闸（absent/draft/broken）** |
+| `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
+| `scripts/selfcheck.py` | 回归自检：**67 条**「曾真的坏过」的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条（44–51）、v0.9 新增 4 条（52–55）、v1.0 新增 3 条（56–58）、v1.0.2 新增 8 条：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已删除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）** |
 | `scripts/preflight.py` | **（v0.8）渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
 | `scripts/sfxkit.py` | **（v0.3）物理建模音效库**：模态合成/纹理/空间/动力学/母带 + 24 个配方 + `CUE_ALIASES` |
-| `scripts/musicgen.py` | **（v1.0.1）参数化配乐编排器**：和弦进行/动机/鼓型/音色全可传参，现场生成 `music.wav`（没有风格表） |
+| `scripts/musicgen.py` | **（v1.0.1）参数化配乐编排器**：和弦进行/动机/鼓型/音色全可传参，现场生成 `music.wav`（**没有风格表**） |
 | `scripts/scorekit.py` | **配乐合成原语**：和声/律动/吸气/自动电平/混音/响度测量/24-bit 落盘。v1.0.1 删掉了 9 套 `MUSIC_STYLES` 风格表（模板），留下的只是可复用的底层技术 |
 | `scripts/webengine.py` | **（v0.3）浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
 | `scripts/qa_frames.py` | **（v0.3）帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
-| `assets/scenes.py` | 场景模板（开场/正文卡片/收尾 + **`cues()` 提示点钩子示范**），含缓存排版与预烘焙背景的正确写法 |
-| `assets/film.json` | 剧本模板（含 `hold`/`bpm`/`music`/`sfx.cues`/`engine` 等新字段） |
-| `<REPO>/schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，模板由 `tools/ci_check.py` 第 12 项守着 |
+| `assets/scenes.py` | **技能内置渲染器**（v1.0.2 起是 `--scenes` 的默认回退）：10 类构图绘制器 + `draw_frame` + **`cues()` 提示点钩子示范**，含缓存排版与预烘焙背景的正确写法。要改画面就把它拷成你自己的 `scenes.py` 再改，或直接参考它写 |
+| `assets/film.json` | **测试夹具**（跑通全链 / 金帧 / 门禁回归用，**不是给用户抄的模板**；里面没有 `style` 字段，外观由 `work/design.json` 决定） |
+| `assets/design_fixture.json` | **金帧基准设计**（像素回归绑它，不绑任何内置风格） |
+| `assets/voice_loudness.json` | 音色响度补偿实测表（voicekit 与 designkit 共用，避免两处漂移） |
+| `<REPO>/schemas/design.schema.json` | **（v1.0）设计 DSL 契约**（draft-07 子集）：六块字段、`visual.subtitle` / `layout_cycle`、fail-closed 规则 |
+| `<REPO>/schemas/proposal.schema.json` | **（v1.0）提案契约**：候选 + 确认状态 + `designHash` / `scriptHash` |
+| `<REPO>/schemas/film.schema.json` | **（v0.6）film.json 的契约**（JSON Schema draft-07 子集）。校验器见 `scripts/filmcheck.py`，契约由 `tools/ci_check.py` 第 12 项守着 |
 | `<REPO>/tools/estimate.py` | **（v0.6）开渲前预演**：帧数 / 各阶段耗时 / 磁盘峰值 / 分块建议，`--json` 可机读。基准常量集中在文件顶部，换机请重测后回填 |
 | `<REPO>/tools/golden_frames.py` | **（v0.8）金帧像素回归**：渲 3 帧算 SHA-256 与 `assets/golden_frames.json` 比对（`--write` 重录 / `--check` 校验）。同环境像素变了是 fail，换了机器（字体指纹不同）是 skipped——跨机不误报 |
-| `assets/web/` | **（v0.3）浏览器页面模板**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本 |
-| `requirements.txt` | **（v0.4）Python 依赖清单**：必需（numpy/Pillow/edge-tts）/ 强烈建议（cv2）/ 可选（scipy、playwright）三档，带注释说明"缺了会怎样"。`pip install -r requirements.txt` 即可 |
+| `<REPO>/tools/silhouette_qa.py` | **（v0.9）剪影可区分门禁（G13）**：不同设计渲染出的画面骨架必须两两可区分，防止「换设计只是换色」 |
+| `assets/web/` | **（v0.3）浏览器页面示例**：原生 Canvas2D 确定性时间轴、场景示范、文字质检脚本。**不是出片模板**：`--engine web` 需要你自己的页面（见 §3） |
+| `requirements.txt` | **（v0.4）Python 依赖清单**：必需（numpy/Pillow/edge-tts）/ 强烈建议（cv2）/ 可选（scipy、playwright）三档，带注释说明「缺了会怎样」。`pip install -r requirements.txt` 即可 |
 
 ### 关键内置能力（v0.2）
 
@@ -1005,7 +1131,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 > **v0.6 起不要口头复述这些数字**：`out/QC-REPORT.md` 是机器生成的交付凭据，
 > 照抄报告里的"实测值"即可；报告里的 `skipped` 项必须逐项说明为什么没执行。
 >
-> 完整示例（本技能自带模板片的实测，可以照这个格式抄；**数字每次跑会差一点**——
+> 完整示例（本技能自带示例片的实测，可以照这个格式抄；**数字每次跑会差一点**——
 > TTS 实测时长、AAC 编码都会让真峰/响度/锐度在小范围内浮动，别 chasing 小数点）：
 > ```
 > 容器：1920x1080 / 30 fps / h264+aac / 48 kHz / 时长 30.10 s / 1.00 Mbps
@@ -1014,7 +1140,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 > 词级：4 句 / 64 词 / 末词偏差最大 0.09 s（G10）
 > 画质：VMAF 97.22 / SSIM 0.9928 / 870 帧（G11，参考帧由场景函数重渲）
 > 回读：字符召回 0.803（G12，faster-whisper small；中英混排专名会掉分，< 0.72 才 fail）
-> 自检：selfcheck PASS 55 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
+> 自检：selfcheck PASS 67 / FAIL 0 / SKIP 0；tools/ci_check.py PASS 12 / FAIL 0
 > 音频：work/score.json 的 variation 非 0（指纹参与了结构变奏）、audio_similarity --strict 全 PASS
 > 目检：work/qa/sheet.png，四帧分别为开场星射线、五步成片卡片、画质三件事卡片、收尾居中大字；
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
@@ -1046,7 +1172,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 编码速度 | x264 `-preset medium -crf 17` = **141 fps（4.7× 实时）**；x265 94 fps；vp9 65 fps |
 | 硬件编码 | h264_amf 127 fps —— **不比 x264 快，体积大 2.5 倍，不用** |
 | 端到端 | 17.47 s 成片（524 帧 + 3 句旁白）编码 4.99 s = **3.5× 实时** |
-| 实测渲染 | PIL 中等复杂度场景 **40–54 fps**（1080p30）；自带模板片 **68–82 fps**（多次实测区间） |
+| 实测渲染 | PIL 中等复杂度场景 **40–54 fps**（1080p30）；自带示例片 **68–82 fps**（多次实测区间） |
 | 磁盘 | 当时约 C 300 GB / D 520 GB（会持续变动，别当基准） |
 
 ### v0.3.0 各模块实测（同机，2026-11-07）
@@ -1058,7 +1184,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scorekit` | 作为合成原语：389 s 全片 **4–8 s**（v0.3 实测）、60 s 2–4 s；24-bit 落盘与响度测量仍被复用。**它不再是配乐引擎**，`--selftest` 只验原语与 legacy 逐样本兼容 |
 | `webengine` | **80–130 ms/帧**（1080p30，Edge 无头，PNG 截图）；12 s / 360 帧 **28–30 s**（2 workers，含启动）；**同一页面会话内**同帧两次截图 byte 完全一致（跨会话默认 GPU 光栅有 ≤4 像素、±1 级抗锯齿差异，要跨会话字节级一致请开 `--deterministic`，代价约 +22%/帧） |
 | `qa_frames` | 30 s 片全量深检 **约 1 s**（160×90 流式解码 903 帧）；闪烁/空窗/静止/同步 |
-| 端到端 | 30.10 s 模板片：TTS 4 句 → cues 由 scenes.py 按 kind 生成（v0.7，模板片 17 条）→ 配乐 3.3 s → 音效逐条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
+| 端到端 | 30.10 s 示例片：TTS 4 句 → cues 由 scenes.py 按 kind 生成（v0.7，示例片 17 条）→ 配乐 3.3 s → 音效逐条落位 → 混音 → PIL 75 fps 渲染 12 s → mux → 深检 PASS |
 | Python 依赖 | **playwright 已装**（chromium + msedge 均可用）；scipy 1.18 已装（sfxkit 可选，缺了走 FFT 兜底）；`soundfile` **没装**（本技能不依赖它） |
 
 ### 排期公式（保守）
@@ -1077,33 +1203,36 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ## 13. 升级须知（从旧版迁移要动的地方）
 
-### 13.0 v0.4 → 当前版本（v0.5 / v0.6 / v0.7 / v0.7.1 / v0.7.2 / v0.8.0 / v0.8.1 要做什么）
+### 13.0 v0.4 → 当前版本（v0.5 … v0.8.1 / v0.9 / v1.0 / v1.0.1 / v1.0.2 要做什么）
 
-**一句话**：v0.4 的老项目**不写新字段就能继续跑**（不写 `style` = legacy 行为，配乐逐样本不变），
-但**工作目录要多拷文件**，且有两处默认值变了要重新听。按版本逐条过：
+**一句话**：v1.0 是**破坏性变更**——不再有 `style`、没有内置风格表、外观必须来自 `work/design.json`。
+v0.4–v0.9 的老项目要出片，必须走一遍 `propose.py` → `--confirm`。按版本逐条过：
 
 | 从 → 到 | 你要做的动作 | 依据 |
 |---|---|---|
-| v0.4 → **v0.5** | 新工作目录多拷 `scripts/stylekit.py`（**必需**，render 直接 import）、`scripts/voicekit.py`（可选，缺了单声线降级）；`--stage` 多出 `style`，`--stage all` 顺序变为 `style → tts → …`；改用 `style: "auto"` 才会自动选风格，不写仍是 legacy | CHANGELOG 0.5.0「升级须知（v0.4 -> v0.5）」 |
-| v0.5 → **v0.6** | **必需**多拷 `scripts/gates.py`、`scripts/stagewatch.py`（少一个 render.py 直接 `ModuleNotFoundError`）；首次跑会多出 `work/manifest.json` / `work/gates.json` / `out/QC-REPORT.md`，属新增文件 | CHANGELOG 0.6.0「升级须知（v0.5 → v0.6）」 |
-| v0.6 → **v0.7** | 想吃到「配乐/音效随内容变化」就保持 `style: "auto"`，**不要**写死 `music.seed` 或关掉 `seed_from_content`；音效想更丰富就把提示点写进 `scenes.py` 的 `cues()` | CHANGELOG 0.7.0「升级须知（v0.6 → v0.7）」 |
-| v0.7 → **v0.7.1** | 配乐基线默认值从 `music.gain_db=-1.5` 变成 **-12**（模板也已改），有人声处再压配乐 6 dB / 音效 3 dB；**之前手调过 `gain_db`/`duck_db` 的片子要重新听一遍**（现在背景整体更低）。显式写 0 可关掉对应侧链 | CHANGELOG 0.7.1「修了什么」+ `assets/film.json` 的 `music` 默认值 |
-| v0.7.1 → **v0.7.2** | `QC-REPORT.md` 现在**只落在 `--out` 的目录**（以前 `accept` 分支按 `work` 的兄弟目录算，`--out deliver/film.mp4` 时签核会更新到另一份没人交付的文件）。如果你用 `--out` 指到了非 `out/` 的目录，交付时请看新位置；旧的 `out/QC-REPORT.md` 不会被再写 | `render._report_path()` 的 docstring + `selfcheck` 第 40 条（本轮新增） |
-| v0.7.2 → **v0.8.0** | ① 新工作目录**多拷三个文件**：`scripts/preflight.py`、`scripts/qavmaf.py`、`scripts/qaasr.py`（都是**可选**：不拷对应门禁记 `skipped` 并写明原因，不会让渲染失败——但 `skipped != 通过`）。② **默认行为变了**：`film.json` 的 `words` 默认 **true**，老项目第一次跑 `--stage tts` 会**把每句重新联网合成一次**（老缓存没有词级记录）；不想付这次网络成本就写 `"words": false`。③ **qa 变慢**：全片 VMAF 每片多渲一遍参考帧（29 s 片实测 14.2 s），ASR 8.7 s——全链从约 28 s 涨到 **47.3 s**，qa（23.9 s）已超过渲染本身（12.5 s）。④ **输出仍默认 1080p@30**：不写 `video` 块行为与 v0.7 完全一致。⑤ 自检 43 → **51** 条，三档门禁多了 `G0/G10/G11/G12` 四行 | CHANGELOG 0.8.0「升级须知（v0.7.2 -> v0.8.0）」+ 本节下方逐条说明 |
-| v0.8.0 → **v0.8.1** | ① **删一次 `work/segments`**：`--resume` 的分块指纹新增 timeline 内容，旧计划会判"已变化"。② **退出码变严**：`--stage style/stills/frames/mux` 的门禁 fail（或 `--strict-gates` 下有 skipped）现在真的返回 1——靠退出码判定的交付脚本会开始"失败"。③ **`ci_check` 汇总变三档**：`PASS n / FAIL n / SKIP n`，用 `grep 'PASS 12'` 的脚本要改；要"没执行也算失败"加 `--strict`。④ **`filmcheck` 变严**：`video` 块走 `filmkit.video_plan`（1600x900 之类报 error），`qa.vmaf.enabled`/`qa.require_vmaf`/`qa.ssim.enabled` 三个惰性键报 WARN。⑤ **`webengine` 两处改成 fail-closed**：`style=None` + 720p 不再静默裁切、页面 FPS 与注入值不一致会报错。⑥ 金帧基线**不用重录**（像素逐位一致）。 | CHANGELOG 0.8.1「升级须知（v0.8.0 → v0.8.1）」+「行为变化」表 |
+| v0.4 → **v0.5** | `--stage` 多出 `style`，`--stage all` 顺序变为 `style → tts → …`（**这一步的 style 体系已在 v1.0.1 删除**，见下面 v1.0.1 行） | CHANGELOG 0.5.0 |
+| v0.5 → **v0.6** | 首次跑会多出 `work/manifest.json` / `work/gates.json` / `out/QC-REPORT.md`，属新增文件 | CHANGELOG 0.6.0 |
+| v0.6 → **v0.7** | 内容指纹参与配乐结构；想更丰富就把提示点写进 `scenes.py` 的 `cues()` | CHANGELOG 0.7.0 |
+| v0.7 → **v0.7.1** | 配乐基线 `music.gain_db` 从 `-1.5` 变成 **-12**，有人声处再压配乐 6 dB / 音效 3 dB；**手调过 `gain_db`/`duck_db` 的片子要重新听一遍** | CHANGELOG 0.7.1 |
+| v0.7.1 → **v0.7.2** | `QC-REPORT.md` 只落在 `--out` 的目录 | `render._report_path()` |
+| v0.7.2 → **v0.8.0** | ① 可选模块 `preflight.py` / `qavmaf.py` / `qaasr.py` 决定 G0/G11/G12 跑不跑（缺了记 skipped，`skipped != 通过`）；② `words` 默认 true，首次 `--stage tts` 会重新联网合成一遍；③ qa 变慢（全片 VMAF 要重渲参考帧）；④ 输出仍默认 1080p@30 | CHANGELOG 0.8.0 |
+| v0.8.0 → **v0.8.1** | ① 删一次 `work/segments`（分块指纹变了）；② `--stage style/stills/frames/mux` 的门禁 fail 现在真的返回 1；③ `ci_check` 汇总变三档；④ `filmcheck` 变严；⑤ `webengine` 改 fail-closed | CHANGELOG 0.8.1 |
+| v0.8.1 → **v0.9** | 场景语法（10 类构图）与视觉语言上线；新增 `work/storyboard.json`；G13 剪影可区分门禁 | CHANGELOG 0.9.0 |
+| v0.9 → **v1.0** | **提案优先**：`propose.py --brief 题材 --script film.json --work work` → `--confirm --candidate A` → `render.py --stage all`。删掉 `style: auto` 的自动选型 | CHANGELOG 1.0.0 |
+| v1.0 → **v1.0.1** | **删除全部模板/风格表**：`presets/`、`--preset`、`stylekit` 的 `THEMES/STYLES/VISUAL_LANGUAGES`、`scorekit` 的 `MUSIC_STYLES`、voicekit 的 persona 表全部删除。`film.json` 里写 `style` 不再生效；**同一个 brief 连拍两次会得到不同设计**（要复现就传 `--seed`） | CHANGELOG 1.0.1 |
+| v1.0.1 → **v1.0.2** | ① **零拷贝**：不用再拷 `scripts/*.py` / `assets/scenes.py`，直接跑技能目录里的脚本；`--scenes` 缺省按「剧本同目录 → 技能内置」回落。② 设计 DSL 新增 `visual.subtitle`（字幕样式，不写 = 逐像素不变）与 `visual.layout_cycle`（按章节轮换版式，默认派生 2–3 种）。③ 带约束的 brief（如「深蓝」）不再有约一半概率采样失败。④ 已删除 API 改为明确报错：`stylekit --list/--show/--lint` → 说明已删除 + **exit 2**；`--stage style` 不再 KeyError；`--stage cues` 可单跑。⑤ 片间去重台账默认开启（`~/.dsh/video-studio/design-ledger.json`，`--no-ledger` / `--show-ledger` / `VIDEO_STUDIO_LEDGER`）。⑥ 自检 **67 条** | CHANGELOG 1.0.2 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
-> 升级后建议按 §14 重跑一次自检（58 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
->
-> **v0.7.2 → v0.8.0 的具体迁移动作**（表里那一行的展开）：
-> 1. 从 `<SKILL_DIR>/scripts/` 拷 `preflight.py` / `qavmaf.py` / `qaasr.py` 过来（不拷也能出片，只是三项门禁 `skipped`）。
-> 2. 决定要不要词级：默认 `words=true` 会让老项目**首次**重合成全部旁白（每句多一次词事件采集）。
->    不想重合成、或线上环境不允许额外网络请求，就在 `film.json` 写 `"words": false`。
-> 3. 交付前预留时间：全片 VMAF 的参考帧要按场景函数重渲一遍（模板片 14.2 s），ASR 8.7 s/片；
->    29 s 片全链 47.3 s，**qa 比渲染还贵**。
->    着急出片用 `--vmaf off`，但请把 `skipped` 项在报告里说明白。
-> 4. 想要别的画幅/帧率才写 `video` 块；**默认输出仍是 1920x1080@30**，老项目不写就完全不变。
-> 5. 有历史交付脚本在 grep 输出的话：`PASS 43` → `PASS 51`，`webengine --selftest 24 项` → `35 项`。
+> 升级后建议按 §14 重跑一次自检（67 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+
+> **v1.0.1 → v1.0.2 的具体迁移动作**：
+> 1. 删掉工程目录里拷过去的 `scripts/*.py`、`scenes.py`、`assets/web/`——不再需要；命令改成
+>    `python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage all`。
+> 2. 如果你想保留自己改过的 `scenes.py`：放在**剧本同目录**即可被自动发现（或显式 `--scenes`）。
+> 3. 字幕样式不再写死在 `filmkit` 里：想要自定义就在 `work/design.json` 的 `visual.subtitle` 里写
+>    那几个字段（或直接改 design 再 `designkit.py --lint` 校验）；不写 = 与 v1.0.1 逐像素一致。
+> 4. 以前跑 `stylekit.py --list` 的脚本会拿到 exit 2 和一条说明——那是预期行为（表已删除）。
+> 5. 自检条数从 58 → **66**；`grep 'PASS 58'` 之类的交付脚本要改。
 
 ### 13.1 v0.3.0 → v0.4.0
 
@@ -1154,7 +1283,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 58 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 67 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

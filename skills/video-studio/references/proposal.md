@@ -1,6 +1,7 @@
-# 提案层（Proposal）与设计 DSL —— v1.0
+# 提案层（Proposal）与设计 DSL —— v1.0.2
 
 > 一句话：**出片之前先出方案；方案由用户拍板；拍板的那份设计被冻结成 design.json，渲染只认它。**
+> v1.0.2 起还有一条：**交付过的设计会进台账**，下一次提案主动避开——这是"不同片不重复"的落地机制。
 
 ## 0. 为什么要有这一层
 
@@ -13,36 +14,37 @@ v0.9 及以前，`style: "auto"` 会让 `pick_style` 按关键词 + 指纹**自�
 | 不写 `style` 就直接落到 legacy —— 全片只有一套皮肤 | 8/8 题材全落 legacy：120BPM / Dm / 同一套配色 |
 
 v1.0 把这条路径**整条删掉**：剧本不再决定长相，长相由 `design.json` 决定；
-`design.json` 只能由「用户确认过的提案」产生。
+`design.json` 只能由「用户确认过的提案」产生。v1.0.1 又把残留的风格表全部删除，
+所以现在**没有"以某套预设为起点"这回事**——每次都是现场采样。
 
 ## 1. 三个产物
 
 | 文件 | 谁写 | 语义 |
 |---|---|---|
-| `work/proposal.json` | `propose.py` | 一版提案：N 个候选（含 design + 静帧 + 成本 + 差异度）+ 确认状态 |
+| `work/proposal.json` | `propose.py` | 一版提案：N 个候选（含 design + 静帧 + 成本 + 差异度 + 台账比对结果）+ 确认状态 |
 | `work/design.json` | `propose.py --confirm` | **冻结**后的那一份设计（唯一真源，渲染只认它） |
 | `work/proposals/revN/proposal.json` | `propose.py` | 每一版的快照（rev 不覆盖，可 diff、可回滚） |
 
-## 2. 四步流程
+## 2. 流程（零拷贝：脚本留在技能目录里直接跑）
 
 ```bash
 # 1) 出一版方案（离线，不联网，秒级）
-python propose.py --brief "AI 大模型的三年，30 秒科普" --script film.json --n 3
+python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科普" --script film.json --work work --n 3
 
 #    产物：work/proposal.json + work/proposals/rev1/{A,B,C}/_sheet.png + _compare.png
-#    每个候选带：立意一句话、4 张静帧、与其它候选的设计距离（n = 不同的维度数）
+#    每个候选带：立意一句话、每个候选 4 张静帧、与其它候选的设计距离（n = 不同的维度数）
 
 # 2) 不满意就提要求重出（新 rev，不覆盖旧的）
-python propose.py --revise "太冷了，要暖一点、女声、节奏快一点"
+python <SKILL_DIR>/scripts/propose.py --revise "太冷了，要暖一点、女声、节奏快一点" --work work
 
 # 3) 对比两版
-python propose.py --diff 1 2
+python <SKILL_DIR>/scripts/propose.py --diff 1 2 --work work
 
-# 4) 确认其中一个 -> 冻结 design.json
-python propose.py --confirm --candidate B
+# 4) 确认其中一个 -> 冻结 design.json（同时记进片间去重台账）
+python <SKILL_DIR>/scripts/propose.py --confirm --candidate B --work work
 
-# 5) 现在才允许出片
-python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work work
+# 5) 现在才允许出片。--scenes 不写就用剧本同目录 / 技能内置的渲染器
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage all
 ```
 
 ## 3. 提案闸（frames 之前）
@@ -64,58 +66,93 @@ python render.py --script film.json --scenes scenes.py --out out/film.mp4 --work
 
 ## 4. design.json 的形状
 
-六块：`structure`（几段/什么用途/目标时长）、`visual`（配色/字体/母题/转场/动效/重心/版式/HUD/画幅）、
+六块：`structure`（几段/什么用途/目标时长）、`visual`（配色/字体/母题/转场/动效/重心/版式/版式轮换/HUD/字幕/画幅）、
 `audio`（声音/配乐/音效）、`pacing`（留白与停留）、`id`/`pitch`（标识与立意）。
 
-完整契约见 `schemas/design.schema.json`；校验器是 `designkit.validate_design()`。
+完整契约见 `<REPO>/schemas/design.schema.json`；校验器是 `designkit.validate_design()`，
+命令行入口 `python <SKILL_DIR>/scripts/designkit.py --lint work/design.json`。
 
 ### 4.1 fail-closed（这条最重要）
 
 设计里**缺字段、枚举越界、对比度不达标**，一律报错，**绝不静默回落默认值**。
-理由：v0.5–v0.9 最大的病就是「改了不生效也不报错」——本轮审计实测出 11 个静默失效的旋钮
+理由：v0.5–v0.9 最大的病就是「改了不生效也不报错」——审计实测出 11 个静默失效的旋钮
 （`voice` 写字符串时 map/jitter 全失效、`theme_overrides.ease` 被视觉语言遮住、
 `sfx.cues[].seed` 必崩、`pan` 对立体声配方无效……）。设计层不允许重演这一幕。
 
-### 4.2 配色不是随便取色
+### 4.2 visual.subtitle（v1.0.2，可选）
 
-采样器的配色走**对比度求解**：定一个色相族，在 (s,v) 网格里找「最接近设计意图且满足
-`theme_lint` 全部对比度门槛」的颜色。
+字幕样式不再写死在 `filmkit` 里。所有字段可选，**不写 = 补齐默认值且与过去逐像素一致**：
 
-实测：纯 HSV 随机取色的通过率 **21/60 = 35%**（不可用）；改成网格求解后 **60/60 = 100%**。
+| 字段 | 默认 | 取值 | 说明 |
+|---|---|---|---|
+| `size` | 46 | 20–96 | 字号 |
+| `y` | null | 0–1030 | 字幕带基准线；null = 默认贴底安全区 |
+| `align` | center | center / left | 对齐 |
+| `plate_alpha` | 170 | 0–255 | 背板透明度（0 = 无背板） |
+| `radius` | 10 | 0–48 | 背板圆角 |
+| `family` | null | sans / serif / kai / round | null = 跟随大标题字族 |
+| `color` | null | [r,g,b] 或 #rrggbb | null = 默认墨色 |
+| `max_lines` | 2 | 1–3 | 最多折几行 |
+
+渲染侧只读 `designkit.subtitle_of(design)` 这一份口径（`filmkit`、参考帧渲染共用），避免"字幕样式在两处漂移"。
+
+### 4.3 visual.layout_cycle（v1.0.2，可选）
+
+按**章节**轮换版式：同一章内版式固定，换章才换。元素取 `left-stack` / `center-stack` / `split-right`，
+**至少 2 种不同版式**（只写一种会被 `validate_design` 拒绝）。不写时 `design_to_plan` 按设计指纹自动派生
+**2–3 种**——默认就不会"全片一张版式"。`--stage layout` 会把每段选的版式写进 `work/storyboard.json` 的
+`layout` 字段，可逐段审计。
+
+### 4.4 配色不是随便取色
+
+采样器的配色走**对比度求解**：定一个色相锚点，在 (s,v) 网格里找「最接近设计意图且满足
+`theme_lint` 全部对比度门槛」的颜色。实测：纯 HSV 随机取色的通过率 **21/60 = 35%**（不可用）；
+改成网格求解后 **60/60 = 100%**。配色是**连续色相空间**里的一点，不是"8 个命名配色族"。
 
 ## 5. 采样器（sample_designs）
 
 输入 brief（题材 + 可选时长/必须有/不要），输出 N 个**两两可区分**的设计：
 
-- 所有选择由 `sha1(brief + index)` 派生，**禁 random**：同一 brief 永远同一组候选
-- 两两必须在 **≥2 个设计维度**上不同（配色族/母题/转场/缓动/编号/配乐/声线），
-  否则视为「伪多方案」（只换颜色不算）
-- 每个候选自带一句中文立意 `pitch`，写进提案卡
+- **默认每次都不一样**（v1.0.1）：不传 `seed` 就生成新的 nonce，同一 brief 跑两次得到不同设计；
+  传 `--seed` 才逐字节可复现。这是"每条视频都不一样"的来源。
+- 所有选择由 `sha1(nonce + brief + index + seed + attempt)` 派生，**禁 random / time**。
+- **两两必须在 ≥2 个设计维度**上不同（10 个离散轴：配色 / 母题 / 转场 / 缓动 / 编号 / **配乐（调式+BPM 档+情绪）** /
+  声线 / 情绪 / 版式 / 调式），否则视为「伪多方案」（只换颜色不算）。
+- **底色还要拉开色相**：色相差 < 6° 一律重采；< 12° 时要求结构差异 ≥ 3 个轴。
+  v1.0.2 修掉了旧实现按 24° 分桶判重的坑——带 `--brief "深蓝"` 这类约束时窗口只有 52°，
+  旧实现 n=3 近一半概率失败；现在实测带约束的 brief **10/10 成功**。
+- **片间去重台账**（见 §6）：候选还要与"最近交付过的设计"至少差 2 维。
+- 每个候选自带一句中文立意 `pitch`，写进提案卡。
 
-## 6. 离线预览（previewkit）
+## 6. 片间去重台账（v1.0.2，默认开启）
+
+"每条视频都不一样"不能只靠随机：同题材连拍三部仍可能撞到相近的配色/版式组合。
+`propose.py` 现在把**确认过（= 真要出片）的设计**记进用户级台账，提案时主动避开：
+
+| 项 | 值 |
+|---|---|
+| 默认路径 | `~/.dsh/video-studio/design-ledger.json`（最多保留 500 条） |
+| 环境变量 | `VIDEO_STUDIO_LEDGER` 改路径；设为 `off` / `0` / `false` / `no` 即关闭 |
+| CLI | `--no-ledger`（本次不读不写）/ `--show-ledger`（打印路径与最近 20 条） |
+| 判据 | 候选与最近交付设计的最小距离 < **2 维** → 换新 nonce 重采（最多 4 轮），并输出告警 |
+| 记录时机 | `--confirm` 时才记（草稿候选不进台账） |
+
+读写失败/文件损坏一律当空表处理——**台账永远不会阻塞出片**。
+封锁测试或写文档时把 `VIDEO_STUDIO_LEDGER` 指到临时目录，不要动用户真实台账。
+
+## 7. 离线预览（previewkit）
 
 **不联网、不合成旁白**：用 `FAKE_VOICE_DUR=2.0` 的合成时间轴排轴（同 `tools/golden_frames.py` 的口径），
 渲 3–4 帧/候选 + 联系表 + N 个候选纵向并排的对比图。
 
-成本（实测）：单候选 **2.5–4.4 s**（1080p，含联系表）；4 个候选约 **14.5 s**。
-成本大头是每套风格的**首帧烘焙**（背景/母题缓存），同风格内多渲几张几乎不要钱。
+成本（作者机器 2026-11-11 实测）：单候选 3 帧 **0.6–0.9 s**；3 个候选含并排对比图 **约 2.1 s**；
+全程离线。成本大头是每个候选的首帧准备（主题/母题派生），同一候选内多渲几张几乎不要钱。
+换机会有波动，**别把这里的秒数当承诺**。
 
-> 为什么不用 `--stage stills`：它缺 `tts.json` 时会**自动联网合成旁白**（render.py:2529-2537）。
+> 为什么不用 `--stage stills`：它缺 `tts.json` 时会**自动联网合成旁白**。
 > 提案阶段不该付这个网络成本，也不该往用户的 TTS 缓存里写东西。
 
-## 6.1 只有一条起点：现场采样（v1.0.1）
-
-v1.0.0 曾经有 `--preset <id>`（以出厂预设为起点），v1.0.1 把预设与风格表**全部删除**——
-有预设就意味着用户的片子只能在预设里挑，第 9 种不存在。现在只有一条路：
-
-```bash
-python propose.py --brief "题材/要求" --script film.json --n 3
-```
-
-不满意就用 `--revise "更冷一点 / 少一点装饰"` 重出。想复现同一份设计就用 `--seed` 固定，
-而不是去找一套预设。
-
-## 7. 常见误用
+## 8. 常见误用
 
 | 现象 | 原因 | 修法 |
 |---|---|---|
@@ -124,13 +161,17 @@ python propose.py --brief "题材/要求" --script film.json --n 3
 | 候选都「太像」 | 采样器的差异度约束被放宽了 | 看 `--show` 里的 `diversity.vs[].n`，< 2 就是伪多方案 |
 | 提案闸一直 WARN | 没跑过 `propose.py --confirm` | 按提示两步走；要硬拦加 `--require-proposal` |
 | 预览图和成片不一致 | 预览用合成时长，成片用实测时长 | 正常现象：静帧只用于看构图/配色，节奏以成片为准 |
+| 「这批候选和上一部太像」告警 | 片间去重台账命中（< 2 维） | 自动重采过 4 轮仍撞：`--revise "换个完全不同的方向"`，或 `--no-ledger` 忽略 |
+| 带「深蓝」这类要求时提案失败 | 约束把可选空间收窄到不可行 | v1.0.2 已修（色相距离判重）；仍失败就放宽 brief 或 `--n 2` |
 
-## 8. P3 之后会删掉什么（迁移须知）
+## 9. 已删除的东西（迁移须知）
 
-| 现状 | P3 之后 |
+| 旧写法 | 现在 |
 |---|---|
-| `style: "auto"` 自动选风格 | 删除。没有 design 就不出片 |
-| `stylekit.THEMES/STYLES/VISUAL_LANGUAGES` 8 套 | **已全部删除**（v1.0.1） |
-| legacy（不写 style 走 v0.4 绘制器） | 删除。老片复现只能靠当年留存的 work/ 快照 |
-| `scorekit.MUSIC_STYLES` 9 套 | **已删除**（v1.0.1）：配乐改由 `musicgen.py` 参数化编排，不再需要 `audio.music.arranger` 这一层 |
-| `voicekit.VOICE_PERSONAS` 9 个 | 换成裸 edge voice id + 自动响度校准（不再固定 9 个） |
+| `style: "auto"` 自动选风格 | **已删除**（v1.0.1）。没有 design 就不出片 |
+| `stylekit.THEMES/STYLES/VISUAL_LANGUAGES` 8 套 | **已全部删除**（v1.0.1）：没有内置风格表 |
+| `--preset <id>` 以出厂预设为起点 | **已删除**（v1.0.1）：只有现场采样一条路，想复现用 `--seed` |
+| legacy（不写 style 走 v0.4 绘制器） | **已删除**（v1.0.1）：老片复现只能靠当年留存的 `work/` 快照 |
+| `scorekit.MUSIC_STYLES` 9 套 | **已删除**（v1.0.1）：配乐改由 `musicgen.py` 参数化编排 |
+| `voicekit.VOICE_PERSONAS` 9 个 | **已删除**（v1.0.1）：换成裸 edge voice id + 实测响度补偿表 |
+| `stylekit.py --list/--show/--lint` | **已移除**：明确说明「内置风格表已删除」并 **exit 2**（不再 NameError / 假绿） |

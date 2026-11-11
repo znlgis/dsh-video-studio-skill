@@ -604,22 +604,48 @@ def _prepare_script(script, tl):
     return sc, theme
 
 
-def _draw_subtitle_like_render(frame, text, theme, words):
-    """烧字幕，与 render.py 同口径（v0.8 起带 words 词边界折行）。
+def _sub_kw_for(script) -> dict:
+    """从已解析的风格计划里取字幕样式参数（v1.0.2，与 render.py:_sub_kw 同口径）。
 
-    ⚠ 参考帧为什么不传 words 是个**会误杀好片**的缺陷（实测）：
+    ⚠ 为什么参考帧必须传这些参数（实测的**误杀好片**缺陷）：
+    render.py 的 frames / stills 阶段会传 design 的 visual.subtitle（size/align/
+    plate_alpha/radius/max_lines/family/y）；参考帧不传就永远是 filmkit 的模块
+    默认值（size=46 等）。同一部片（设计 size=52 / radius=14 / plate_alpha=180）
+    实测 VMAF 91.33 —— 被阈值 92 判 fail，而两条路径用同一份参数时 ≥96。
+    门禁误杀好片比漏查更有害，所以这里必须与主渲染路径吃同一份参数。
+
+    实现在 filmkit.subtitle_kwargs（**不复制第二份**：两份迟早漂移）；
+    老版 filmkit 没有这个函数时退回空 dict（= 旧行为，跨版本兼容）。
+    """
+    plan = script.get("_style") if isinstance(script, dict) else None
+    fn = getattr(_K, "subtitle_kwargs", None)
+    if fn is None:                      # 老 filmkit：还没有字幕样式参数
+        return {}
+    try:
+        kw = fn(plan)
+    except Exception:                   # noqa: BLE001 —— 样式解析失败不该挡住整片门禁
+        return {}
+    return kw if isinstance(kw, dict) else {}
+
+
+def _draw_subtitle_like_render(frame, text, theme, words, kw=None):
+    """烧字幕，与 render.py 同口径（v0.8 带 words 词边界折行，v1.0.2 带设计字幕样式）。
+
+    ⚠ 参考帧不传 words 也是**会误杀好片**的缺陷（实测）：
     render.py 的 frames / stills 阶段调 draw_subtitle 时总会传 words，
     字幕会按词边界折行（"…整整 / 一句旁白"）；参考帧不传就退回字符折行
     （"…整整一 / 句旁白"）。38 字字幕只差一个断点、约 2% 像素不同，
     但近静态画面的 VMAF 从 99.95 掉到 8.55 —— 门禁会把同源的好片判 fail。
-    老版 filmkit 的 draw_subtitle 没有 words 形参，TypeError 时退回旧调用。
+    kw 是 design 的字幕样式（见 _sub_kw_for）；老版 filmkit 的 draw_subtitle
+    没有 words 形参，TypeError 时退回旧调用（保留）。
     """
+    kw = kw or {}
     if not words:
-        return _K.draw_subtitle(frame, text, theme=theme)
+        return _K.draw_subtitle(frame, text, theme=theme, **kw)
     try:
-        return _K.draw_subtitle(frame, text, theme=theme, words=words)
+        return _K.draw_subtitle(frame, text, theme=theme, words=words, **kw)
     except TypeError:                   # 老 filmkit：没有 words 形参（保持旧行为）
-        return _K.draw_subtitle(frame, text, theme=theme)
+        return _K.draw_subtitle(frame, text, theme=theme, **kw)
 
 
 def _draw_ref_frame(scenes, scenes_mod, script, theme, fi, fps, total):
@@ -652,7 +678,9 @@ def _draw_ref_frame(scenes, scenes_mod, script, theme, fi, fps, total):
             words = fn(scenes, t, hold) if fn is not None else None
         except Exception:               # noqa: BLE001 —— 词表异常不该让参考帧渲不出来
             words = None
-        frame = _draw_subtitle_like_render(frame, text, theme, words)
+        # 字幕样式也必须与主渲染路径同源（v1.0.2；见 _sub_kw_for 的实测说明）
+        frame = _draw_subtitle_like_render(frame, text, theme, words,
+                                           kw=_sub_kw_for(script))
     fade = 1.0
     if t < 0.5:
         fade *= _K.ease_out(t / 0.5)
@@ -1256,6 +1284,17 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
             fp.write(scenes_src)
         script = {"title": "qavmaf selftest", "lines": [
             {"id": "l01", "text": "一", "sub": "自检"}]}
+        # v1.0.1 起没有内置风格表：合成剧本也必须自带一份**现场生成**的设计，
+        # 否则 _style_plan() 解析不出主题（"不写 style 就走老外观"的兼容路径已移除），
+        # 参考帧无法渲染。这里用 designkit 现场采样（seed 固定 = 可复现）、
+        # design_to_plan 与 render 同一口径，**不引入任何写死主题/模板**。
+        try:
+            import designkit as _DK
+            _design = _DK.sample_designs({"topic": "qavmaf selftest"}, n=1, seed=1)[0]
+            script["_style"] = _DK.design_to_plan(_design)
+        except Exception as e:          # noqa: BLE001 —— 缺 designkit 也要给出可读的 FAIL
+            print("[FAIL] 自检需要 designkit.py 现场生成设计（v1.0.1 无内置风格）：%s" % e)
+            return 1
         scenes = [dict(script["lines"][0], start=0.0, end=n / float(fps),
                        dur=n / float(fps), voice_start=0.0, voice_end=n / float(fps))]
         tl = {"total": n / float(fps), "fps": fps, "frames": n, "scenes": scenes,

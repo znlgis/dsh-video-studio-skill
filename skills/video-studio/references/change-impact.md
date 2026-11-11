@@ -23,7 +23,7 @@
 | `lines[].sub`（字幕文案） | sub.srt / sub.ass / timeline 的字幕窗口 / frames / mux / qa | `layout → frames → mux → qa`（TTS 可复用） | 帧数÷40 s |
 | `lines[].hold` / `lead` / `tail` / `bar` | timeline / cues / frames / mux / qa | 同上 | 帧数÷40 s |
 | `lines[].kind` | 声线计划 / 配乐分段 / 画面版式（scenes 按 kind 选绘制函数） | `style → tts → layout → …` 全链 | 全片 |
-| `style`（含 `"auto"` 结果变了） | style.json / voice_plan / tts(换声线时) / score / audio / frames / qa | 看 `--stage explain`：通常是全链 | 全片 |
+| `work/design.json`（设计变了：配色/字体/母题/版式/字幕/配乐/声线） | style.json / storyboard / voice_plan / tts(换声线时) / score / audio / frames / qa | 看 `--stage explain`：通常是全链 | 全片 |
 | `bpm` / `music.*` | score / audio / mux | `score → audio → mux → qa` | 秒级 |
 | `sfx.cues` / `scenes.py 的 cues()` | cues.json / sfx.wav / audio.wav / mux | `cues → sfx → audio → mux → qa` | 秒级 |
 | `scenes.py`（画面代码） | frames / qa（参考帧失效） | `frames → mux → qa`（音轨可复用） | 帧数÷40 s |
@@ -36,7 +36,7 @@
 | 错误做法 | 后果 | 正确做法 |
 |---|---|---|
 | 改了 `text` 只重跑 `tts` | 新语音配旧时间轴 → 字幕漂移、音效错位 | 跑 `--stage explain`，按它给的最小重跑命令 |
-| 改了 `style` 只重跑 `frames` | 画风换了但配乐/声线还是旧的（或反之） | `style` 是所有下游的上游，通常整链重跑 |
+| 改了 `design.json`（或重新 `--confirm` 了另一份）只重跑 `frames` | 画风换了但配乐/声线还是旧的（或反之） | 设计是所有下游的上游，通常整链重跑；`--stage style` 先看解析结果 |
 | 手工删 `work/segments/_plan.json` 绕过指纹 | 拼接出的片子画面和旁白对不上，且**不报错** | 删 `work/segments` 整目录重渲 |
 
 ## 3. 一条命令代替这张表

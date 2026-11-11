@@ -468,8 +468,21 @@ def plan_scenes(scenes, script=None, plan=None):
     """给 timeline 的每一段补 scene_type / scene_variant / scene_decor / scene_layout / scene_reason。
 
     scenes: K.build_timeline 产出的段列表（有 id/kind/start/end/dur 与剧本原字段）
-    plan:   stylekit.resolve_script_style 的结果（取 chapter_layout 与 style）
+    plan:   stylekit.resolve_script_style / designkit.design_to_plan 的结果
+            （取 chapter_layout / layout_cycle / layout_default 与 style）
     返回 storyboard dict（可直接 json.dump 审计），并把字段就地写进 scenes。
+
+    scene_layout 的取法（先命中先赢）：
+      ① plan["chapter_layout"] 显式指定（按章名查，查不到用 layout_default）；
+      ② plan["layout_cycle"]（≥2 种版式且没有显式 chapter_layout）：按章节首次
+         出现的顺序循环取位，**同一章内版式固定**——防止"全片一张版式"；
+      ③ 都没有：layout_default（与 v1.0.1 完全一致）。
+
+    **没有 chapter 的剧本**：按"每段自成一章"处理（轮换照常推进）。
+    为什么不把空 chapter 当成"全片同一章"：那样 layout_cycle 在常见的不写 chapter
+    的剧本上会退化成"永远 cycle[0]"，功能写了却完全不生效——正是本仓库反复踩过的
+    "号称支持实则失效"。空 chapter 本来就没有"章"的身份可言，逐段轮换既满足
+    "同章内稳定"（每段自成一章，平凡成立），又真的防住同骨架。
     """
     script = script or {}
     plan = plan or {}
@@ -479,6 +492,22 @@ def plan_scenes(scenes, script=None, plan=None):
     prev_variant = {}
     chapter_layout = plan.get("chapter_layout") if isinstance(plan.get("chapter_layout"), dict) else {}
     default_layout = plan.get("layout_default") or "left-stack"
+    # ---- 片内版式轮换（v1.0.2）：design_to_plan 会派生 layout_cycle ----
+    # 为什么需要：没有它时一章只能用一种版式（layout_default），8 段片子 8 屏同骨架 ——
+    # 正好是用户原则 5 说的"同一视频内部大面积/长时间重复"。
+    # 生效条件（两条都不满足就与过去逐字节一致，金帧/既有自检不漂）：
+    #   ① plan 没有显式 chapter_layout（显式指定优先，不能被轮换覆盖）；
+    #   ② layout_cycle 至少 2 种版式（只有一种等于不轮换）。
+    # 同一章内必须稳定（观众视角一章是一段整体），换章才换版式：
+    # 按「章节首次出现的顺序」依次取 cycle[0], cycle[1], … 循环。
+    cycle = plan.get("layout_cycle")
+    if isinstance(cycle, (list, tuple)):
+        cycle = [str(x) for x in cycle if str(x or "").strip()]
+    else:
+        cycle = []
+    use_cycle = (not chapter_layout) and len(cycle) >= 2
+    # key -> 版式（保证同一章内版式不变；无 chapter 时每段自成一章，轮换照常推进）
+    cycle_of = {}
     counter = {}
     rows = []
     for i, s in enumerate(scenes):
@@ -494,7 +523,16 @@ def plan_scenes(scenes, script=None, plan=None):
         variant = variant_of(stype, chapter, k, prev_variant.get(stype))
         prev_variant[stype] = variant
         decor = decor_of(stype, chapter, k)
-        layout = chapter_layout.get(chapter) or default_layout
+        if use_cycle:
+            # 空 chapter 用段号做键：每段自成一"章"，轮换才真的推进
+            # （否则最常见的不写 chapter 的剧本会永远停在 cycle[0]，功能形同虚设）。
+            key = chapter if chapter else "\x00scene:%d" % i
+            if key not in cycle_of:
+                # len(cycle_of) = 这是第几个"不同章节"（0 起），按它取轮换位
+                cycle_of[key] = cycle[len(cycle_of) % len(cycle)]
+            layout = cycle_of[key]
+        else:
+            layout = chapter_layout.get(chapter) or default_layout
         s["scene_type"] = stype
         s["scene_variant"] = int(variant)
         s["scene_decor"] = int(decor)
@@ -527,17 +565,39 @@ def describe(storyboard):
     return "%d 段 / %s" % (len(storyboard.get("scenes") or []), " ".join(parts))
 
 
-def _cli():
-    """自测入口：python grammar.py [film.json] —— 只读，不渲染。"""
-    import json
-    import sys
+def _cli(argv=None):
+    """自测入口：python grammar.py [film.json] —— 只读，不渲染。
 
-    if len(sys.argv) < 2:
+    v1.0.2：加 argparse（在此之前 `--help` 会被当成 film.json 路径，FileNotFoundError，
+    与仓库里其它 17 个脚本的 CLI 约定不一致）。不传 film.json 时仍打印用法与 10 类构图，
+    退出码 0（保持 v0.9 的行为，便于老 CI 探活）。
+    """
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(
+        prog="grammar.py",
+        description="场景语法：按内容推导每段的构图类型（只读，不渲染、不需要 timeline）。",
+        epilog="不给 film.json 时只打印用法与 10 类构图说明。")
+    ap.add_argument("film", nargs="?", default=None,
+                    help="film.json 路径；给出时打印该剧本的分镜选型（时长按字数粗估）")
+    a = ap.parse_args(argv)
+
+    if not a.film:
         print("用法: python grammar.py film.json  # 打印该剧本的分镜选型（不需要 timeline）")
         print("场景类型:", " / ".join("%s(%s)" % (t, SCENE_LABELS[t]) for t in SCENE_TYPES))
         return 0
-    script = json.load(open(sys.argv[1], encoding="utf-8"))
+
+    try:
+        with open(a.film, encoding="utf-8") as fp:
+            script = json.load(fp)
+    except OSError as e:
+        ap.error("读不了 film.json：%s（%s）" % (a.film, e))
+    if not isinstance(script, dict):
+        ap.error("film.json 顶层必须是对象：%s" % a.film)
     lines = script.get("lines") or []
+    if not isinstance(lines, list):
+        ap.error("film.json 的 lines 必须是数组：%s" % a.film)
     # 没跑 TTS 时按字数粗估时长（只用于看选型，不是时间轴权威）
     scenes = []
     t = 0.0
