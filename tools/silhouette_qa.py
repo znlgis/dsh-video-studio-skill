@@ -34,7 +34,7 @@
              "对称度"，而是"左右两半同一相对位置都有前景"——那对居中标题恒为 0，
              量到的不是对称性，量的是版式靠左还是靠右。
   5. 判定"该场景可区分"：五项里任一项达标即可 ——
-       ΔF >= 6pp、|ΔCx| >= 8、|ΔCy| >= 8、ΔB >= 14、ΔS >= 0.20。
+       ΔF >= 6pp、|ΔCx| >= 8、|ΔCy| >= 8、ΔB >= 14、ΔS >= 0.20、ΔP >= 6.0。
      关键约束：**同一项指标必须在 3 帧上全部达标**。挑单帧最容易骗过门禁：入场瞬间
      两套风格的位移差本来就大，只看一帧会把"同一骨架 + 不同缓动"误判成结构不同。
   6. 一对风格在**任一场景类型**上可区分即算 PASS；所有场景都不达标才算 FAIL。
@@ -120,12 +120,22 @@ CORNER = 40
 TIER_BG_MAX = 15          # d < 15 -> 背景档 0
 TIER_FG_MIN = 60          # d >= 60 -> 前景档 2
 EDGE_BAND = 0.06          # 四边各 6% 带宽
-METRIC_ORDER = ("F", "Cx", "Cy", "B", "S")
+# P = 垂直 9 带明暗剖面的最大偏差（灰度级）。为什么需要它：
+# 前五项都是"按前景像素算"的指标，而前景档是 |gray - 四角背景| >= TIER_FG_MIN(60)。
+# letterbox（cinema）的上下黑边 gray=0，近黑金主题底色 gray≈9，两者只差 9 < 60 ——
+# **黑边被算成背景，cinema 最标志性的结构在判据里根本不存在**。
+# 后果：cinema × epic 只能靠文字排版区分，而排版恰恰最依赖字体：
+# 本机 msyh 下 ΔCy=10.8（过线），Linux 的 Noto CJK 下 ΔCy=1.47（失败）。
+# 实测 P 在两种字体下数值完全相同（7.99 vs 7.99），因为它按整行平均，
+# 量的是"画面纵向明暗分布"这种真正的结构差，不受字形影响。
+METRIC_ORDER = ("F", "Cx", "Cy", "B", "S", "P")
 # 达标线：设计稿里逐对给的是目标值，这里只放"判定线"。改这里等于改验收口径，需说明理由。
-THRESHOLDS = {"F": 6.0, "Cx": 8.0, "Cy": 8.0, "B": 14.0, "S": 0.20}
+# P 的 6.0：cinema×epic 实测 7.99，留 25% 余量；纯排版差异（同母题不同字距）通常在 2 以下。
+THRESHOLDS = {"F": 6.0, "Cx": 8.0, "Cy": 8.0, "B": 14.0, "S": 0.20, "P": 6.0}
 METRIC_LABELS = {
     "F": "前景像素占比(%)", "Cx": "前景质心x(占宽%)", "Cy": "前景质心y(占高%)",
     "B": "四边非背景覆盖率(%)", "S": "左右半幅前景 IoU",
+    "P": "垂直明暗剖面最大偏差(灰度级)",
 }
 
 # ============================================================================
@@ -410,9 +420,16 @@ def measure(img):
     inter = int(np.logical_and(left, right).sum())
     # 两半都空 = 完美对称（空构图自己跟自己的 IoU 是 1）；只有一边空才是 0。
     S = 1.0 if union == 0 else float(inter) / float(union)
+    # P：垂直 9 带的平均灰度剖面，减去自身中位数后再取"两套风格逐带差的最大值"。
+    # 减中位数是为了抗整体亮度/主题差（否则跨明暗族会把配色差当成结构差）；
+    # 用整行平均而不是逐像素，是为了抗字体（字形一变，逐像素全变，行均值几乎不动）。
+    rows = np.array_split(np.arange(QUAL_H), 9)
+    prof = np.array([_gray[r].mean() for r in rows], dtype=np.float32)
+    prof = prof - float(np.median(prof))
     metrics = {"F": round(F, 3), "Cx": None if Cx is None else round(Cx, 3),
                "Cy": None if Cy is None else round(Cy, 3),
-               "B": round(B, 3), "S": round(S, 4)}
+               "B": round(B, 3), "S": round(S, 4),
+               "P": [round(float(x), 3) for x in prof]}
     return metrics, base
 
 
@@ -465,12 +482,19 @@ def render_style(scenes_mod, ST, style_id, scene_types, fracs, fps=FPS):
 
 # ---------------------------------------------------------------- 比较 / 判定
 def _metric_of(rec, key):
-    """取一帧的某项指标；渲染失败或质心缺值 -> None。"""
+    """取一帧的某项指标；渲染失败或质心缺值 -> None。
+
+    P（垂直明暗剖面）是**向量**，原样返回列表；其余五项是标量，统一转 float。
+    """
     md = rec.get("metrics")
     if not isinstance(md, dict):
         return None
     v = md.get(key)
-    return None if v is None else float(v)
+    if v is None:
+        return None
+    if key == "P":
+        return [float(x) for x in v] if isinstance(v, (list, tuple)) else None
+    return float(v)
 
 
 def compare_pair(render, style_a, style_b, scene_types):
@@ -498,6 +522,16 @@ def compare_pair(render, style_a, style_b, scene_types):
                 if va is None or vb is None:
                     deltas.append(None)
                     missing = True
+                elif m == "P":
+                    # 剖面是向量：逐带求差，取绝对值最大的一带作为这对风格的 P 差值。
+                    # 语义是"画面哪一条横带最不一样"，比单点质心更难被字体带跑。
+                    pa, pb = list(va), list(vb)
+                    if len(pa) != len(pb) or not pa:
+                        deltas.append(None)
+                        missing = True
+                    else:
+                        deltas.append(round(max(abs(float(x) - float(y))
+                                                for x, y in zip(pa, pb)), 4))
                 else:
                     deltas.append(round(abs(va - vb), 4))
             all_frames = (n > 0) and not missing
