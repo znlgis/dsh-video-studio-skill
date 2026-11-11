@@ -102,7 +102,7 @@ cp <SKILL_DIR>/scripts/{sfxkit.py,scorekit.py,voicekit.py,qa_frames.py} .
 cp <SKILL_DIR>/scripts/{preflight.py,qavmaf.py,qaasr.py} .
 cp -r <SKILL_DIR>/assets/web ./web
 
-# 2) 先跑一次自检：55 条回归护栏（v0.9 新增 52–55），20 秒内出结论（不联网；可选模块缺失会标 SKIP）
+# 2) 先跑一次自检：58 条回归护栏（v1.0 新增 56–58），20 秒内出结论（不联网；可选模块缺失会标 SKIP）
 python selfcheck.py
 
 # 3) 【v0.5 新步骤】先确认风格，再改文字
@@ -618,7 +618,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（55 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（58 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -949,7 +949,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示"是不是想写 X"（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在） |
-| `scripts/selfcheck.py` | 回归自检：**55 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷（legacy 必须回落）/ 51 金帧回归（调 `tools/golden_frames.py`）。v0.9 新增 4 条：52 场景语法（10 类分流/确定性/段长门）/ 53 视觉语言包（8 套签名无重复）/ 54 场景类型单真值（4 处集合相等）/ 55 剪影可区分（调 `tools/silhouette_qa.py`） |
+| `scripts/selfcheck.py` | 回归自检：**58 条**"曾真的坏过"的断言，不联网 20 秒内出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条：44 词级时间戳 / 45 画幅规划 / 46 金帧确定性 / 47 依赖漂移体检 / 48 批量清单解析 / 49 TTS 后端可替换 / 50 web 风格载荷 / 51 金帧回归。v0.9 新增 4 条：52 场景语法 / 53 视觉语言包 / 54 场景类型单真值 / 55 剪影可区分。**v1.0 新增 3 条：56 设计 DSL（采样/校验/转计划/fail-closed）/ 57 预设下沉（presets → design）/ 58 提案闸（absent/draft/broken）** |
 | `scripts/preflight.py` | **（v0.8）渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
@@ -1084,7 +1084,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 | v0.8.0 → **v0.8.1** | ① **删一次 `work/segments`**：`--resume` 的分块指纹新增 timeline 内容，旧计划会判"已变化"。② **退出码变严**：`--stage style/stills/frames/mux` 的门禁 fail（或 `--strict-gates` 下有 skipped）现在真的返回 1——靠退出码判定的交付脚本会开始"失败"。③ **`ci_check` 汇总变三档**：`PASS n / FAIL n / SKIP n`，用 `grep 'PASS 12'` 的脚本要改；要"没执行也算失败"加 `--strict`。④ **`filmcheck` 变严**：`video` 块走 `filmkit.video_plan`（1600x900 之类报 error），`qa.vmaf.enabled`/`qa.require_vmaf`/`qa.ssim.enabled` 三个惰性键报 WARN。⑤ **`webengine` 两处改成 fail-closed**：`style=None` + 720p 不再静默裁切、页面 FPS 与注入值不一致会报错。⑥ 金帧基线**不用重录**（像素逐位一致）。 | CHANGELOG 0.8.1「升级须知（v0.8.0 → v0.8.1）」+「行为变化」表 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
-> 升级后建议按 §14 重跑一次自检（55 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+> 升级后建议按 §14 重跑一次自检（58 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
 >
 > **v0.7.2 → v0.8.0 的具体迁移动作**（表里那一行的展开）：
 > 1. 从 `<SKILL_DIR>/scripts/` 拷 `preflight.py` / `qavmaf.py` / `qaasr.py` 过来（不拷也能出片，只是三项门禁 `skipped`）。
@@ -1145,7 +1145,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 55 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 58 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python scorekit.py --selftest        # 配乐
 python webengine.py --selftest       # 浏览器引擎（35 项，会真起无头浏览器，约 60 秒）

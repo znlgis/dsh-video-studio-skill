@@ -72,6 +72,18 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > legacy（不写 `style`）仍逐字节不变。selfcheck 51 → **55 条**。
 > **v0.9.1** 把"逐帧全屏贴装饰"（实测 5.6 ms/帧）改成"装饰烘焙进背景底版"（1.3–2.0 ms），
 > 顺带让装饰跟着镜头缓推一起动（cinema / epic 的强 push 下不再穿帮）。
+> **v1.0.0（提案优先）**：解决"**机器替你选风格**"。v0.5–v0.9 换了三代风格系统，用户的原话
+> 始终是"每个视频都差不多"——根因不是风格不够多，而是 `style:auto` 用关键词 + 指纹**自动挑一套**，
+> 用户从头到尾没参与决策（实测 8 个题材只命中 5/8 套风格、3 个落进同一套；不写 style 时 8/8 全落 legacy）。
+> 本版把这条路径整个停掉：**出片前先给 3 个候选方案（各自配色族不同、各带 4–6 张静帧 + 12 秒样音），
+> 用户确认后才冻结 `design.json` 并出片**；不满意就 `--revise "要求"` 重出，旧版留着可 `--diff`。
+> 风格从"8 个枚举"变成"设计 DSL"：8 配色族 × 8 母题 × 6 转场 × 4 缓动 × 8 编号 × 2 调式 × 7 情绪
+> = **344,064 种**，且全部字段可写；8 套内置风格下沉成 `presets/*.json`（数据，可改可删，不参与自动选型）。
+> 配乐也换成参数化编排器（`musicgen.py`，**没有风格表**：和弦进行/动机/鼓型/音色全可传参），
+> 声线删掉 persona 身份表改裸 edge voice id + 实测响度补偿表。
+> **破坏性变更**：不写 `style` 或写 `style:"legacy"` 会**报错**并给两步迁移指引（不再是静默回落）。
+> 迁移写法见 [SKILL.md](skills/video-studio/SKILL.md) §0.5.1。selfcheck 55 → **58 条**，
+> 真实题材跑片（57.93 s 成片）挖出并修掉 **7 个 bug**，详见 CHANGELOG 的 1.0.0 段。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 的 0.9.0 / 0.9.1 段与
 > [references/scene-grammar.md](skills/video-studio/references/scene-grammar.md)。
 
@@ -160,7 +172,7 @@ cp <SKILL_DIR>/scripts/*.py .                           # filmkit/stylekit/voice
                                                          #   v0.8 还含 preflight/qaasr/qavmaf（可选：缺了对应门禁记 skipped）
 cp -r <SKILL_DIR>/assets/web ./web                       # 只在走浏览器引擎时需要
 
-python selfcheck.py                                     # 55 条环境/回归断言（20 秒内，不联网）
+python selfcheck.py                                     # 58 条环境/回归断言（20 秒内，不联网）
 python <REPO>/tools/estimate.py --script film.json       # v0.6：开渲前先算耗时/磁盘/分块（仓库/包里的工具，
                                                          #     不在 skills/video-studio/ 内，quickstart 拷出来的目录没有它）
                                                          #     v0.8：已含 preflight/vmaf/asr 三段；29 s 模板片
@@ -253,7 +265,7 @@ skills/video-studio/
   scripts/preflight.py       v0.8 渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          v0.8 全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           v0.8 ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（55 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（58 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        程序化配乐（和弦表 / 分段能量 / 吸气）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
