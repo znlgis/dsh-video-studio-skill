@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.0.2-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.0.3-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -9,7 +9,13 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 （渲前资源预检 `G0` / 词级时间戳 `G10` / 全片 VMAF `G11` / ASR 回读 `G12`）。
 零素材、可复现、可断点续跑、可脚本化验收；装成插件后，整片生产流程随技能一起进入每个会话。
 
-> **v1.0.2（当前）**：**零拷贝出片**——技能脚本留在技能目录里直接跑，工程目录里只需要一个 `film.json`；
+> **v1.0.3（当前）**：**取景不再抖**——46 个真实会话回放里用户的"明显的抖动感"，根因是底图把颗粒
+> 烘进去了、再逐帧用 NEAREST 缩放取景（采样网格随缩放比整像素跳变，颗粒整体错位 1px）。
+> 改成端点预烘 + `Image.blend` 插值（4.4 ms/帧），相邻帧差从 4~6 灰阶降到 0~1；
+> 自检新增第 **68** 条断言守住它（改回 NEAREST 立刻 fail），第 **69** 条守住 ASR 掉分可定位。ASR 回读低于 pass 线时，
+> 现在会直接列出"剧本里有、成片里没对上"的字符（`lost_top`），不再只给一个 0.813 的数字。
+>
+> **v1.0.2**：**零拷贝出片**——技能脚本留在技能目录里直接跑，工程目录里只需要一个 `film.json`；
 > `render.py` 不写 `--scenes` 就先用剧本同目录的 `scenes.py`、再回落到技能内置的 `assets/scenes.py`，
 > 不需要再拷脚本/模板。设计与画面新增两块可调：**字幕样式** `visual.subtitle`
 > （字号/位置/对齐/背板透明度/圆角/字族/颜色/最多几行，不写 = 与过去逐像素一致）与
@@ -18,7 +24,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 > 已删除 API 改为明确报错 exit 2 而不是 NameError/假绿），并给"不同片不重复"加了**片间去重台账**
 > （`--confirm` 记录交付过的设计，下次提案主动避开）。
 > 另外 brief 里写「2 分钟 / 90 秒」现在会被接住：解析成 `duration_target`，决定候选段落数，
-> 渲染时对账并在差 >15% 时告警——但**成片长度仍由实测旁白决定，不会截断**。自检 **67 条**全绿。
+> 渲染时对账并在差 >15% 时告警——但**成片长度仍由实测旁白决定，不会截断**。自检 **69 条**全绿。
 
 > 源自 `dsh-v` 资产包的 `02-技能包-video-studio`（817 个 DSH 会话的考古分析 + 5 套现存工程逆向 + 本机实测）。
 > 版本演进与每一版的实测证据都在 [CHANGELOG.md](CHANGELOG.md)；这里只留一句方向：
@@ -105,7 +111,7 @@ compare / process / quote / chapter / chart / outro）× 8 种装饰母题 × 6 
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，67 条断言，不联网）
+# 2) 环境自检（可选，69 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先出方案：3 个候选，各带静帧联系表；2 秒级、全程离线
@@ -207,7 +213,7 @@ skills/video-studio/
   scripts/preflight.py       v0.8 渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          v0.8 全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           v0.8 ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（67 条"曾真的坏过"的断言）
+  scripts/selfcheck.py       回归自检（69 条"曾真的坏过"的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘）
   scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
@@ -278,7 +284,7 @@ python tools/ci_check.py -v     # 12 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**67 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**69 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 

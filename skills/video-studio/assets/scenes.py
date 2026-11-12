@@ -453,7 +453,7 @@ class _View(object):
 
     为什么不是整帧重采样：实测 1080p 双线性整帧变换 29ms/帧（预算 15ms），
     而整帧按 push 放大又会把 150px 边距的内容推出 SAFE。所以分两层：
-      背景层做**真缩放**（EXTENT + NEAREST，1.7~3.5ms，见 _bg_plate）；
+      背景层做**真缩放**（端点预烘 + blend，约 4.4ms，见 _plate_zoom/_bg_plate）；
       前景层做同向**视差**（0.35x，位置与卡片尺寸随镜头收放，字形不重采样保清晰）。
     """
     __slots__ = ("s", "cx", "cy")
@@ -599,15 +599,63 @@ def _bg(th):
     return im
 
 
-def _bg_plate(th, s):
-    """逐帧背景：按镜头缩放取景（NEAREST 重采样，实测 1.7~3.5ms/帧）。"""
-    base = _bg(th)
+_ZOOM_ORDER = []
+
+
+def _zoom_tag(th, extra=None):
+    """取景端点的缓存标签：主题决定底图，extra 用来区分装饰母题档位。"""
+    return _hashable(("zoom", th.get("id"), th["bg"], th["bg2"], th["texture"],
+                      th["grain"], th["grain_freq"], th["vignette"],
+                      th["vignette_tint"], th["texture_alpha"], extra))
+
+
+def _plate_zoom(src, s, th, tag):
+    """按镜头缓推取景：端点预烘 + 逐帧 blend（v1.0.3）。
+
+    为什么不再用 NEAREST 直采：底图把颗粒（`_grain_layer`）一起烘了进去，颗粒是
+    逐像素的高频图案；NEAREST 在缓慢缩放时采样网格会整像素跳变，颗粒图案随之整体
+    错位 1px，观感就是"满屏噪点在沸腾"——用户实测反馈是"明显的抖动感"，而背景-only
+    的帧差只有 4~6 灰阶，单帧闪烁门禁根本抓不到。
+
+    做法：s=1.0 与 s=1+push 两个端点各烘一张 BILINEAR 底版（每张约 60ms，只做一次），
+    逐帧用 `Image.blend` 在两端点间线性插值（实测 4.4ms/帧）。端点内部是**平滑重采样**，
+    没有 NEAREST 的网格跳变，帧差降到 0~1 灰阶；同时保留颗粒质感（不是把 grain 抹掉）。
+
+    上限取 1+push：`_push_scale` 恒 <= 1+push，超出的 s 一律钳到端点上，不会外推。
+    """
     if s <= 1.0008:
-        return base.copy()
-    bw, bh = W / s, H / s
-    x0 = (W - bw) * 0.5
-    y0 = (H - bh) * 0.5
-    return base.transform((W, H), Image.EXTENT, (x0, y0, x0 + bw, y0 + bh), Image.NEAREST)
+        return src.copy()
+    cap = 1.0 + max(0.0, float(th.get("push") or _DEFAULT_PUSH))
+    if cap <= 1.0008:
+        return src.copy()
+    s = min(float(s), cap)
+    key = _hashable(("zpts", tag, round(cap, 6)))
+    pair = _CACHE.get(key)
+    if pair is None:
+        lo = src.copy()
+        bw, bh = W / cap, H / cap
+        x0 = (W - bw) * 0.5
+        y0 = (H - bh) * 0.5
+        hi = src.transform((W, H), Image.EXTENT, (x0, y0, x0 + bw, y0 + bh), Image.BILINEAR)
+        pair = (lo, hi)
+        _CACHE[key] = pair
+        _ZOOM_ORDER.append(key)
+        while len(_ZOOM_ORDER) > 4:              # 一对端点约 12MB，限量防多片同进程膨胀
+            old = _ZOOM_ORDER.pop(0)
+            if old != key:
+                _CACHE.pop(old, None)
+    lo, hi = pair
+    w = (s - 1.0) / (cap - 1.0)
+    if w <= 0.0:
+        return lo.copy()
+    if w >= 1.0:
+        return hi.copy()
+    return Image.blend(lo, hi, w)
+
+
+def _bg_plate(th, s):
+    """逐帧背景：按镜头缩放取景（端点预烘 + blend，约 4.4ms/帧；见 _plate_zoom）。"""
+    return _plate_zoom(_bg(th), s, th, _zoom_tag(th, "bg"))
 
 
 # ---------------- 版式几何（全部从 ST.LAYOUTS 取） ----------------
@@ -1047,7 +1095,7 @@ def _plate(th, lang, scene, s_bg):
     """背景板 + 装饰母题合成后的整帧底版（v0.9.1）。
 
     这是单帧预算里最大的一处优化：装饰是静态的，逐帧单独 paste 一张全屏 RGBA 要 5.6ms，
-    合成进底版后逐帧只剩 copy（1.3ms）或 EXTENT 缩放（1.7–2.0ms）。
+    合成进底版后逐帧只剩 copy（1.3ms）或端点 blend 取景（约 4.4ms，见 _plate_zoom）。
     顺带一个好处：镜头缓推现在会把装饰一起推——装饰本来就该跟着镜头走，
     以前"背景推、装饰不动"在强 push 的风格（cinema 0.12 / epic 0.14）里其实是穿帮。
 
@@ -1072,12 +1120,7 @@ def _plate(th, lang, scene, s_bg):
             old = _PLATE_ORDER.pop(0)
             if old != key:
                 _CACHE.pop(old, None)
-    if s_bg <= 1.0008:
-        return got.copy()
-    bw, bh = W / s_bg, H / s_bg
-    x0 = (W - bw) * 0.5
-    y0 = (H - bh) * 0.5
-    return got.transform((W, H), Image.EXTENT, (x0, y0, x0 + bw, y0 + bh), Image.NEAREST)
+    return _plate_zoom(got, s_bg, th, _zoom_tag(th, key))
 
 
 def _apply_motif(img, th, lang, scene):

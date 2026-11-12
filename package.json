@@ -1,6 +1,6 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Video Studio skill plugin for DeepSeek Harness: proposal-first, zero-template code-generated Chinese videos — run the skill's scripts in place (no copying) and keep only a film.json in your project; each brief is sampled into several distinct design candidates (no built-in style packs) and frozen into a design DSL after user confirmation; visual.subtitle / visual.layout_cycle make caption style and per-chapter layout adjustable; a cross-film design ledger keeps delivered videos from repeating; measured TTS timeline, deterministic PIL/browser rendering, programmatic SFX and score, cue-driven sound sync, sample-level mixing, ffmpeg encoding, batch production and multi-layer QA gates (preflight, full-film VMAF/SSIM, ASR readback).",
   "type": "module",
   "main": "index.js",

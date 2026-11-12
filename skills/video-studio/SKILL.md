@@ -121,7 +121,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；67 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；69 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【v1.0 铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -736,7 +736,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（67 条曾真的坏过的点）
+python selfcheck.py                 # 技能自身回归（69 条曾真的坏过的点）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # v0.6：qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1077,7 +1077,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/gates.py` | **（v0.6）门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **（v0.6）阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **（v0.6）film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
-| `scripts/selfcheck.py` | 回归自检：**67 条**「曾真的坏过」的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条（44–51）、v0.9 新增 4 条（52–55）、v1.0 新增 3 条（56–58）、v1.0.2 新增 8 条：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已删除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）** |
+| `scripts/selfcheck.py` | 回归自检：**69 条**「曾真的坏过」的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。v0.8 新增 8 条（44–51）、v0.9 新增 4 条（52–55）、v1.0 新增 3 条（56–58）、v1.0.2 新增 8 条：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已删除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ v1.0.3 新增 2 条：**68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）** |
 | `scripts/preflight.py` | **（v0.8）渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **（v0.8）全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **（v0.8）ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
@@ -1221,9 +1221,10 @@ v0.4–v0.9 的老项目要出片，必须走一遍 `propose.py` → `--confirm`
 | v0.9 → **v1.0** | **提案优先**：`propose.py --brief 题材 --script film.json --work work` → `--confirm --candidate A` → `render.py --stage all`。删掉 `style: auto` 的自动选型 | CHANGELOG 1.0.0 |
 | v1.0 → **v1.0.1** | **删除全部模板/风格表**：`presets/`、`--preset`、`stylekit` 的 `THEMES/STYLES/VISUAL_LANGUAGES`、`scorekit` 的 `MUSIC_STYLES`、voicekit 的 persona 表全部删除。`film.json` 里写 `style` 不再生效；**同一个 brief 连拍两次会得到不同设计**（要复现就传 `--seed`） | CHANGELOG 1.0.1 |
 | v1.0.1 → **v1.0.2** | ① **零拷贝**：不用再拷 `scripts/*.py` / `assets/scenes.py`，直接跑技能目录里的脚本；`--scenes` 缺省按「剧本同目录 → 技能内置」回落。② 设计 DSL 新增 `visual.subtitle`（字幕样式，不写 = 逐像素不变）与 `visual.layout_cycle`（按章节轮换版式，默认派生 2–3 种）。③ 带约束的 brief（如「深蓝」）不再有约一半概率采样失败。④ 已删除 API 改为明确报错：`stylekit --list/--show/--lint` → 说明已删除 + **exit 2**；`--stage style` 不再 KeyError；`--stage cues` 可单跑。⑤ 片间去重台账默认开启（`~/.dsh/video-studio/design-ledger.json`，`--no-ledger` / `--show-ledger` / `VIDEO_STUDIO_LEDGER`）。⑥ 自检 **67 条** | CHANGELOG 1.0.2 |
+| v1.0.2 → **v1.0.3** | ① **取景不再抖**：底图烘焙的颗粒逐帧用 NEAREST 缩放会整像素跳变（实测帧差 4~6 灰阶，观感是"满屏噪点沸腾"），改成端点预烘 + Image.blend 插值（4.4 ms/帧，帧差 0~1）。② **ASR 掉分可定位**：低于 pass 线时列出"剧本有、成片没对上"的字符（全局 lost_top + 最差段落 per_line[].lost）。③ 自检 **69 条**（+68 取景稳定性、+69 ASR 掉分可定位）。④ 金帧基线随取景改动重录 | CHANGELOG 1.0.3 |
 
 > 查当前版本：`python <REPO>/tools/ci_check.py -v` 里的 version 断言、或 `cat package.json` 的 `version`。
-> 升级后建议按 §14 重跑一次自检（67 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
+> 升级后建议按 §14 重跑一次自检（69 条），再按 §7 重新签核（改了代码/默认值，旧签核会自动失效，这是设计）。
 
 > **v1.0.1 → v1.0.2 的具体迁移动作**：
 > 1. 删掉工程目录里拷过去的 `scripts/*.py`、`scenes.py`、`assets/web/`——不再需要；命令改成
@@ -1283,7 +1284,7 @@ v0.4–v0.9 的老项目要出片，必须走一遍 `propose.py` → `--confirm`
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 67 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 69 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

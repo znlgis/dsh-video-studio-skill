@@ -35,7 +35,7 @@
  },
  "inputs": {
   "script_sha1": "9ad24749d19cf0fcec1b7fa62e906ed78ce5501b",
-  "scenes_sha1": "1ff8eaeed66c226a48875580d96d41ff6daad1e3",
+  "scenes_sha1": "4c8bb69469b78231b8aed53f99c70b25e4857a86",
   "filmkit_sha1": "aca2f742ee4e7f7f2e99901a151864d8046d1547",
   "stylekit_sha1": "869098c23a1d9e704a0ffacbc58da6c987712817",
   "design_sha1": "f87cc13e4c55040d9de5675933c01aa8220134d1",
@@ -48,21 +48,21 @@
    "scene": "l01",
    "t_local": 1.2,
    "label": "hook",
-   "sha256": "155eaa030a519b7ded1c49664e0007314f2a4dc4eb6ef1e4b69d3b70bae0b367"
+   "sha256": "af738e3252e22abd3034c794b515ba0fde0d25eb41c6fa6ae8e1efdbff055a21"
   },
   {
    "frame": 270,
    "scene": "l03",
    "t_local": 1.6,
    "label": "body",
-   "sha256": "9d205ae43f2632c78446d372d8f3194ecfb7a9634ca42c36943ce31fd6be7981"
+   "sha256": "b86f97ab6a9120446700bc2c790944ebe7db6fbc24ed20871f79426a94a0980e"
   },
   {
    "frame": 369,
    "scene": "l04",
    "t_local": 1.5,
    "label": "outro",
-   "sha256": "c3ccdbedc567402728677f9f4d7ccf62bb98930bebf52934b8bb2becb0e9fb4f"
+   "sha256": "1850ff2313378c1fe0e7579aeb433c1d1fce072478f5924b913244095d2991f0"
   }
  ]
 }

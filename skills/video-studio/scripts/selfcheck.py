@@ -2127,6 +2127,79 @@ def t_duration_target():
     plan = DK.design_to_plan(d)
     assert plan.get("target_sec") == 120.0, "目标时长没进计划：%r" % (plan.get("target_sec"),)
     return "6 种时长说法解析正确；进 design/plan；超范围拒绝"
+def t_zoom_stability():
+    """68 缩放取景的帧间稳定性（抖动回归）。
+
+    为什么要有这条：底图把颗粒烘进去后用 NEAREST 逐帧直采，采样网格随 s 整体跳变，
+    颗粒图案跟着错位 1px —— 用户实测的原话是"生成的视频有明显的抖动感"，
+    而单帧闪烁门禁（8x8 分块比较前后帧平均）对这类亚像素沸腾**完全不敏感**。
+    断言：同一主题从 s=1.0 缓推到 s=1+push 的过程中，相邻两帧最大差 <= 2 灰阶。
+    旧实现实测 4~6（v1.0.2），改成端点预烘 + blend 后 0~1。
+    """
+    mod = _load_scenes_mod()
+    if mod is None:
+        return "skip（没有 assets/scenes.py）"
+    import numpy as np
+    push = 0.12
+    th = {"id": "zoom-stab", "bg": (28, 30, 36), "bg2": (18, 19, 24), "texture": "paper",
+          "grain": 5.0, "grain_freq": 0.31, "vignette": 0.2, "vignette_tint": (0, 0, 0),
+          "texture_alpha": 0.03, "push": push}
+    frames = [np.asarray(mod._bg_plate(th, 1.0 + push * i / 19.0), dtype=np.int16)
+              for i in range(20)]
+    worst_max = 0
+    worst_mean = 0.0
+    for i in range(1, len(frames)):
+        d = np.abs(frames[i] - frames[i - 1])
+        worst_max = max(worst_max, int(d.max()))
+        worst_mean = max(worst_mean, float(d.mean()))
+    assert worst_max <= 2, ("缩放取景帧间跳变 %d 灰阶（>2）：底图高频纹理被 NEAREST 重排，"
+                            "观感就是满屏噪点沸腾" % worst_max)
+    # 均值守住 0.6：8-bit 输出下慢速缓推必然出现"整片 1 灰阶"的量化台阶，
+    # 首帧端点与 s≈1.006 之间实测 mean≈0.44 —— 这是量化噪声，不是图案错位。
+    # 真正能区分"错位沸腾"的是 max：旧实现 4~6，新实现 <=1。
+    assert worst_mean <= 0.6, "缩放取景帧间平均差 %.3f（>0.6，疑似整屏跳变）" % worst_mean
+    return ("20 帧缓推：最大帧间差 %d 灰阶 / 均值 %.3f（旧 NEAREST 直采为 4~6 灰阶）"
+            % (worst_max, worst_mean))
+
+
+def t_asr_lost_diagnostics():
+    """69 ASR 掉分可定位（低召回必须说清"掉在哪几个字"）。
+
+    为什么要有这条：实测 ASR 回读 0.813~0.844 是常态（中文专名 + 同音字），只报一个
+    百分比，agent 只能盲目放宽阈值。这条断言盯的是"低于 pass 线时，报告必须给出
+    没对上的字符（全局 + 最差段落）"，且判分本身仍然是纯函数、不加载模型。
+    """
+    cand = os.path.join(HERE, "qaasr.py")
+    if not os.path.exists(cand):
+        return "skip（没有 qaasr.py）"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sc_qaasr", cand)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    scenes = [
+        {"id": "a", "start": 0.0, "end": 3.0, "voice_start": 0.4,
+         "text": "这是用 DeepSeek 生成的声音与画面。"},
+        {"id": "b", "start": 3.0, "end": 6.0, "voice_start": 3.4,
+         "text": "先定脚本，再定声音，最后才是画面。"},
+    ]
+    # ASR 把 DeepSeek 听成"迪普西克"、把"再定"听成"在订"——低召回但不丢句
+    segments = [
+        {"start": 0.4, "end": 3.0, "text": "这是用 迪普西克 生成的声音与画面"},
+        {"start": 3.4, "end": 6.0, "text": "先定脚本，在订声音，最后才是画面"},
+    ]
+    rep = mod._judge(scenes, segments, recall_pass=0.99, recall_warn=0.5)
+    assert rep["recall"] < 0.99, "构造样例没有触发低召回，断言前提不成立"
+    assert rep.get("lost_top"), "低召回时没有输出 lost_top（掉分字符清单）"
+    assert all("ch" in x and "n" in x for x in rep["lost_top"]), "lost_top 结构不对"
+    lost_lines = [p for p in rep["per_line"] if p.get("lost")]
+    assert lost_lines, "没有段落级 lost（最差段落无法定位）"
+    warns = " ".join(rep.get("warnings") or [])
+    assert "没对上的字" in warns, "低召回时警告里没有掉分字符清单"
+    assert "最差段落" in warns, "低召回时警告里没有最差段落定位"
+    return "lost_top %d 项 / 段落级 %d 段 / 警告 %d 条" % (
+        len(rep["lost_top"]), len(lost_lines), len(rep.get("warnings") or []))
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2195,6 +2268,8 @@ CASES = [
     ("65 design.audio 的音量/音效参数真的落进 script", t_audio_overrides),
     ("66 片间去重台账（确认记账 / 提案避开 / 可关可查）", t_design_ledger),
     ("67 时长要求真的被接住（brief -> design -> 渲染对账）", t_duration_target),
+    ("68 缩放取景的帧间稳定性（抖动回归）", t_zoom_stability),
+    ("69 ASR 掉分可定位（lost_top / 最差段落）", t_asr_lost_diagnostics),
 ]
 
 

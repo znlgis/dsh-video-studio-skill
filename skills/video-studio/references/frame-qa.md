@@ -500,3 +500,35 @@ PIL 模板演示片（30 s / 1080p30）早期版本报过 `t=16.933s score=6.61`
 | 空窗漏报 | 近黑但没到 0.045（例如深灰 0.06）→ 调高 `BLACK_LUMA_MAX`；或时长不足 0.8 s |
 | 同步全不报 | ① `cues.json` 没有 `events`（页面未导出）；② **events.kind 与 cue 配方名不同名**（最常见，且不会任何报错）；③ cue 与事件时间差 > 同 kind 搜索窗 2 s |
 | 想确认同步检查真的在工作 | 故意把某个 cue 的时刻改错 0.3 s 重跑，**必须**报出超差；不报就是没配上（见上一行） |
+
+## 11. 取景抖动（噪声沸腾）—— 单帧闪烁判据抓不到的一类
+
+**现象**：成片看起来"一直在抖"，但 `flicker_scan` 报 0、`ssim`/`vmaf` 都很好。
+用户的一句话往往是"生成的视频有明显的抖动感，这是为啥？"
+
+**根因**：底图把颗粒（`_grain_layer`）和材质一起烘进了 1920×1080 的静态图层，逐帧再用
+`Image.EXTENT + NEAREST` 按镜头缓推的缩放比 `s` 取景。NEAREST 的采样网格随 `s` 整像素跳变，
+颗粒图案跟着**整体错位 1px**——这就是"满屏噪点在沸腾"。它是**位移**型瑕疵，不是亮度型，
+所以按"前后帧平均亮度差"定义的 `flicker_scan` 对它完全不敏感。
+
+**探测方法**（不用整片，10 秒就够）：
+
+```python
+import numpy as np
+from PIL import Image
+# 同一主题，连续取 s = 1.0 -> 1+push 的 20~40 帧
+frames = [mod._bg_plate(th, 1.0 + th["push"] * i / 39.0) for i in range(40)]
+worst = max(int(np.abs(np.asarray(a, np.int16) - np.asarray(b, np.int16)).max())
+            for a, b in zip(frames, frames[1:]))
+print(worst)    # 旧实现 4~6 灰阶（可见沸腾）；端点预烘 + blend 后 0~1
+```
+
+**修法**：不要用 NEAREST 直采缩放（BILINEAR/BICUBIC 整帧重采样 29/64 ms，超单帧预算）。
+改成**端点预烘 + 逐帧 blend**：`s=1.0` 与 `s=1+push` 各烘一张 BILINEAR 底版（每张约 60ms，
+只做一次），逐帧用 `Image.blend(lo, hi, (s-1)/push)` 插值（约 4.4 ms/帧）。
+端点内部是平滑重采样，没有网格跳变；颗粒质感保留。上限 `1+push` 是精确边界
+（`_push_scale` 恒 <= 1+push），超出就钳到端点上，不做外推。
+
+**护栏**：`selfcheck` 第 68 条（`t_zoom_stability`）断言相邻帧最大差 <= 2 灰阶。
+旧实现在这条上直接 fail——这就是"修好之后再也不会悄悄退回 NEAREST"的机制。
+

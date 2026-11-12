@@ -821,9 +821,13 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
     assigned = _assign_text(scenes, segments)
     per_line, missing, offsets, offset_ref = [], [], {}, {}
     tot_ref, tot_hit = 0, 0
+    lost_counter = Counter()                            # 全片"ref 有、ASR 没对上"的字符
     for sc, got in zip(scenes, assigned):
         ref = _norm_text(sc.get("text"))
         hyp = _norm_text(got["text"])
+        lost = Counter(ref) - Counter(hyp) if ref else Counter()
+        if lost:
+            lost_counter.update(lost.elements())
         hit = sum((Counter(ref) & Counter(hyp)).values()) if ref else 0
         r = (hit / float(len(ref))) if ref else 1.0
         tot_ref += len(ref)
@@ -833,6 +837,8 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
             "end": round(float(sc["end"]), 3), "ref_chars": len(ref),
             "asr_chars": len(hyp), "hit_chars": hit, "recall": round(r, 4),
             "asr_text": got["text"][:200],
+            # 单段掉分定位：这一段里"剧本有、ASR 没对上"的字（最多 6 个）
+            "lost": ["%s×%d" % (ch, n) for ch, n in lost.most_common(6)] if lost else [],
         })
         if ref and r < MISS_LINE_RECALL:
             missing.append(sc["id"])
@@ -866,8 +872,21 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
                       % (recall, recall_warn, tot_ref, tot_hit))
         status = "fail"
     elif recall < recall_pass - 1e-12:
+        # 只报"召回 0.813"没法修：实测掉分几乎全在中英混排专名（"DeepSeek 4.1 Flash"
+        # 被听成 DIXX 之类）。这里把"剧本里有、成片里没对上"的字符按次数排出来，
+        # 让 agent 知道该改哪几个词（改读法 / 加同音别名 / 换掉 ASR 不认的写法）。
         warnings.append("ASR 回读字符召回 %.3f 低于 pass 线 %.2f（但高于 fail 线 %.2f）："
                         "pass 但记 warning，别当完全没问题" % (recall, recall_pass, recall_warn))
+        if lost_counter:
+            tips = "、".join("%s×%d" % (ch, n) for ch, n in lost_counter.most_common(12))
+            warnings.append("成片里没对上的字（ref 有 / ASR 无，按次数）：%s —— 多是专名读法，"
+                            "改剧本写法或在 film.json 的 qa.asr 放宽" % tips)
+        worst = sorted((p for p in per_line if p.get("lost")),
+                       key=lambda p: float(p.get("recall") or 0.0))[:2]
+        for p in worst:
+            warnings.append("最差段落 %s（召回 %.2f，%d/%d 字）：没对上 %s；ASR 实际读到 %r"
+                            % (p["id"], float(p["recall"]), p["hit_chars"], p["ref_chars"],
+                               "、".join(p["lost"]), p["asr_text"][:50]))
         status = "pass"
     else:
         status = "pass"
@@ -879,6 +898,7 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
         detail += "；最大偏移 %s %+.2fs" % (worst[0], float(worst[1]))
     return {
         "recall": round(recall, 4), "ref_chars": tot_ref, "hit_chars": tot_hit,
+        "lost_top": [{"ch": ch, "n": n} for ch, n in lost_counter.most_common(20)],
         "per_line": per_line, "missing_lines": missing,
         "offsets": offsets, "offset_ref": offset_ref, "offset_warn_s": float(offset_warn),
         "gate": {"id": "asr", "title": "ASR 回读（原稿 vs 成片旁白）",
@@ -1145,7 +1165,7 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
         rep["audio_s"] = audio_info.get("duration")     # 前面探测过，不重复跑 ffprobe
     judged = _judge(scenes, rep["asr_segments"], recall_pass=recall_pass,
                     recall_warn=recall_warn, offset_warn=offset_warn)
-    for key in ("recall", "ref_chars", "hit_chars", "per_line", "missing_lines",
+    for key in ("recall", "ref_chars", "hit_chars", "lost_top", "per_line", "missing_lines",
                 "offsets", "offset_ref", "gate", "warnings", "errors"):
         rep[key] = judged[key]
     if asr.get("parse_skipped"):
