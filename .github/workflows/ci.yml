@@ -4,8 +4,8 @@
 #   repo     —— tools/ci_check.py 的 12 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
 #               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
 #               film.json 契约）。不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：67 条"曾经真的坏过"的回归断言（v1.0.2 起；
-#               老文档里写的 43/51/55/58 都是历史版本的数，数 CASES 列表为准）。
+#   skill    —— skills/video-studio/scripts/selfcheck.py：69 条针对真实缺陷的回归断言
+#               （数为准的是 CASES 列表，不是文档里的任何数字）。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
 #
@@ -84,7 +84,7 @@ jobs:
         run: python sfxkit.py --selftest
 
       # scorekit 现在是**合成原语库**（混音/响度/确定性/24-bit 落盘），不再是"配乐模板引擎"：
-      # v1.0.1 删掉了它的 9 套风格表（MUSIC_STYLES / render_styled），只留 legacy 逐样本兼容
+      # 它不再是配乐引擎：只剩合成原语与 legacy 逐样本兼容路径
       # 与可复用的合成原语。它仍被这套自检保护，所以这一步保留。
       - name: 'selftest: scorekit（合成原语 + legacy 逐样本兼容）'
         working-directory: skills/video-studio/scripts

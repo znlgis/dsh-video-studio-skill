@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""golden_frames.py — 金帧像素回归（v0.8.0）。
+"""golden_frames.py — 金帧像素回归。
 
 解决什么问题
 ------------
-v0.5 起 scenes.py 的注释里就写着「基线三帧 sha256 由 selfcheck 比对」，但一直没人真的
-实现：改一行绘制代码、换一套主题、动字幕排版，肉眼看不出来、qa_frames 的统计指标也
-未必报——只有"同一帧的像素哈希"能当场抓住。本工具就是那条基线。
+改一行绘制代码、换一套设计、动字幕排版，肉眼看不出来、qa_frames 的统计指标也未必报——
+只有"同一帧的像素哈希"能当场抓住。本工具就是那条基线。
 
 做什么
 ------
 渲染指定帧号 -> 每帧算 SHA-256 -> 与 skills/video-studio/assets/golden_frames.json 比对。
-  * --write   生成/更新基线（模板有意改动后重录，并把 JSON 一起提交）
+  * --write   生成/更新基线（绘制代码有意改动后重录，并把 JSON 一起提交）
   * --check   校验（默认）：同环境像素变了 = fail，并列出哪几帧变了
 
 三档语义（"没查"绝不能写成"通过"）
@@ -30,7 +29,7 @@ sha1），指纹不同直接 skipped（跨机不误报）；指纹相同还变�
 基线怎么来的（确定性）
 ----------------------
 不联网、不依赖 TTS 产物：用固定的假语音时长（FAKE_VOICE_DUR=2.0s）排一条合成时间轴，
-取模板片的 3 个时刻（hook / body / outro）作为默认帧号。这样同一份 film.json + scenes.py
+取夹具片的 3 个时刻（hook / body / outro）作为默认帧号。这样同一份 film.json + scenes.py
 在任何机器上都能立刻重算基线；真实旁白时长只影响"哪一帧是哪一句"，不影响"这一帧画成
 什么样"，后者才是本工具要守的东西。帧号与场景 id、段内时刻都记进基线，便于人工复核。
 
@@ -51,7 +50,7 @@ CLI
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "1.0.4"
 
 import argparse
 import hashlib
@@ -72,7 +71,7 @@ DEFAULT_SCRIPT = os.path.join(ASSETS, "film.json")
 # v1.0 / D3：金帧基线绑"固定 fixture 设计"而不是内置风格。
 # 为什么：金帧要守的是"同一份设计 + 同一份场景代码，像素不许漂"，
 # 不是"某套内置风格长什么样"——后者会随风格表下沉到 presets 而失去意义。
-# 没有这个文件时回落到老口径（读 film.json 的 style），不阻塞老项目。
+# 没有这个文件时回落到 stylekit 老口径（它现在只会明确报错），不阻塞诊断。
 DEFAULT_DESIGN = os.path.join(ASSETS, "design_fixture.json")
 DEFAULT_SCENES = os.path.join(ASSETS, "scenes.py")
 DEFAULT_GOLDEN = os.path.join(ASSETS, "golden_frames.json")
@@ -84,7 +83,7 @@ FAKE_VOICE_DUR = 2.0
 HOOK_LOCAL = 1.2
 BODY_LOCAL = 1.6
 OUTRO_LOCAL = 1.5
-# 参与字体指纹的字重（模板的绘制函数只用到 bold / reg / light）
+# 参与字体指纹的字重（内置绘制器只用到 bold / reg / light）
 FONT_WEIGHTS = ("bold", "reg", "light")
 
 RESULT_KEYS = ("status", "frames", "font_fp")
@@ -191,7 +190,7 @@ def build_timeline(K, script):
     与 render.st_layout 的差别只在 dur 的来源：这里每句固定 FAKE_VOICE_DUR 秒，
     其余（lead/tail/min_dur/hold/bar）照常走 filmkit.build_timeline，结果可复现。
 
-    但 **fps 必须跟 render.py 一样取自 filmkit.video_plan**（v0.8 起 fps 可配置）：
+    但 **fps 必须跟 render.py 一样取自 filmkit.video_plan**（fps 可按片配置）：
     build_timeline 的默认 fps=30 会让 24/25/50/60 fps 的片子按 30 fps 编号，
     于是基线里的 frame 号既不是成片的真实帧号，t=frame/fps 也不是真实时刻——
     那份基线守的是"另一部片子"的画面，回放/比对都错位（且不会报错）。
@@ -299,7 +298,7 @@ def env_fingerprint():
     口径细节：**Python 只按 major.minor 参与指纹**，补丁号只记录不参与比较。
     理由是真正决定抗锯齿像素的是 Pillow（FreeType）与 numpy，不是 CPython 的补丁版本；
     而按补丁号比较会让"作者机器 3.12.16 / 用户机器 3.12.14"这种正常差异一律 skipped——
-    实测踩过：selfcheck 第 51 条因此显示"0 帧像素一致"却记 PASS，等于这条门禁从没真的比过。
+    实测踩过：金帧回归因此显示"0 帧像素一致"却记 PASS，等于这条门禁从没真的比过。
     真要跨 Pillow/numpy 版本比，仍然会 skipped，那才是像素不可比的情形。
     """
     import numpy
@@ -314,7 +313,7 @@ def env_fingerprint():
 def _env_fp_from(env):
     """按"参与比较的口径"给 env 字典算指纹（Python 只取 major.minor）。
 
-    单独抽出来是为了**兼容老基线**：v0.8.0 的 golden_frames.json 里记的是完整补丁号
+    单独抽出来是为了**兼容老基线**：早期 golden_frames.json 里记的是完整补丁号
     （如 3.12.16），如果直接拿新口径算出的指纹去比，老基线会永远 skipped——那等于把
     "补丁号差异"永久固化成"这条门禁不用跑"。这里对**存的 env** 和**当前 env** 走同一个
     归一化函数，所以 3.12.14 与 3.12.16 视为同一环境，而 Pillow/numpy 的差异照旧拦住。
@@ -425,9 +424,9 @@ def _golden_payload(script_path, scenes_path, K, plan, tl, rendered, design_path
         "generator": "golden_frames.py v%s" % __version__,
         "comment": "金帧基线：字体指纹+环境指纹一致时，每一帧像素 sha256 必须相同；"
                    "换机/字体/Pillow 版本不同判 skipped（不误报），同环境像素变了才是 fail。"
-                   "改动模板（film.json / scenes.py / stylekit 主题）后请 --write 重录并提交本文件。",
+                   "改动夹具（film.json / scenes.py / 设计）后请 --write 重录并提交本文件。",
         "canvas": [int(K.W), int(K.H)],
-        # 记时间轴自己的 fps（不是写死的 K.FPS）：v0.8 起 film.json 可以设 24/25/50/60
+        # 记时间轴自己的 fps（不是写死的 K.FPS）：film.json 可以设 24/25/50/60
         "fps": int(tl["fps"]),
         "script": _rel(script_path),
         "scenes": _rel(scenes_path),
@@ -548,7 +547,7 @@ def check_golden(script_path, scenes_path, golden_path, design_path=None):
                 reason="skipped: font differs（字体指纹 %s）——换机/字体版本不同，"
                        "像素比对不成立；确认画面后在当前机器 --write 重录"
                        % _fmt_fp_pair(font_fp, golden.get("font_fp")))
-        # 比指纹时对**存的 env** 走同一个归一化（见 _env_fp_from）：这样 v0.8.0 那些
+        # 比指纹时对**存的 env** 走同一个归一化（见 _env_fp_from）：这样早期那些
         # 记着完整补丁号的老基线不会因为 3.12.14 vs 3.12.16 永久 skipped。
         golden_env_fp = _env_fp_from(golden.get("env") or {})
         if golden_env_fp != env_fp:
@@ -647,15 +646,15 @@ def main(argv=None):
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--check", action="store_true", help="校验（默认）")
     g.add_argument("--write", action="store_true", help="生成/更新基线")
-    ap.add_argument("--script", default=DEFAULT_SCRIPT, help="film.json（默认模板片）")
+    ap.add_argument("--script", default=DEFAULT_SCRIPT, help="film.json（默认夹具片）")
     ap.add_argument("--design", default=DEFAULT_DESIGN,
                     help="固定 fixture 设计（默认 assets/design_fixture.json）；"
                          "传空串回落到老的 stylekit 口径")
-    ap.add_argument("--scenes", default=DEFAULT_SCENES, help="scenes.py（默认模板场景）")
+    ap.add_argument("--scenes", default=DEFAULT_SCENES, help="scenes.py（默认内置场景）")
     ap.add_argument("--golden", default=DEFAULT_GOLDEN,
                     help="基线 JSON（默认 skills/video-studio/assets/golden_frames.json）")
     ap.add_argument("--frames", default="",
-                    help="--write 时指定帧号（逗号分隔）；缺省取模板片 3 个时刻")
+                    help="--write 时指定帧号（逗号分隔）；缺省取夹具片 3 个时刻")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON（机读）")
     ap.add_argument("--strict", action="store_true",
                     help="skipped 用退出码 2 表示（默认 skipped 退出码 0，但绝不写 pass）")

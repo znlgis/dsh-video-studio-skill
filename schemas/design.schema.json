@@ -423,12 +423,12 @@
        "split-right"
       ]
      },
-     "description": "片内版式轮换顺序（v1.0.2，可选）。grammar.plan_scenes 在 plan 没有显式 chapter_layout 时，按「章节首次出现的顺序」依次取 cycle[0]、cycle[1]… 循环；同一章内版式固定（观众视角一章是一段整体），换章才换版式——这正是「同一视频内部不要大面积重复」的实现。至少 2 种不同版式（只写一种等于不轮换，designkit.validate_design 报错）。不写 = design_to_plan 按设计指纹自动派生 2–3 种；老 design.json 没有这个键，grammar 走 layout_default，逐字节与过去一致。"
+     "description": "片内版式轮换顺序（可选）。grammar.plan_scenes 在 plan 没有显式 chapter_layout 时，按「章节首次出现的顺序」依次取 cycle[0]、cycle[1]… 循环；同一章内版式固定（观众视角一章是一段整体），换章才换版式——这正是「同一视频内部不要大面积重复」的实现。至少 2 种不同版式（只写一种等于不轮换，designkit.validate_design 报错）。不写 = design_to_plan 按设计指纹自动派生 2–3 种；没有这个键时 grammar 走 layout_default。"
     },
     "subtitle": {
      "type": "object",
      "additionalProperties": false,
-     "description": "字幕样式（v1.0.2，可选）。为什么要有：v1.0.1 及以前字幕的字号 / 位置 / 背板透明度 / 圆角全是 filmkit.py 里的写死常量，于是**任何两条片子**的字幕带一模一样。全部字段可选，不写 = 补齐下面的默认值（与过去逐像素一致，老 design.json 不受影响）。默认值：size=46、y=null、align=center、plate_alpha=170、radius=10、family=null、color=null、max_lines=2。",
+     "description": "字幕样式（可选）。字号 / 位置 / 背板透明度 / 圆角 / 字族 / 颜色 / 折行数全部可写：不写就是 filmkit.py 的默认值（不写时任何两条片子确实会得到同样的字幕带，所以要不同就该改这里）。默认值：size=46、y=null、align=center、plate_alpha=170、radius=10、family=null、color=null、max_lines=2。",
      "properties": {
       "size": {
        "type": "integer",
@@ -513,7 +513,7 @@
       "1280x720",
       "960x540"
      ],
-     "description": "画幅（v1.0.2）。本版**仅支持 16:9 横屏**（1920x1080 内部构图，可 lanczos 下采样到 1280x720 / 960x540）；竖屏、非 16:9 或上采样一律拒绝。与 film.json 的 video 块（width/height/fps）冲突时报错（fail-closed，绝不静默取其一）。"
+     "description": "画幅。本版**仅支持 16:9 横屏**（1920x1080 内部构图，可 lanczos 下采样到 1280x720 / 960x540）；竖屏、非 16:9 或上采样一律拒绝。与 film.json 的 video 块（width/height/fps）冲突时报错（fail-closed，绝不静默取其一）。"
     },
     "fps": {
      "type": "integer",
@@ -524,7 +524,7 @@
       50,
       60
      ],
-     "description": "帧率（v1.0.2）。与 film.json 的 video.fps 冲突时报错（fail-closed）。缺省 30。"
+     "description": "帧率。与 film.json 的 video.fps 冲突时报错（fail-closed）。缺省 30。"
     }
    }
   },
@@ -603,7 +603,7 @@
       },
       "style": {
        "type": "string",
-       "description": "已废弃：v1.0.1 删除了配乐风格表，这个键不决定任何东西（保留只为老 design.json / 既有 fixture 能继续通过契约校验；designkit.validate_design 也接受它）"
+       "description": "已废弃：配乐没有风格表，这个键不决定任何东西（保留只为老 design.json / 既有 fixture 能继续通过契约校验；designkit.validate_design 也接受它）"
       },
       "bpm": {
        "type": [

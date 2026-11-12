@@ -40,11 +40,11 @@ import unicodedata
 from pathlib import Path
 
 # ============================================================================
-# 基准常量（v0.7.2 重新校准：换机请重测后回填，别把这里的数字当通用真理）
+# 基准常量（换机请重测后回填，别把这里的数字当通用真理）
 # ============================================================================
 
 W, H, FPS = 1920, 1080, 30          # filmkit.W/H/FPS：本项目写死，film.json 改不了
-PIL_FPS = (40.0, 80.0)              # PIL 逐帧渲染速度：中等复杂度 40–54 fps / 模板片 68–82 fps
+PIL_FPS = (40.0, 80.0)              # PIL 逐帧渲染速度：中等复杂度 40–54 fps / 夹具片 68–82 fps
 PARALLEL_EFF = 0.5                  # 分块并行的**实测效率**：2 进程只快 1.5×，不是 2×（见 CALIBRATION）
 WEB_SEC_PER_FRAME = (0.080, 0.130)  # web 引擎：Edge 无头 PNG 截图 80–130 ms/帧
 WEB_STARTUP_SEC = 6.0               # 浏览器冷启动 + CDP 连接（12 s 片 28–30 s 含启动）
@@ -52,14 +52,13 @@ X264_FPS = 141.0                    # libx264 -preset medium -crf 17 ≈ 4.7× �
 TTS_SEC_PER_LINE = (2.0, 4.0)       # edge-tts：每句每 worker 的墙钟（联网，波动大）：实测 2.2 s，留到 4.0
 # 配乐耗时锚点 (片长 s, 耗时低, 耗时高)。
 #
-# v1.0.1 换成 musicgen 实测值：30 s / 60 s / 120 s 分别 0.94 / 1.93 / 3.68 s（≈31× 实时），
-# 比 scorekit 时代快一个数量级。为什么现在敢改：以前配乐走 scorekit 的 9 套风格表，
-# 那个引擎要逐层展开事件并做多次 IIR，实测 29 s 片 3.6–6.5 s；现在的参数化编排器
-# 是单遍事件合成，实测抖动也小（同参数逐采样确定，耗时只随片长线性涨）。
+# musicgen 实测值：30 s / 60 s / 120 s 分别 0.94 / 1.93 / 3.68 s（≈31× 实时）。
+# 参数化编排器是单遍事件合成，实测抖动也小（同参数逐采样确定，耗时只随片长线性涨）；
+# 早期逐层展开事件、多次 IIR 的配乐引擎实测 29 s 片要 3.6–6.5 s。
 # 区间仍给 0.7–1.5 系数包络：CI 机器与共享 CPU 会慢，报小了会让人以为卡住。
 SCORE_REFS = ((29.0, 0.9, 1.6), (58.0, 1.8, 3.0), (389.0, 11.5, 19.0))
 SFX_SEC_PER_CUE = 0.20              # 单条短音效 合成+落位（24 配方单次 ≤1.5 s 是上限口径）
-SFX_MIN_SEC = 0.8                   # 实测 18 条 cue 的模板片 sfx 墙钟 0.8 s（含 ffmpeg 写盘）
+SFX_MIN_SEC = 0.8                   # 实测 18 条 cue 的夹具片 sfx 墙钟 0.8 s（含 ffmpeg 写盘）
 LAYOUT_BASE, LAYOUT_PER_LINE = 0.05, 0.01  # 排轴 + srt/ass + 安全区/字形自查（实测 29 s 片 <0.15 s）
 CUES_BASE, CUES_PER_LINE = 0.05, 0.005     # 提示点落盘 + 排序（实测 29 s 片 <0.15 s）
 AUDIO_BASE, AUDIO_PER_SEC = 0.6, 0.012     # numpy 总线按采样点叠加 + 写 wav
@@ -70,12 +69,12 @@ MUX_PER_SEC = 0.045                 # 每片长秒（两遍 loudnorm 解码音�
 QA_BASE_SEC = (1.0, 3.0)            # 固定开销：联系表 + 参考帧重渲染
 QA_SEC_PER_SEC = (0.12, 0.25)       # 随片长：帧级深检流式解码 + 响度曲线
 UNMEASURED_BAND = 0.30              # 没有实测的阶段（layout/cues/sfx/audio）给 ±30% 的区间，别假装精确
-# v0.8 G11（全片 VMAF/SSIM）：参考帧由场景函数**重渲一遍**再喂 libvmaf，成本跟帧数走、
+# G11（全片 VMAF/SSIM）：参考帧由场景函数**重渲一遍**再喂 libvmaf，成本跟帧数走、
 # 与 frames 阶段同量级。实测口径差异极大：qavmaf 作者 29 s 片 12.0 s（≈0.40× 片长）；
-# SKILL.md §12 同一部模板片 14.2 s；同机另一轮负载下 28.8 s。这里取 0.40–1.00× 片长
+# SKILL.md §12 同一部夹具片 14.2 s；同机另一轮负载下 28.8 s。这里取 0.40–1.00× 片长
 # （下限=干净机、上限=争 CPU 的长片外推），固定开销单独列 1–2 s。
-# 注：v0.7.2 那套 1.0–1.6× 的系数没有 v0.8 实测支撑，把 29 s 片算成 31–50 s（实际 12–29 s），
-# 预演总量因此系统性偏大近 2 倍——这类"拍脑袋的悲观系数"比低估更糟：排期会按假的数字走。
+# 注：1.0–1.6× 这类没有实测支撑的系数会把 29 s 片算成 31–50 s（实际 12–29 s），
+# 预演总量系统性偏大近 2 倍——"拍脑袋的悲观系数"比低估更糟：排期会按假的数字走。
 VMAF_BASE_SEC = (1.0, 2.0)          # 起渲染进程 + 参考帧管线搭建
 VMAF_SEC_PER_SEC = (0.40, 1.00)     # 每片长秒（参考帧重渲 + libvmaf 逐帧比）
 
@@ -85,7 +84,7 @@ CALIBRATION = dict(
              "SKILL.md §12 记录的作者机是 Ryzen AI 9 HX 370 / 12C24T / Radeon 890M"
              "（是否同一台未核实，只保证这些数字是在上述 24 逻辑核机器上测的）"),
     measured_at="2026-11-10",
-    sdk="video-studio v0.7.1 scripts（ffmpeg 自带 x264）",
+    sdk="video-studio scripts（ffmpeg 自带 x264）",
     film="29.011 s / 870 帧 / 测试样片（assets/film.json + assets/scenes.py，仅用于基准校准）",
     method="render.py --stage all --jobs 2，逐 stage 取 [time] 行墙钟；同片重复 2 次",
     observed=dict(tts=2.2, layout=0.0, cues=0.0, score=6.3, sfx=0.8, audio=0.7,
@@ -94,14 +93,14 @@ CALIBRATION = dict(
           " score 58 s 片 4.5–5.0 s; qa 6.2–6.8 s",
 )
 CPS = 4.2                            # 每秒约 4.2 字（voicekit 校准 3.84–4.61 cps 的中位口径）
-DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR = 0.62, 0.92, 3.0  # v0.5 body 基准
+DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR = 0.62, 0.92, 3.0  # body 基准
 CORES = 12                           # HX 370：12C/24T；jobs > 12 不再线性加速
 TTS_BYTES_PER_LINE = 32 * 1024       # 单句 mp3 缓存（4 s 语音约 24 KB，留余量）
 WAV_BYTES_PER_SEC = 48000 * 2 * 2    # 48 kHz 立体声 PCM16 = 192 KB/s
 VIDEO_MBPS = (1.2, 3.0)              # crf17 @1080p30 图文内容（暗底大字 0.5–1 Mbps 属正常）
 AUDIO_MBPS = 0.192                   # AAC 192 kbps
 QA_DISK_BYTES = 12 * 1024 * 1024     # 联系表 + 静帧 + deep.png
-BASELINE_NOTE = ("区间来自 v0.7.2 本机实测（机型/样本见下方 calibration；"
+BASELINE_NOTE = ("区间来自本机实测（机型/样本见下方 calibration；"
                  "SKILL.md §12 记录的作者机是 Ryzen AI 9 HX 370 / 12C24T）；换机请先重测再采信")
 
 STAGE_LABELS = {
@@ -114,7 +113,7 @@ STAGE_LABELS = {
     "frames": "逐帧渲染+编码",
     "mux": "合成成片",
     "qa": "质检+抽帧",
-    # v0.8：交付前的三道新门禁单独列（它们的成本不能藏进 qa 里）
+    # 交付前的三道门禁单独列（它们的成本不能藏进 qa 里）
     "preflight": "渲染前预检",
     "vmaf": "全片VMAF/SSIM",
     "asr": "ASR回读",
@@ -314,7 +313,7 @@ def score_seconds(total):
 def _speedup(jobs):
     """分块并行的**有效加速比**：不是 jobs 倍。
 
-    实测（870 帧模板片）：jobs=1 → 14.37 s、jobs=2 → 9.53 s，只有 1.51×。
+    实测（870 帧夹具片）：jobs=1 → 14.37 s、jobs=2 → 9.53 s，只有 1.51×。
     原因很实在：父进程要 spawn 子进程、每段都要重新 import scenes.py / 解析主题、
     落盘 mux 串行、磁盘写带宽争用。按 jobs 线性折算会持续低估长片（越长的片分块越多）。
     这里用 1 + (jobs-1)*PARALLEL_EFF 的线性模型：比理论值保守，实测 2 进程刚好对上。
@@ -426,7 +425,7 @@ def build_report(script_path, script, args):
         _warn("engine=%r 不认识（只能是 pil / web），按 pil 预演" % engine)
         engine = "pil"
 
-    # v0.8：画幅/帧率可以按片配置（只允许 16:9 横屏 + 下采样输出，见 filmkit.video_plan）。
+    # 画幅/帧率可以按片配置（只允许 16:9 横屏 + 下采样输出，见 filmkit.video_plan）。
     # 预演必须跟着走，否则 720p 片会被按 1080p 估帧数与磁盘。
     try:
         import sys as _sys
@@ -455,7 +454,7 @@ def build_report(script_path, script, args):
         source_note = "真实帧数：%s" % tl_path
     else:
         total, _scenes = estimate_timeline(script)
-        # v0.8：没有 timeline.json 时也必须用 film.json 的 video.fps —— 定死 30 会让
+        # 没有 timeline.json 时也必须用 film.json 的 video.fps —— 定死 30 会让
         # 24/25/50/60 fps 的片子帧数、磁盘、分块全部按 30 fps 算（24 fps 高估 25%，
         # 60 fps 低估一半），而 render.py 的 build_timeline(fps=vp["fps"]) 用的是真实值。
         fps = int(_vp["fps"])
@@ -516,8 +515,8 @@ def build_report(script_path, script, args):
     mux_lo, mux_hi = mux_seconds_pair(frames, jobs_eff, total, script)
     qa_lo = max(0.5, QA_BASE_SEC[0] + total * QA_SEC_PER_SEC[0])
     qa_hi = max(qa_lo, QA_BASE_SEC[1] + total * QA_SEC_PER_SEC[1])
-    # v0.8 的三个新门禁：预检（固定小开销）、全片 VMAF/SSIM、ASR 回读。
-    # 实测口径（29.0 s 模板片）：preflight 0.4 s；VMAF full 12–29 s（0.40–1.00× 片长，
+    # 三个可选门禁：预检（固定小开销）、全片 VMAF/SSIM、ASR 回读。
+    # 实测口径（29.0 s 夹具片）：preflight 0.4 s；VMAF full 12–29 s（0.40–1.00× 片长，
     # 参考帧重渲与 libvmaf 都在里面，见 VMAF_* 常量注释）；ASR small ≈ 6–10 s。
     # 这三项全在**交付前**跑，不写进预演就等于"预演说 40 s、实际 90 s"——所以单独列 stage。
     qcfg = script.get("qa") or {}
@@ -630,7 +629,7 @@ def build_report(script_path, script, args):
         "source": source,
         "source_note": source_note,
         "video": {"title": script.get("title"),
-                  # v0.8：内部构图恒为 1080p，交付尺寸可以更小（_vp 从 film.json 的 video 块来）
+                  # 内部构图恒为 1080p，交付尺寸可以更小（_vp 从 film.json 的 video 块来）
                   "width": _vp["w"], "height": _vp["h"],
                   "out_width": _vp["out_w"], "out_height": _vp["out_h"],
                   "fps": fps, "frames": frames,
@@ -660,8 +659,8 @@ def build_report(script_path, script, args):
                        "advice": bottleneck_advice(worst["stage"], engine, jobs_eff)},
         "assumptions": [
             "内部构图恒为 1920x1080；交付尺寸/帧率可写 film.json 的 video 块"
-            "（v0.8，只允许 16:9 横屏且只能下采样；本次按 %d fps 估）" % fps,
-            "lead=%.2f / tail=%.2f / min_dur=%.1f（v0.5 body 基准；剧本写了就以剧本为准）"
+            "（只允许 16:9 横屏且只能下采样；本次按 %d fps 估）" % fps,
+            "lead=%.2f / tail=%.2f / min_dur=%.1f（body 基准；剧本写了就以剧本为准）"
             % (DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR),
             "tts 耗时按 %d 句 ÷ workers × %.1f–%.1f s（每句每 worker）；实际受网络波动影响"
             % (n, TTS_SEC_PER_LINE[0], TTS_SEC_PER_LINE[1]),
@@ -669,7 +668,7 @@ def build_report(script_path, script, args):
             % (PARALLEL_EFF, CORES),
             "mux 默认 -c:v copy，只跟片长有关；reencode_video=true 才按帧数重编",
             "layout/cues/audio/sfx 给 ±%d%% 经验区间（无单阶段实测）" % int(UNMEASURED_BAND * 100),
-            "v0.8 新增门禁口径：preflight 0.4 s 固定；vmaf ≈ %.2f–%.2f× 片长 + %.1f–%.1f s"
+            "可选门禁口径：preflight 0.4 s 固定；vmaf ≈ %.2f–%.2f× 片长 + %.1f–%.1f s"
             "（参考帧重渲染 + libvmaf；同机负载不同实测差近 2×）；asr ≈ 0.18–0.35× 片长 + "
             "3.5–6.5 s（faster-whisper small / CPU int8）"
             % (VMAF_SEC_PER_SEC[0], VMAF_SEC_PER_SEC[1], VMAF_BASE_SEC[0], VMAF_BASE_SEC[1]),
@@ -695,7 +694,7 @@ def print_report(rep):
               "会自动改用真实帧数。")
     style = v.get("style")
     if style is None:
-        style = "(没写 style 字段 = v0.4 legacy 行为)"
+        style = "(没写 style 字段 = legacy 行为)"
     print("  《%s》  片长 %.1f s / %d 帧 / %dx%d@%d / engine=%s / crf=%s preset=%s / style=%s"
           % (v.get("title") or "(未写 title)", v["duration_s"], v["frames"], v["width"], v["height"],
              v["fps"], v["engine"], v["crf"], v["preset"], style))

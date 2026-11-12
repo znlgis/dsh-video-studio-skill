@@ -1,4 +1,4 @@
-# 词级时间轴与词锚点（v0.8.0）
+# 词级时间轴与词锚点
 
 > 本页是 `work/words.json` 的**契约**、`cue at` 词锚点的**语义**，以及四个在真实跑里踩过的坑。
 > 设计前提一句话：**句子时长仍以 TTS 实测时长为权威**；词级时间戳只是附加值，
@@ -28,8 +28,8 @@ timeline.json 的 scenes[].words_abs  （句内词表平移到绝对时间）
 | 防呆 | 为什么 |
 |---|---|
 | 显式 `boundary="WordBoundary"` + `stream()` | 用 `save()` 会把词事件丢掉；不传 `boundary` 时默认 `SentenceBoundary`，**一条词事件都收不到**（实测 edge-tts 7.3.1 / zh-CN：词事件数 = 0） |
-| 音频先写 `.part` 再 `os.replace` | 旧写法直接 `open(目标, "wb")`，一次断网/超时就把**已缓存的好音频截成 0 字节**。现在失败只丢本次新音频，旧缓存还在 |
-| 词表独立缓存键 `tts_words_key` | 并进 `tts_key_v2` 会让**所有老项目的音频缓存一次性失效**（必须整片重新联网合成）。分开记 -> 老音频照旧复用，只在"这次显式要词级"时补采一次 |
+| 音频先写 `.part` 再 `os.replace` | 直接 `open(目标, "wb")` 时，一次断网/超时就把**已缓存的好音频截成 0 字节**；先写 `.part` 再替换，失败只丢本次新音频，旧缓存还在 |
+| 词表独立缓存键 `tts_words_key` | 并进 `tts_key_v2` 会让**全部已有音频缓存一次性失效**（必须整片重新联网合成）。分开记 -> 已有音频照旧复用，只在"这次显式要词级"时补采一次 |
 
 ### 1.1 `work/words.json` 契约
 
@@ -68,9 +68,9 @@ G10 会因此记 `skipped` 或 `fail`（看是全部为空还是个别句为空�
 | `words_summary(words, dur=None)` | 出 `n / covered / gaps / tail / mono / start`（G10 判据全在这里算） | — |
 | `sub_words_at(scenes, t)` | 当前上屏字幕对应的 `words_abs`，没有就 `None` | 无词级 -> `None`（调用方回退整句） |
 | `wrap_by_words(text, f, max_w, words)` | 按真实词边界折行；词表与原文对不上（有尾差/切不开）就返回 `None` | `None` -> `fit_sub_lines` 回退字符折行 |
-| `fit_sub_lines(..., words=)` / `draw_subtitle(..., words=)` | 排版入口，多一个可选参数 | `words=None` 时与 v0.7 逐像素一致 |
+| `fit_sub_lines(..., words=)` / `draw_subtitle(..., words=)` | 排版入口，多一个可选参数 | `words=None` 时排版与不带词级时逐像素一致 |
 | `build_timeline(..., fps=)` | 给每段补 `words_abs`（句内词表平移到绝对时间） | 该句没有 `words` 就没有 `words_abs` |
-| `cue_time(at, scenes=, total=)` | 解析 `at`；v0.8 增词锚点 | 见 §3 |
+| `cue_time(at, scenes=, total=)` | 解析 `at`（含 `l03:w2` 词锚点） | 见 §3 |
 
 ---
 
@@ -88,7 +88,7 @@ G10 会因此记 `skipped` 或 `fail`（看是全部为空还是个别句为空�
   `[WARN] cue at='l03:w99'：l03 只有 13 个词，w99 不存在，退化为句偏移`，然后按 `l03+偏移` 处理。
   —— 所以**改完台词一定要看 stdout 有没有这条 WARN**，否则你会以为自己精确打到了某个词。
 - 场景 id 本身不存在时才 `raise ValueError`（先跑 layout，或者改用 `abs:秒`）。
-- 只有 `abs:12.5` / `12.5` / `l03` / `l03+0.35` 这几种老写法时行为与 v0.7 **完全一致**。
+- `abs:12.5` / `12.5` / `l03` / `l03+0.35` 这几种写法不含词锚点，行为与不带词级时**完全一致**。
 
 ---
 
@@ -141,7 +141,7 @@ python render.py ... --stage qa      # 看 QC-REPORT.md 的 G10 行
 ## 6. 关掉它
 
 - 单片：`film.json` 写 `"words": false` -> `--stage tts` 不再收词事件，G10 `skipped`（写明"本片未启用"），
-  字幕退回整句折行。**老项目想完全保持 v0.7 行为就写这一行。**
+  字幕退回整句折行。**不要词级能力就写这一行。**
 - 只跳过门禁不跳过能力：没有开关——G10 就是词级数据的体检，没数据就 skipped，不会 fail。
 - 词事件拿不到（服务端变了）：不阻断出片，G10 `skipped` / `fail` 二选一看覆盖面，
   meta 里 `words_ok=false`、`words_events=0` 是排查入口。

@@ -1,8 +1,8 @@
-# 外观定制：设计 DSL 实操手册（v1.0.2）
+# 外观定制：设计 DSL 实操手册
 
-> **这篇不是「8 套风格选一套」。** v1.0.1 起仓库里没有任何内置风格表——
-> 没有 `STYLES` / `THEMES` / `VISUAL_LANGUAGES` / `presets/`，也没有 `style` 字段。
-> 外观由 `work/design.json` 决定，而它是 `propose.py` 现场采样 + 你确认之后冻结的。
+> **外观由 `work/design.json` 决定：`propose.py` 现场采样，你确认之后冻结。**
+> 没有现成外观目录可挑，也没有 `style` 字段——剧本不决定长相。
+> 同一份稿子换一份 design.json 就是另一种画面，反之亦然。
 > 这篇讲的是：**想控制画面的哪一块，就改 design.json 的哪个字段，怎么验证它真的生效。**
 
 ## 0. 三条正确姿势
@@ -26,7 +26,9 @@
 
 校验：`python <SKILL_DIR>/scripts/designkit.py --lint work/design.json`；
 契约：`<REPO>/schemas/design.schema.json`。**fail-closed**：缺字段/越界/对比度不达标一律报错，
-不会静默回落（这是对 v0.5–v0.9「改了不生效」的直接反思）。
+不会静默回落——设计层不允许「改了不生效也不报错」这种状态存在。
+（实测过 11 个静默失效的旋钮：`voice` 写字符串时 map/jitter 全失效、`pan` 对立体声配方无效……
+每个都"配置生效、画面不动"，且不报错。设计层改成一律报错，这类问题在 `--lint` 就暴露。）
 
 ## 2. visual 字段表（能控制什么）
 
@@ -40,20 +42,20 @@
 | `motion` | `ease`（out3/out5/inOut3/outBack）/ `enter`(dx,dy) / `push`（镜头缓推）/ `breathe_hz` | 入场与镜头运动 |
 | `bias` | `x` / `y` / `inset` | 整屏重心偏移与安全区收缩 |
 | `layout` | `left-stack` / `center-stack` / `split-right` | 默认版式 |
-| `layout_cycle` | 版式数组（≥2 种不同） | **v1.0.2**：按章节轮换版式；不写则自动派生 2–3 种 |
+| `layout_cycle` | 版式数组（≥2 种不同） | 按章节轮换版式；不写则自动派生 2–3 种 |
 | `hud` | `chip-left` / `corner-line` / `none` | 页眉/角落装饰 |
 | `size` / `fps` | `1920x1080` / `30` | 只支持 16:9 横屏（编码时可下采样到 720p） |
-| `subtitle` | 见 §3 | **v1.0.2**：字幕字号/位置/对齐/背板/圆角/字族/颜色/行数 |
+| `subtitle` | 见 §3 | 字幕字号/位置/对齐/背板/圆角/字族/颜色/行数 |
 
 > **能组合出多少种画面？** 离散维度是 8 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族
 > × 7 情绪 × 2 调式（= 774,144 种），再乘配色这个连续量（色相 0–360° 任意取值）。
 > 这个数字只说明"字段可组合空间足够大"，**不是推荐你从中挑**——好看与否仍由对比度体检、
 > 分镜语法和你的目检决定。
 
-## 3. 字幕样式（visual.subtitle，v1.0.2）
+## 3. 字幕样式（visual.subtitle）
 
-以前字幕的字号 / 位置 / 背板 / 圆角是 `filmkit` 的写死常量，所以**任何两条片子**的字幕带一模一样。
-现在进设计 DSL；**不写 = 默认值，与过去逐像素一致**（老 `design.json` 不受影响）。
+字幕的字号 / 位置 / 背板 / 圆角由设计 DSL 决定；写死的常量会让**任何两条片子**的字幕带一模一样。
+**不写 = 用默认值**，老 `design.json` 不受影响、字幕与默认常量逐像素一致。
 
 ```json
 "subtitle": {"size": 46, "y": 560, "align": "left", "plate_alpha": 170,
@@ -74,7 +76,7 @@
 验证：`render.py --stage style` 会打印一行「字幕: ... 对齐=... 背板α=... 圆角=... 最多N行」，
 改 design 后重跑这一行就能看重算结果，不用等渲完。
 
-## 4. 版式轮换（visual.layout_cycle，v1.0.2）
+## 4. 版式轮换（visual.layout_cycle）
 
 ```json
 "layout_cycle": ["split-right", "left-stack", "center-stack"]
@@ -106,7 +108,7 @@
 | 层 | 机制 | 防的是什么 |
 |---|---|---|
 | 段内 | `lines[].type`（10 类构图，grammar 自动选） | 每段都长一个样 |
-| 章内 | `layout_cycle`（v1.0.2，按章节轮换） | 全片一张版式 |
+| 章内 | `layout_cycle`（按章节轮换） | 全片一张版式 |
 | 片间 | 采样 nonce + 候选 ≥2 维 + 底色色相分叉 + **片间去重台账** | 不同片撞衫 |
 
 ## 7. 常见误用
@@ -116,6 +118,6 @@
 | 改了 `design.json` 画面没变 | 没重跑阶段 / 没重签核 | `render.py --stage explain` 看哪些阶段过时 |
 | `--stage style` 报「找不到设计」 | 工程里没有 `work/design.json` | 先 `propose.py --brief ... --script film.json --work work` 再 `--confirm` |
 | 手改 design 后 `--confirm` 报校验失败 | 字段越界/对比度不达标 | 按报错逐条修；或干脆 `--revise` 重出 |
-| 想"用某套预设当起点" | v1.0.1 已删除全部预设 | 没有这条路：现场采样 + `--revise` 表达要求，要复现用 `--seed` |
-| `render.py --preset x` 报错 | `--preset` 已删除 | 用 `--brief` 或直接写 design.json |
-| `stylekit.py --list` 只有一段说明、exit 2 | 内置风格表已删除（预期行为） | 看 `designkit.py --list-palettes` 的配色采样示例（那不是可选清单） |
+| 想"用某套预设当起点" | 没有预设目录，外观只由 design.json 决定 | 现场采样 + `--revise` 表达要求，要复现用 `--seed` |
+| `render.py --preset x` 报错 | render.py 没有 `--preset` 这个参数 | 用 `--brief` 或直接写 design.json |
+| `stylekit.py --list` 只有一段说明、exit 2 | 没有可选外观清单（预期行为） | 看 `designkit.py --list-palettes` 的配色采样示例（那不是可选清单） |

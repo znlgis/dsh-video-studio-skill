@@ -3,12 +3,12 @@
 
 跑法：python selfcheck.py [-v]
 
-检查的全是"曾经真的坏过"的点，不是泛泛的健康检查：
-  1  TTS 缓存必须校验文本（v0.1 只判文件存在 -> 改台词不生效）
-  2  sub_window 不能把长句字幕截断在 5.2s（v0.1 的硬钳）
-  3  loudness 必须能测到真峰（v0.1 的 ebur128 没开 peak -> 真峰门禁永不触发）
-  4  mux 默认不重编视频流（v0.1 二次编码）
-  5  FrameSink 尺寸不符必须报错（v0.1 静默 resize）
+检查的全是真实缺陷的回归点，不是泛泛的健康检查：
+  1  TTS 缓存必须校验文本（只判文件存在 -> 改台词不生效）
+  2  sub_window 不能把长句字幕截断在 5.2s（硬钳会让长句丢字）
+  3  loudness 必须能测到真峰（ebur128 没开 peak -> 真峰门禁永不触发）
+  4  mux 默认不重编视频流（二次编码会再压一遍画面）
+  5  FrameSink 尺寸不符必须报错（静默 resize 会让成片与构图不符）
   6  字形自查能识别缺字（msyhbd 缺 ✓ 等）
   7  ASS 头必须声明 PlayRes，且 Format/Dialogue 字段数一致
   8  时间轴第一段 start 严格为 0
@@ -16,63 +16,62 @@
  10  qa_report 能查出字幕条数不匹配
  11  尾静音裁剪
  12  mux 音轨 48kHz
- 13  v0.1 调用签名兼容
+ 13  旧调用签名兼容
  14  qa 帧率校验
- 15  （v0.3）立体声总线：channels=2 形状正确、声像能量守恒
- 16  （v0.3）cue_time 三种写法都解析成绝对秒
- 17  （v0.3）CueBus 落盘 -> 读回 -> schema 正确（含未知类型不崩）
- 18  （v0.3）duck 真的压低了配乐（且不改变无音效处的电平）
- 19  （v0.3）mix_film 峰值不越界、时长精确、旁白优先
- 20  （v0.3）sfxkit 可用时：配方确定性 + 别名表能从 sfxkit 反查
- 21  （v0.3）scorekit 可用时：同 seed bit-identical + 时长精确
- 22  （v0.3）webengine 可用时：页面契约齐全（window.renderFrame/getCues/ready）
- 23  （v0.3）qa_frames 可用时：能检出注入的单帧闪烁
- 24  （v0.4.0）配乐来源：music.mode=off 不读上一轮 work/music.wav（模式判定回归）
-  25  （v0.5.0）风格层：8 套主题全部过对比度门禁，8 类题材能分出 >=6 种风格
-  26  （v1.0.0）legacy 已移除：不写 style 必须**报错并给迁移指引**（v0.5 时代这条断言
-      的是"精确落回 Dm/120/seed7/单声线"，D3 把那条路径删了，断言随之反转）
-  27  （v0.5.0）内容指纹：同剧本稳定、改标点不换风格、换题材才换
-  28  （v0.5.0）声线计划：4 句样片 >=2 把声音，legacy 仍是单声线
-  29  （v0.5.0）字体族与主题字幕：换族换缓存键，浅色主题不画黑背板
-  30  （v0.6.0）门禁账本与签核：pass/fail/skipped 三档不许混，签核必须绑内容指纹
-  31  （v0.6.0）阶段新鲜度：改了输入必须报"过时"，不许用旧产物静默出片
-  32  （v0.6.0）并行渲染主题序列化：JSON 往返后重解风格必须回到 tuple
-  33  （v0.7.0）音效跨片可区分：内容派生 seed 让跨片不同、legacy 逐样本不变
-  34  （v0.7.0）配乐/音效片内分离：duck 默认加深，配乐给音效让位
-  35  （v0.7.1）旁白优先：人声出现时背景必须再压、间隙恢复、人声电平不动
-  36  （v0.7.1）旁白优先默认值：配乐 -12 dB 基线 + 旁白侧链 6 dB（读 st_audio 源码）
-  37  （v0.7.1）旁白清晰度 SNR 兜底：背景天然太响时自动补压到 >=12 dB
-  38  （v0.7.1）无旁白时混音不受影响（voice_env/guard 不得空转改电平）
-  39  （v0.7.2）音频边界：极短旁白不崩、NaN/Inf 拒绝写盘、负起点与 seg=0 有守卫
-  40  （v0.7.2）QC 报告落点只有一个来源（--out 的目录，不许 accept 另算一套）
-  41  （v0.7.2）空门禁账本不许写成"通过"（没记录 != 通过）
-  42  （v0.7.2）单阶段产物归属：不许把别的 stage 写的文件算成自己的（假 stale）
-  43  （v0.7.2）theme_overrides 必须参与主题体检（否则能造出"看不清"的成片）
-  44  （v0.8.0）词级时间戳：规整（单调/裁剪/偏移）与 cue 词锚点解析
-  45  （v0.8.0）画幅规划：只允许 16:9 横屏下采样，竖屏/上采样/非法 fps 必须拒绝
-  46  （v0.8.0）金帧确定性：同一帧号两次渲染必须逐像素一致
-  47  （v0.8.0）依赖漂移体检：numpy/Pillow 主版本 + edge-tts 仍暴露 boundary 参数
-  48  （v0.8.0）批量清单解析：两种写法都认、上限卡死、坏条目在开跑前报错
-  49  （v0.8.0）TTS 后端可替换：注册/注销/未知后端的接口契约
-  50  （v0.8.0）web 风格载荷：style=None 时不得注入 __STYLE__（legacy 必须回落）
-  51  （v0.8.0）金帧回归：与 assets/golden_frames.json 的像素基线比对
-  52  （v0.9.0）场景语法：10 类构图分流、选型确定性、段长降级门
-  53  （v0.9.0）视觉语言包：8 套结构签名齐全、过体检、彼此不是同一套
-  54  （v0.9.0）场景类型单真值：grammar / filmcheck / scenes / schema 四处集合相等
-  55  （v0.9.0）剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分
-  56  （v1.0.0）设计 DSL：采样->校验->转计划全通；缺必填块必须报错（fail-closed）；
+ 15  立体声总线：channels=2 形状正确、声像能量守恒
+ 16  cue_time 三种写法都解析成绝对秒
+ 17  CueBus 落盘 -> 读回 -> schema 正确（含未知类型不崩）
+ 18  duck 真的压低了配乐（且不改变无音效处的电平）
+ 19  mix_film 峰值不越界、时长精确、旁白优先
+ 20  sfxkit 可用时：配方确定性 + 别名表能从 sfxkit 反查
+ 21  scorekit 可用时：同 seed bit-identical + 时长精确
+ 22  webengine 可用时：页面契约齐全（window.renderFrame/getCues/ready）
+ 23  qa_frames 可用时：能检出注入的单帧闪烁
+ 24  配乐来源：music.mode=off 不读上一轮 work/music.wav（模式判定回归）
+  25  风格层：每套采样主题全部过对比度门禁，8 类题材能分出 >=6 种风格
+  26  legacy 已移除：不写 style 必须**报错并给迁移指引**（守的是"旧外观路径真的
+      没了"，而不是"精确落回某套老默认值"）
+  27  内容指纹：同剧本稳定、改标点不换风格、换题材才换
+  28  声线计划：4 句样片 >=2 把声音，legacy 仍是单声线
+  29  字体族与主题字幕：换族换缓存键，浅色主题不画黑背板
+  30  门禁账本与签核：pass/fail/skipped 三档不许混，签核必须绑内容指纹
+  31  阶段新鲜度：改了输入必须报"过时"，不许用旧产物静默出片
+  32  并行渲染主题序列化：JSON 往返后重解风格必须回到 tuple
+  33  音效跨片可区分：内容派生 seed 让跨片不同、legacy 逐样本不变
+  34  配乐/音效片内分离：duck 默认加深，配乐给音效让位
+  35  旁白优先：人声出现时背景必须再压、间隙恢复、人声电平不动
+  36  旁白优先默认值：配乐 -12 dB 基线 + 旁白侧链 6 dB（读 st_audio 源码）
+  37  旁白清晰度 SNR 兜底：背景天然太响时自动补压到 >=12 dB
+  38  无旁白时混音不受影响（voice_env/guard 不得空转改电平）
+  39  音频边界：极短旁白不崩、NaN/Inf 拒绝写盘、负起点与 seg=0 有守卫
+  40  QC 报告落点只有一个来源（--out 的目录，不许 accept 另算一套）
+  41  空门禁账本不许写成"通过"（没记录 != 通过）
+  42  单阶段产物归属：不许把别的 stage 写的文件算成自己的（假 stale）
+  43  theme_overrides 必须参与主题体检（否则能造出"看不清"的成片）
+  44  词级时间戳：规整（单调/裁剪/偏移）与 cue 词锚点解析
+  45  画幅规划：只允许 16:9 横屏下采样，竖屏/上采样/非法 fps 必须拒绝
+  46  金帧确定性：同一帧号两次渲染必须逐像素一致
+  47  依赖漂移体检：numpy/Pillow 主版本 + edge-tts 仍暴露 boundary 参数
+  48  批量清单解析：两种写法都认、上限卡死、坏条目在开跑前报错
+  49  TTS 后端可替换：注册/注销/未知后端的接口契约
+  50  web 风格载荷：style=None 时不得注入 __STYLE__（legacy 必须回落）
+  51  金帧回归：与 assets/golden_frames.json 的像素基线比对
+  52  场景语法：10 类构图分流、选型确定性、段长降级门
+  53  视觉语言包：8 套结构签名齐全、过体检、彼此不是同一套
+  54  场景类型单真值：grammar / filmcheck / scenes / schema 四处集合相等
+  55  剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分
+  56  设计 DSL：采样->校验->转计划全通；缺必填块必须报错（fail-closed）；
       同 brief 两次采样一致；两两至少 2 维不同（"伪多方案"门禁）
-  57  （v1.0.1）零模板：仓库里不许存在 presets/ 与 presetkit.py；现场采样必须确定性、
+  57  零模板：仓库里不许存在 presets/ 与 presetkit.py；现场采样必须确定性、
       且换 brief 必须换结果（否则就是还在套模板）
-  58  （v1.0.0）提案闸：absent / draft / broken 三档判定正确（confirmed 才放行出片）
-  59  （v1.0.1）逐 stage 可单独跑：render 里每处 resolve_style 都必须拿得到 work
+  58  提案闸：absent / draft / broken 三档判定正确（confirmed 才放行出片）
+  59  逐 stage 可单独跑：render 里每处 resolve_style 都必须拿得到 work
       （只跑 --stage frames / --stage sfx 时缺参数会报"找不到设计"，all 被缓存掩盖）
-  60  （v1.0.1）brief 里的要求真的生效：自然语言要解析成 must_have/avoid，
+  60  brief 里的要求真的生效：自然语言要解析成 must_have/avoid，
       配色约束按色相窗口生效（早先整句被塞进 topic，"深蓝"采出来是橙色）
 
 说明：本文件里 CASES 的**实际条数**是唯一真理，上面的编号表要与它同步。
-这张表已经被"自己没被自检"坑过两次：v0.8.0 之前停在 43 条而 CASES 已有 51 条；
-v1.0.0 之前停在 51 条而 CASES 已有 58 条（52–58 一条都没列）。
+这张表落后过两次：停在 43 条而 CASES 已有 51 条、停在 51 条而 CASES 已有 58 条。
 改 CASES 时请同批改这张表，别让它再次落后。
 """
 import argparse
@@ -132,7 +131,7 @@ def run(name, fn):
 
 
 # 自检专用：造一份 design 计划。
-# v1.0.1 删掉内置风格表后，"要一份 plan"这件事只能靠现场采样 + 转计划；
+# 删掉内置风格表后，"要一份 plan"这件事只能靠现场采样 + 转计划；
 # 每个用例各写一遍既啰嗦又容易漂移，于是收到这里。
 # 固定 seed 保证自检自身可复现（自检必须可复现，否则 CI 抖起来没法查）。
 _PLAN_CACHE = {}
@@ -339,7 +338,7 @@ def t_mux_48k():
 
 
 def t_compat():
-    """v0.1 的调用签名必须还能用（升级不能把老项目直接炸掉）。"""
+    """旧调用签名必须还能用（升级不能把老项目直接炸掉）。"""
     a = K.tone(440, 0.2, kind="sine", harmonics=(1.0, 0.5))
     b = K.noise_burst(0.2, amp=0.1, lo=0.02, hi=0.35, decay=6.0, seed=7)
     assert len(a) > 0 and len(b) > 0, "兼容签名返回空"
@@ -351,7 +350,7 @@ def t_compat():
 
 
 def t_fps_check():
-    """qa_report 必须能查出帧率不符（v0.2 之前只查宽高）。"""
+    """qa_report 必须能查出帧率不符（只查宽高会漏掉帧率写错）。"""
     with tempfile.TemporaryDirectory() as d:
         v = os.path.join(d, "v25.mp4")
         r = subprocess.run([K.FFMPEG, "-y", "-v", "error", "-f", "lavfi",
@@ -364,7 +363,7 @@ def t_fps_check():
     return "25fps 被检出"
 
 
-# ---------------------------------------------------------------- v0.3.0 新增
+# ---------------------------------------------------------------- 立体声 / 配乐 / 音效
 def t_stereo_bus():
     """立体声总线：形状、声像、单声道来源自动展开。"""
     import numpy as np
@@ -453,9 +452,9 @@ def t_mix_film():
 
 
 def t_music_plan():
-    """配乐来源判定：music.mode=off 不得读上一轮的 work/music.wav（v0.3.0 的回归）。
+    """配乐来源判定：music.mode=off 不得读上一轮的 work/music.wav。
 
-    背景：v0.3.0 的 st_audio 无条件读 work/music.wav，于是用户把 music.mode 改成 off
+    背景：st_audio 若无条件读 work/music.wav，用户把 music.mode 改成 off
     之后，上一轮跑出来的旧配乐仍被混进成片（文档写的是 off = 不要配乐）。
     这里既测判定函数，也真的跑一次 st_audio 看输出电平。
     """
@@ -470,7 +469,7 @@ def t_music_plan():
     assert K.music_plan({"music": {"mode": "weird"}})[0] == "unknown-mode", "未知 mode 没报错（会静默当 auto）"
     assert K.music_plan({}, True)[0] == "file", "缺省时外部 music.wav 兼容链断了"
     assert K.music_plan({}, False)[0] == "none", "缺省且什么都没有时应判 none"
-    assert K.music_plan({"music": {"chords": [[220.0, 261.6]]}}, False)[0] == "bed", "v0.2 和弦床兼容链断了"
+    assert K.music_plan({"music": {"chords": [[220.0, 261.6]]}}, False)[0] == "bed", "和弦床兼容链断了"
 
     # 2) 端到端：st_audio 在 mode=off 下不得混入 work/music.wav
     try:
@@ -505,7 +504,7 @@ def t_music_plan():
             file_peak = float(np.max(np.abs(K.wav_read(file_out)[0])))
         assert "music.mode=off" in buf.getvalue(), "off 没有打印说明（静默跳过也不行）"
         assert off_peak < 0.01, "music.mode=off 仍把旧 music.wav 混进来了（峰值 %.3f）" % off_peak
-        # v0.7.1：断言改成"相对 off 明显变大"而不是绝对 0.3——
+        # 断言用"相对 off 明显变大"而不是绝对 0.3——
         # 配乐基线降到 -12 dB（旁白优先）后，0.8 幅度的外部配乐混出来约 0.2；
         # 绝对阈值会把"旁白优先调好了"判成"没读到外部配乐"，这类断言会被调参牵着走。
         assert file_peak > 0.1 and file_peak > off_peak * 3.0, (
@@ -600,7 +599,7 @@ def t_qa_frames():
 
 
 def t_style_kits():
-    """25 连续配色空间（v1.0.1 替代"8 套主题"）：现场采样的每一套都必须过对比度门禁，
+    """25 连续配色空间：现场采样的每一套都必须过对比度门禁，
     且色相真的分散——这条是"没有模板"的硬证据。
 
     旧断言是"8 套内置主题全部过 lint + 自动选风格能分出 >=6 种"。模板删掉后那个断言
@@ -639,12 +638,12 @@ def t_style_kits():
 
 
 def t_style_legacy():
-    """26 legacy 已移除（v1.0 / D3）：不写 style 必须报错并给出迁移指引，而不是静默落老外观。
+    """26 legacy 已移除：不写 style 必须报错并给出迁移指引，而不是静默落老外观。
 
-    这条以前盯的是"老项目无痛升级"；D3 之后那句话不再成立——legacy 路径整个删掉了，
+    这条盯的是"不写外观配置照样能出片"这条老思路真的没了：legacy 路径整个删掉，
     因为它是同质化的另一半根因（不写 style = 全片一套固定外观 + 120BPM/Dm）。
-    新断言分成两半：① 不给设计时必须**报错**且错误文本指得出下一步；
-    ② 显式给 style 时旧路径仍可用（P3 只停了 auto 与 legacy，没删显式选风格）。
+    断言分成两半：① 不给设计时必须**报错**且错误文本指得出下一步；
+    ② 显式给 style 也不可用（内置风格表已删，任何 style id 都必须落空报错）。
     """
     import stylekit as ST
     s = {"title": "旧项目", "lines": [{"id": "a", "kind": "body", "text": "x"}]}
@@ -657,8 +656,7 @@ def t_style_legacy():
         assert "design" in msg.lower(), "报错要说清主路径是 design.json，实际：%r" % msg[:120]
     else:
         raise AssertionError("没有 style/design 却没报错：legacy 路径没有真的移除")
-    # ② 显式 style 也不再可用 —— v1.0.1 把内置风格表整个删了。
-    #    和 v1.0 不同：那时"显式选风格"是兼容面；现在连 STYLES 都没了，
+    # ② 显式 style 也不可用——内置风格表整个删了，连带 STYLES 一起没了，
     #    任何 style id 都必须落空并报错（否则就是"模板还在"）。
     s3 = dict(s, style="cinema")
     try:
@@ -676,7 +674,7 @@ def t_style_legacy():
 def t_style_determinism():
     """27 指纹确定性：同剧本同结果；改错别字不换风格；改题材才换。"""
     import designkit as DK
-    # v1.0.1：没有"剧本 -> 自动选风格"了，改为验证"设计采样"的确定性与区分度。
+    # 没有"剧本 -> 自动选风格"了，这里验证"设计采样"的确定性与区分度。
     # 固定 seed 才谈确定性：默认不给 seed 时每次都要不同（那是 56/57 条在守的事）。
     a = DK.sample_designs({"topic": "AI 大模型的三年"}, n=1, seed=11)[0]
     b = DK.sample_designs({"topic": "AI 大模型的三年"}, n=1, seed=11)[0]
@@ -698,14 +696,14 @@ def t_voice_plan():
                    {"id": "l02", "kind": "body", "text": "算法和数据的规模一起上去了"},
                    {"id": "l03", "kind": "quote", "text": "他说：这不可能"},
                    {"id": "l04", "kind": "outro", "text": "它已经在我们身边了"}]}
-    # v1.0.1：声线计划同样只能从设计来（模板表已删）
+    # 声线计划同样只能从设计来（模板表已删）
     plan = DK.design_to_plan(DK.sample_designs({"topic": "AI 大模型"}, n=1, seed=7)[0])
     vp = VK.voice_plan(s, plan)
     assert len(vp) == 4, "计划行数应为 4，收到 %d" % len(vp)
     assert json.dumps(vp, sort_keys=True, default=str) == json.dumps(
         VK.voice_plan(s, plan), sort_keys=True, default=str), "voice_plan 不确定"
-    # v1.0 / D3：persona 身份表已删，声音身份的唯一表示是 edge voice id。
-    # 断言从"至少 2 个 persona"改成"至少 2 个不同的 voice id"——语义不变，字段换了。
+    # persona 身份表已删，声音身份的唯一表示是 edge voice id。
+    # 这里断言"至少 2 个不同的 voice id"——语义与旧 persona 表一致，字段换了。
     voices = {r["voice"] for r in vp}
     assert len(voices) >= 2, "4 句样片只用了一个声线: %s" % voices
     tones = {r["tone"] for r in vp}
@@ -727,13 +725,13 @@ def t_font_family():
     """29 字体族 + 字幕主题：换族必须换缓存键，主题字幕不能是黑底白字。
 
     **别把"系统装了几族字体"当成产品缺陷**：CI 的 ubuntu 只装 fonts-noto-cjk，
-    四个族全回退到同一个 NotoSansCJK，宽度必然一样。v0.5.0 的第一版就在这里误报——
-    断言写成"宽度必须不同"，于是 Linux CI 红、Windows 绿。
+    四个族全回退到同一个 NotoSansCJK，宽度必然一样。断言若写成"宽度必须不同"就会误报——
+    Linux CI 红、Windows 绿。
     真正要保证的是**机制**：缓存按 family 分键（换族不会串味）；
     宽度差异只在"系统确实解析出不同字体文件"时才有意义，单族系统跳过并说明。
     """
     fams = list(getattr(K, "FAMILY_IDS", ()))
-    assert fams, "filmkit 没有 FONT_FAMILIES（v0.5 字体族没生效）"
+    assert fams, "filmkit 没有 FONT_FAMILIES（字体族没生效）"
     resolved = {}
     for fam in fams:
         f = K.font(40, "bold", fam)
@@ -767,7 +765,7 @@ def t_font_family():
     assert K.wrap_cn_cached("旧调用", 40, 500) is not None
     # 字幕主题：浅色主题不该画黑背板
     from PIL import Image
-    # v1.0.1：没有内置主题可借（THEMES 已清空），改用手写一份浅色主题。
+    # 没有内置主题可借（THEMES 已清空），手写一份浅色主题。
     # 这条断言测的是 draw_subtitle 的"浅底不画黑背板"逻辑，与主题从哪来无关。
     th = {"bg": (247, 244, 238), "bg2": (233, 228, 218), "surface": (255, 255, 255),
           "ink": (26, 24, 22), "muted": (110, 104, 96), "dim": (150, 146, 140),
@@ -787,7 +785,7 @@ def t_font_family():
 def t_gates():
     """30 门禁账本 / 签核 / QC 报告：三档状态必须能区分"没查"和"通过"。
 
-    这一条防的是 v0.6.0 自己最容易犯的错——把 skipped 混进 pass。
+    这一条防的是最容易犯的错——把 skipped 混进 pass。
     用户看到的"质检通过"必须能区分"我查了 9 项"和"我只查了 3 项"：
     前者是真知情，后者是假安全感。顺带验签核绑内容指纹：改了剧本旧签核必须失效。
     """
@@ -835,7 +833,7 @@ def t_gates():
 def t_stagewatch():
     """31 阶段新鲜度：改上游 -> 下游必须报过时；首跑不刷噪声；产物丢失要报。
 
-    这一条防的是 v0.6.0 前的老问题：frames 有分块指纹，其余 stage 全是裸奔
+    这一条防的是：frames 有分块指纹，其余 stage 全是裸奔
     （改 style 后 audio 仍读旧 music.wav、改 hold 后 frames 仍用旧 cues.json，都不报错）。
     """
     import tempfile
@@ -871,7 +869,7 @@ def t_stagewatch():
     errs_strict, _ = SW.report(w, ["tts"], strict=True, write=lambda lv, m: None)
     assert errs_strict, "--strict-stale 没有让过时变成失败"
     # **源头输入**（剧本 / scenes.py）改了但没重跑 -> 必须报 source-changed。
-    # 这条是 v0.6.0 补的洞：早期只跟踪 stage 之间的产物，"改了台词没重跑 tts" 查不出来，
+    # 这条守的是：只跟踪 stage 之间的产物时，"改了台词没重跑 tts" 查不出来，
     # 而那正是最需要报警的场景（旧 tts 配新剧本 = 配音字幕全错位）。
     w2 = tempfile.mkdtemp(prefix="sc_sw2_")
     film = os.path.join(w2, "film.json")
@@ -887,7 +885,7 @@ def t_stagewatch():
     open(film, "w", encoding="utf-8").write("{\"title\":\"b\"}")   # 改剧本
     issues = [i for r in SW.explain(w2, ["tts"], src) for i in r["issues"]]
     assert any(i["kind"] == "source-changed" for i in issues), (
-        "改了剧本却没报过时（这正是 v0.6.0 要堵的洞）：%s" % issues)
+        "改了剧本却没报过时（这正是阶段新鲜度要堵的洞）：%s" % issues)
     assert any("film.json" in i["reason"] for i in issues), issues
     # 坏 manifest 不许崩（用户手改坏一个 json 不该让整片跑不动）
     open(os.path.join(w, "manifest.json"), "w", encoding="utf-8").write("{broken")
@@ -896,7 +894,7 @@ def t_stagewatch():
 
 
 def t_parallel_frames():
-    """32 --jobs >1 的并行路径能真的跑（v0.6.0 修的 pre-existing bug）。
+    """32 --jobs >1 的并行路径能真的跑（pre-existing bug 的回归）。
 
     bug 形状：worker 从 _script_snapshot.json 读剧本，JSON 把主题色元组变成 list，
     scenes._bg() 拿它当缓存键 -> TypeError: unhashable type: "list"，
@@ -906,7 +904,7 @@ def t_parallel_frames():
     """
     import json as _json
     import tempfile
-    # v1.0.1：不再有内置主题可借，用现场设计的主题（颜色同样是 (r,g,b) 元组）
+    # 没有内置主题可借，用现场设计的主题（颜色同样是 (r,g,b) 元组）
     _d, _plan0 = _design_plan("并行渲染主题序列化")
     th = dict(_plan0["theme"])
     # ① 防御层：scenes._hashable 把 list 冻结成 tuple
@@ -926,7 +924,7 @@ def t_parallel_frames():
         _json.dump(script, fh, ensure_ascii=False)
     back = _json.load(open(snap, encoding="utf-8"))
     assert isinstance(back["_style"]["theme"]["bg"], list), "前提变了"
-    # 子进程路径（v1.0.1 修：worker 必须从 work/design.json 重解设计，而不是回落 stylekit）。
+    # 子进程路径（worker 必须从 work/design.json 重解设计，而不是回落 stylekit）。
     # 现在直接验那条路径：把 design.json 放进 work/，resolve_style 必须解出**同一个**设计，
     # 且颜色回到 tuple（list 会让 _bg() 的缓存键不可哈希）。
     import designkit as DK
@@ -961,9 +959,9 @@ def _load_scenes_mod():
         return None
 
 def t_sfx_content_seed():
-    """v0.7：音效 seed 必须随内容变化，但 legacy 路径必须逐样本不变。
+    """音效 seed 必须随内容变化，但 legacy 路径必须逐样本不变。
 
-    - 不传 style/content_fp -> 两次渲染逐样本相同（v0.4 兼容，不破老片）；
+    - 不传 style/content_fp -> 两次渲染逐样本相同（legacy 兼容，不破老片）；
     - 传了不同 content_fp  -> 必须不同（否则跨片音效还是"都一样"）；
     - 同一 content_fp      -> 逐样本相同（可复现，是程序化视频的底线）。
     """
@@ -981,7 +979,7 @@ def t_sfx_content_seed():
         legacy_a, legacy_b = build(), build()
     except Exception:                                       # noqa: BLE001
         return "skip"                                       # sfxkit 不可用
-    assert np.array_equal(legacy_a, legacy_b), "legacy 两次渲染不一致（v0.4 兼容被破坏）"
+    assert np.array_equal(legacy_a, legacy_b), "legacy 两次渲染不一致（逐样本兼容被破坏）"
     a = build(style="tech-deep", content_fp="aaaa1111", key="Dm")
     b = build(style="tech-deep", content_fp="bbbb2222", key="Dm")
     assert not np.array_equal(a, b), "不同内容指纹得到相同音效轨：跨片音效仍一模一样"
@@ -991,10 +989,10 @@ def t_sfx_content_seed():
 
 
 def t_audio_separation():
-    """v0.7：混音侧 duck 默认必须加深（片内配乐给音效让位）。
+    """混音侧 duck 默认必须加深（片内配乐给音效让位）。
 
     直接读 render.py 的常量文本而不是跑全链：这条断言盯的是"默认值没被改回去"
-    （v0.4 的 3.0 dB 在段落过门时配乐几乎和音效等高，是"听起来像同一套"的成因之一）。
+    （3.0 dB 这类浅值在段落过门时配乐几乎和音效等高，是"听起来像同一套"的成因之一）。
     """
     import re
     path = os.path.join(HERE, "render.py")
@@ -1002,7 +1000,7 @@ def t_audio_separation():
     m = re.search(r"duck_default\s*=\s*([0-9.]+)", src)
     assert m, "render.py 里找不到 duck_default"
     base = float(m.group(1))
-    assert base >= 3.5, "duck_default=%.1f dB 太浅（v0.7 要求 >= 3.5）" % base
+    assert base >= 3.5, "duck_default=%.1f dB 太浅（要求 >= 3.5）" % base
     for sid, want in (("mono", 3.0), ("cinema", 5.5), ("epic", 5.5)):
         mm = re.search(r'"%s"\s*:\s*([0-9.]+)' % sid, src)
         assert mm, "render.py 里找不到风格 %s 的 duck 值" % sid
@@ -1011,7 +1009,7 @@ def t_audio_separation():
 
 
 def t_voice_priority():
-    """v0.7.1 旁白优先：人声出现时背景必须再压，人声间隙背景恢复。
+    """旁白优先：人声出现时背景必须再压，人声间隙背景恢复。
 
     以前配乐基线只比旁白低 1.5 dB，视频以旁白为主时观众要费力分辨字。
     修法：`mix_film` 用旁白包络做侧链——人声处配乐 -6 dB、音效 -3 dB，间隙回原电平。
@@ -1049,7 +1047,7 @@ def t_voice_priority():
 
 
 def t_music_gain_default():
-    """v0.7.1：配乐默认增益必须是 -12 dB（beside 人声），不是旧版的 -1.5。
+    """配乐默认增益必须是 -12 dB（beside 人声），不是 -1.5。
 
     这条盯的是 `render.st_audio` 的默认值：`mus.get("gain_db", -12.0)`。
     直接读源码文本，避免"跑全链才知道默认值"。
@@ -1061,7 +1059,7 @@ def t_music_gain_default():
 
 
 def t_snr_guard():
-    """v0.7.1 SNR 兜底：背景天然太响时，混音后必须自己把它压到"人声听得清"。
+    """SNR 兜底：背景天然太响时，混音后必须自己把它压到"人声听得清"。
 
     构造一段人声 + 一段刻意很响的配乐（比人声高 10 dB），不设侧链、只靠 guard：
     `mix_film(guard_snr_db=12)` 后实测人声活跃区的 人声/背景 必须 >= 12 dB，
@@ -1098,11 +1096,11 @@ def t_mix_no_voice():
     assert abs(float(np.max(np.abs(out))) - 0.2) < 1e-5, "无旁白时配乐被改动了（峰值 %.3f）" % float(np.max(np.abs(out)))
     return "无旁白时背景不被压"
 
-# ------------------------------------------------------------------ v0.7.2 新增（全项目深审）
+# ------------------------------------------------------------------ 音频入口边界
 def t_audio_edge_inputs():
     """39 音频入口的边界：极短旁白不能崩、NaN/Inf 必须拒绝、seg=0 不许死循环。
 
-    这几条都是"真跑一次就会遇到"的输入。v0.7.1 及以前的行为：
+    这几条都是"真跑一次就会遇到"的输入。没有守卫时的行为：
       * voice_env 在极短音频上 np.convolve(mode="same") 返回核长 -> np.maximum 广播失败；
       * duck_voice 在"旁白比背景短"时包络与背景长度不同 -> 广播失败；
       * wav_write 对 NaN 做 clip 再 astype(int16)，把 NaN 静默写成 0（写出损坏 WAV 却不报错）；
@@ -1143,7 +1141,7 @@ def t_audio_edge_inputs():
 def t_report_single_source():
     """40 QC 报告落点只能有一个来源：--out 的目录。
 
-    v0.7.2 修的真 bug：all/mux/qa 用 dirname(abspath(out))，accept 用
+    真 bug：all/mux/qa 用 dirname(abspath(out))，accept 用
     dirname(abspath(work))/out。--out 指到 deliver/ 时，签核更新的是另一份没人
     交付的文件，交付出去的那份仍是"未签核"——正好打穿"报告是交付凭据"这条承诺。
     """
@@ -1185,7 +1183,7 @@ def t_empty_ledger_not_pass():
 def t_stage_io_no_phantom_output():
     """42 单阶段连跑不许报"自己的产物不见了"（假 stale）。
 
-    v0.7.2 修：stagewatch 的 STAGE_IO[style].outputs 里把 voice_plan.json 也算成
+    stagewatch 的 STAGE_IO[style].outputs 里把 voice_plan.json 也算成
     style 的产物，而它其实是 tts 阶段写的（render.py 的 st_tts）。于是 --stage style
     连跑两次，第二次必然报"产物 voice_plan.json 不见了"；打开 --strict-stale 就变成
     硬失败——SKILL.md 第 3 步（全新项目第一条生产命令）自己走不通。
@@ -1209,13 +1207,13 @@ def t_stage_io_no_phantom_output():
 def t_theme_overrides_linted():
     """43 theme_overrides 必须参与主题体检（否则用户能造出"看不清"的成片）。
 
-    v0.7.2 修的真 bug：render.resolve_style 以前只体检**基础主题**
+    真 bug：render.resolve_style 以前只体检**基础主题**
     （ST.THEMES[theme_id]），而 scenes 实际用的是 plan[theme]（基础主题 + film.json 的
     visual.theme_overrides）。于是把 ink/bg 调成低对比度时体检照样 PASS，渲完才发现字幕看不清。
     实测 overrides ink=[30,30,30]/bg=[10,10,10]：基础主题 lint 为空，最终主题 lint 报对比度 1.09。
     """
     import stylekit as ST
-    # v1.0.1：没有"基础主题 vs 最终主题"的区分了（内置主题表已删），
+    # 没有"基础主题 vs 最终主题"的区分了（内置主题表已删），
     # 但"overrides 之后必须重新 lint"这条规则仍然要守：
     # 直接把设计主题改成低对比度，theme_lint 必须抓到。
     _d, _plan43 = _design_plan("theme_overrides 体检")
@@ -1225,7 +1223,7 @@ def t_theme_overrides_linted():
     dirty = ST.apply_theme_overrides(base_th, {"ink": [30, 30, 30], "bg": [10, 10, 10]})
     bad = ST.theme_lint(dirty)
     assert bad, '低对比度的 theme_overrides 没被 lint 抓到（用户能造出看不清的字幕）'
-    # v1.0.1：体检的位置从 render 挪到了 designkit（design_to_plan 里就 lint，不过直接抛）。
+    # 体检的位置在 designkit（design_to_plan 里就 lint，不过直接抛）。
     # 这里改查**真正干活的地方**——早先查 render.py 的源码文本，那只是"哪个文件里写了这行"，
     # 一旦重构搬家就会误报（本次就是这样：lint 逻辑搬进 designkit 后断言还在查 render）。
     # 更硬的检查：直接把一份低对比度主题喂给 design_to_plan，必须抛。
@@ -1244,7 +1242,7 @@ def t_theme_overrides_linted():
     return "最终主题参与体检（%s）" % "；".join(bad)[:60]
 
 
-# ------------------------------------------------------------------ v0.8.0 用例
+# ------------------------------------------------------------------ 词级时间戳 / 画幅 / 依赖 / 批量
 def t_word_events():
     """44 词级时间戳：规整/裁剪平移/单调兜底/词锚点解析（不联网）。
 
@@ -1319,7 +1317,7 @@ def t_golden_determinism():
     import hashlib
     sc = dict(id="l01", kind="hook", start=0.0, dur=4.0, chapter="01 · 测试",
               text="金帧确定性自检", sub="金帧确定性", big="金帧确定性")
-    # v1.0.1：剧本必须显式给设计（内置风格表已删，没有"style": "mono" 这种写法了）。
+    # 剧本必须显式给设计（内置风格表已删，没有"style": "mono" 这种写法了）。
     script = {"title": "selfcheck", "_total": 8.0}
     script["_style"] = _design_plan("金帧确定性")[1]
     hs = []
@@ -1357,7 +1355,7 @@ def t_dependency_drift():
         np.__version__, pil_ver, getattr(edge_tts, "__version__", "?"))
 
 
-# ------------------------------------------------------------------ v0.8.0 用例（续）
+# ------------------------------------------------------------------ web 载荷 / 金帧
 def t_batch_manifest():
     """48 批量清单解析：两种写法都认、上限卡死、坏条目在**开跑前**报错。
 
@@ -1431,15 +1429,15 @@ def t_tts_backend():
 def t_web_style_payload():
     """50 web 引擎风格载荷：非 legacy 才注入、legacy 必须回落 None（逐字节兼容的前提）。
 
-    v0.8 给 web 引擎加了"跟随风格包"，但兼容性要求是 style=None 时页面输出**逐字节**
-    等于 v0.7。这条守住"什么时候该注入、什么时候必须不注入"这个开关。
+    web 引擎会"跟随风格包"，但兼容性要求是 style=None 时页面输出**逐字节**
+    等于不带载荷的旧输出。这条守住"什么时候该注入、什么时候必须不注入"这个开关。
     """
     import render as R
     try:
         import webengine as we
     except Exception as e:                                  # noqa: BLE001
         return "skip（没有 webengine.py：%s）" % e
-    # v1.0.1：没有 legacy 概念了（legacy 入口已被拒绝），所以这里只验"设计项目必须注入载荷"。
+    # 没有 legacy 概念了（legacy 入口已被拒绝），所以这里只验"设计项目必须注入载荷"。
     script = {"title": "x", "lines": [{"id": "l01", "kind": "hook", "text": "y"}]}
     script["_style"] = _design_plan("web 载荷")[1]
     tl = {"fps": 30, "video": {"out_w": 1280, "out_h": 720}}
@@ -1502,7 +1500,7 @@ def t_golden_frames():
 
 
 # ============================================================================
-# v0.9：场景语法 + 视觉语言
+# 场景语法 + 视觉语言
 # ============================================================================
 
 def _load_grammar():
@@ -1534,7 +1532,7 @@ def _fake_scenes(G, lines, per=6.0):
 def t_scene_grammar():
     """52 场景语法：10 类都能被选中、选型确定、段长门会降级。
 
-    为什么要有这条：v0.9 之前 quote/emphasis/calm 三种 kind 全部落到 body 绘制器，
+    为什么要有这条：quote/emphasis/calm 三种 kind 全都落到 body 绘制器的话，
     画面永远只有一套骨架。这条断言盯的是"内容 -> 构图"这条链路真的在分流，
     而不是"代码里写了 10 个函数但没人调用"。
     """
@@ -1590,13 +1588,13 @@ def t_scene_grammar():
 def t_visual_languages():
     """53 视觉语言包：8 套结构签名齐全、过体检、且彼此不是同一套。
 
-    为什么要有这条：v0.5 的"风格"只改配色，8 套风格骨架完全一样（用户抱怨的根因）。
+    为什么要有这条：只改配色的"风格"会让 8 套风格骨架完全一样（用户抱怨的根因）。
     这条盯的是"结构签名真的存在且互不相同"——母题/转场/重心偏移任一维度相同不算问题，
     但**五组签名全同**就说明这套语言只是复制粘贴。
     """
     import designkit as DK
     import stylekit as ST
-    # v1.0.1：没有 8 套内置语言了。改成验"现场生成的语言"，而且断言更强：
+    # 没有 8 套内置语言了。验"现场生成的语言"，而且断言更强：
     # 12 个设计的两两结构签名必须互不相同（以前只要求 8 套里 >=6 种母题）。
     sigs, motifs, transes = {}, set(), set()
     designs = DK.sample_designs({"topic": "视觉语言多样性"}, n=12, seed=20260202)
@@ -1664,7 +1662,7 @@ def t_scene_types_single_truth():
 def t_silhouette_gate():
     """55 剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分。
 
-    这是 v0.9 的核心验收：如果这条挂了，说明"换风格只是换色"的毛病回来了。
+    这是核心验收：如果这条挂了，说明"换风格只是换色"的毛病回来了。
     工具在 tools/silhouette_qa.py（可选）：缺了 skip，不阻塞 CI。
     """
     root = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -1731,7 +1729,7 @@ def t_design_dsl():
     broken = json.loads(json.dumps(ds[0]))
     broken["visual"].pop("motif", None)
     assert DK.validate_design(broken), "缺 motif 竟然通过校验（fail-closed 失效）"
-    # v1.0.1 起语义反转：**不给 seed = 每次都不一样**（需求是"每条视频都不同"），
+    # 语义是**不给 seed = 每次都不一样**（需求是"每条视频都不同"），
     # 给 seed 才可复现。两条都要测，否则改错了任一边都发现不了。
     x1 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)]
     x2 = [d["id"] for d in DK.sample_designs({"topic": "selfcheck 设计 DSL"}, n=3)]
@@ -1743,9 +1741,9 @@ def t_design_dsl():
 
 
 def t_no_templates():
-    """57 零模板：仓库里**不许再有**预设/模板文件（v1.0.1 起本技能只提供技术，不提供模板）。
+    """57 零模板：仓库里**不许再有**预设/模板文件（本技能只提供技术，不提供模板）。
 
-    反过来断言：早先这条是"presets/*.json 可读可转"，v1.0.1 把预设整个删掉后，
+    这条是反向断言：预设整个删掉后，
     如果只是删掉这条检查，就再也拦不住"哪天有人又加一套预设进去"。
     所以改成**禁止存在**——删掉模板是一次性动作，守住它是长期契约。
     """
@@ -1759,7 +1757,7 @@ def t_no_templates():
     for name in ("presetkit.py",):
         if os.path.exists(os.path.join(skill, "scripts", name)):
             banned.append("scripts/%s 还在" % name)
-    assert not banned, ("v1.0.1 起本技能不提供模板，这些必须删掉：%s；"
+    assert not banned, ("本技能不提供模板，这些必须删掉：%s；"
                         "要自定义请写 design.json（技术原语仍在，只是不再有现成目录）"
                         % "；".join(banned))
     # 同时确认"现场采样"是唯一方式，且**每次都新**：
@@ -1783,7 +1781,7 @@ def t_no_templates():
 def t_brief_constraints():
     """60 brief 里的要求必须真的生效（自然语言 -> 约束 -> 采样结果）。
 
-    这条防的是**需求被静默吃掉**：v1.0.1 之前 propose._brief_of 把整句 --brief 塞进 topic，
+    这条防的是**需求被静默吃掉**：propose._brief_of 若把整句 --brief 塞进 topic，
     must_have/avoid 恒为空数组，于是"深蓝配色的科技解说"采出来是 h087 / h316（橙 / 紫）。
     用户看到的需求和结果无关，而且没有任何提示——比报错更糟。
 
@@ -1831,7 +1829,7 @@ def t_stage_standalone():
     这条守住一类**只在"单跑某个 stage"时才发作**的 bug：
     `--stage all` 时前面的 stage 已经把 script["_style"] 塞好了，后面全都命中缓存，
     所以缺参数也看不出来；一旦用户只跑 `--stage frames` / `--stage sfx`，
-    resolve_style 读不到 work/design.json 就报"找不到设计"（v1.0.1 实测踩到：
+    resolve_style 读不到 work/design.json 就报"找不到设计"（实测踩到：
     frames / sfx 两个 stage 单跑必挂，sfx 还是 NameError——函数里压根没有 work 这个名字）。
 
     为什么用 AST 而不是真的跑每个 stage：跑一遍 = 要 TTS 联网 + 全片渲染，几十秒起步，
@@ -1898,17 +1896,17 @@ def t_proposal_gate():
 
 
 def t_subtitle_style():
-    """61 字幕样式可定制（v1.0.2）：design.visual.subtitle 必须真的改变像素，缺省逐像素不变。
+    """61 字幕样式可定制：design.visual.subtitle 必须真的改变像素，缺省逐像素不变。
 
     为什么必须有这条：字幕字号/位置/背板过去是 filmkit 的**模块常量**，任何两条片子
     的字幕带都一模一样 —— 这正是用户说的"跨片大面积重复"。改成设计字段后，最容易
     出现的退化是"字段读进来了但没传给 draw_subtitle"（写完不生效，实测踩过）。
     所以这里验行为：同一个 theme、同一段文字，换字幕参数必须像素不同；
-    不传参数时必须与 v1.0.1 的调用逐像素一致（老项目不漂）。
+    不传参数时必须与不传该字段的调用逐像素一致（老项目不漂）。
     """
     import numpy as _np
     import designkit as DK
-    # 用一套现场采样设计里的主题，避免依赖内置主题表（v1.0.1 已删）
+    # 用一套现场采样设计里的主题，避免依赖内置主题表（已删）
     d = DK.sample_designs({"topic": "字幕样式自检"}, n=1, seed=3)[0]
     plan = DK.design_to_plan(d)
     theme = plan["theme"]
@@ -1929,9 +1927,9 @@ def t_subtitle_style():
 
 
 def t_layout_cycle():
-    """62 片内版式轮换（v1.0.2）：layout_cycle 真的让不同章节换骨架，同章必须稳定。
+    """62 片内版式轮换：layout_cycle 真的让不同章节换骨架，同章必须稳定。
 
-    用户原则 5：同一部片不能"长时间一张版式"。v1.0.1 的 design.visual.layout 是单值，
+    用户原则 5：同一部片不能"长时间一张版式"。design.visual.layout 是单值，
     grammar 把它当全片默认 → 8 段片子 8 屏同骨架。这条验三件事：
       ① 有 layout_cycle 时，不同 chapter 拿到不同版式；
       ② 同一个 chapter 内所有段版式一致（不能每句都跳）；
@@ -1961,7 +1959,7 @@ def t_layout_cycle():
 
 
 def t_brief_constraint_robustness():
-    """63 带约束的 brief 不许高概率直接失败（v1.0.2）。
+    """63 带约束的 brief 不许高概率直接失败。
 
     实测过的真缺陷：配色候选去重按 24° 分桶，而 must_have「深蓝」把色相窗口压到 52°，
     n=3 时约一半概率抛 ValueError；「暖纸色 + 女声」20/20 全失败。用户第一步就撞墙。
@@ -1983,9 +1981,9 @@ def t_brief_constraint_robustness():
 def t_removed_apis_fail_closed():
     """64 已删除的 API 必须"明确报错/非零退出"，不许 NameError、假绿或静默 fallback。
 
-    v1.0.1 删内置风格表时留下了一批**死路径**：stylekit 的 --list/--show NameError、
+    删内置风格表时留下了一批**死路径**：stylekit 的 --list/--show NameError、
     --lint 空表 exit 0（假绿）、filmkit 的 resolve_theme/style_plan 吞异常回落到写死的
-    v0.4 主题（静默降级 = 用模板出片）。这三种都必须绝迹。
+    写死的主题（静默降级 = 用模板出片）。这三种都必须绝迹。
     """
     import subprocess as _sp
     import stylekit as ST
@@ -2021,7 +2019,7 @@ def t_removed_apis_fail_closed():
 
 
 def t_audio_overrides():
-    """65 design.audio 的音量/音效参数必须真的落进 script（v1.0.2）。
+    """65 design.audio 的音量/音效参数必须真的落进 script。
 
     实测过的真缺陷：design.json 的 audio.music.gain_db / duck_db 与 audio.sfx.enabled
     / density / gain_db 一直被 validate_design 接受、却从来没有渲染代码读它们 ——
@@ -2054,9 +2052,9 @@ def t_audio_overrides():
 
 
 def t_design_ledger():
-    """66 片间去重台账（v1.0.2）：确认过的设计要记住，下次提案主动避开；可关可查。
+    """66 片间去重台账：确认过的设计要记住，下次提案主动避开；可关可查。
 
-    用户原则 5：不同视频的整体风格不能大面积重复。v1.0.1 只保证"同一 brief 两次采样不同"
+    用户原则 5：不同视频的整体风格不能大面积重复。只保证"同一 brief 两次采样不同"
     （nonce），但没有记忆——连拍同题材仍可能撞到相近设计。台账补上这一环。
     这条验四件事：① confirm 后写台账；② 提案会读台账并报告距离；
     ③ 台账路径可被环境变量重定向（绝不污染用户真实台账）；④ --no-ledger 可关闭。
@@ -2101,7 +2099,7 @@ def t_design_ledger():
 
 
 def t_duration_target():
-    """67 时长要求真的被接住（v1.0.2）：brief 里的「2 分钟」要影响设计，渲染时对账。
+    """67 时长要求真的被接住：brief 里的「2 分钟」要影响设计，渲染时对账。
 
     过去 `_brief_of` 把 duration_target 恒填 None —— 用户写「做个 2 分钟的片」等于没写，
     成片永远按台词长度出（实测 23s / 30s）。这条守三件事：
@@ -2134,7 +2132,7 @@ def t_zoom_stability():
     颗粒图案跟着错位 1px —— 用户实测的原话是"生成的视频有明显的抖动感"，
     而单帧闪烁门禁（8x8 分块比较前后帧平均）对这类亚像素沸腾**完全不敏感**。
     断言：同一主题从 s=1.0 缓推到 s=1+push 的过程中，相邻两帧最大差 <= 2 灰阶。
-    旧实现实测 4~6（v1.0.2），改成端点预烘 + blend 后 0~1。
+    端点直采实测抖动 4~6，改成端点预烘 + blend 后 0~1。
     """
     mod = _load_scenes_mod()
     if mod is None:
@@ -2213,7 +2211,7 @@ CASES = [
     ("10 qa 字幕条数校验", t_qa_subs),
     ("11 尾静音裁剪", t_trim),
     ("12 mux 音轨 48kHz", t_mux_48k),
-    ("13 v0.1 调用签名兼容", t_compat),
+    ("13 调用签名兼容", t_compat),
     ("14 qa 帧率校验", t_fps_check),
     ("15 立体声总线", t_stereo_bus),
     ("16 cue_time 三种写法", t_cue_time),
@@ -2233,9 +2231,9 @@ CASES = [
     ("30 门禁账本与签核", t_gates),
     ("31 阶段新鲜度守卫", t_stagewatch),
     ("32 并行渲染主题序列化", t_parallel_frames),
-    ("33 音效跨片可区分（v0.7 内容派生 seed）", t_sfx_content_seed),
-    ("34 配乐/音效片内分离（v0.7 duck 加深）", t_audio_separation),
-    ("35 旁白优先（v0.7.1 背景让位与恢复）", t_voice_priority),
+    ("33 音效跨片可区分（内容派生 seed）", t_sfx_content_seed),
+    ("34 配乐/音效片内分离（duck 加深）", t_audio_separation),
+    ("35 旁白优先（背景让位与恢复）", t_voice_priority),
     ("36 旁白优先默认值（配乐 -12 dB + 侧链）", t_music_gain_default),
     ("37 旁白清晰度 SNR 兜底（背景太响时自动补压）", t_snr_guard),
     ("38 无旁白时混音不受影响", t_mix_no_voice),

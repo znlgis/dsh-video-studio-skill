@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """voicekit.py — 旁白声线：直接给 edge voice id + 语气档 + 响度补偿表。
 
-v0.5.0 新增。v0.4 的 render.py 把 script.voice / rate / pitch 三个单值一路传给
-filmkit.tts_batch，结果是所有片、所有段落都由同一个人用同一种语气念完 ——
-用户的原话是「旁白声音都差不多、整体画风也差不多，希望随内容变化」。
+旁白不能全片一个人、一个语气念完：声线、语速、音高、音量与前后留白都要能逐句给，
+并且随内容变化。只把 script.voice / rate / pitch 三个单值传给 filmkit.tts_batch，
+全片就是同一个人用同一种语气念到底（听感即「旁白声音都差不多」）。
 
-D3（v1.0）删掉了 persona 身份层
--------------------------------
-以前有 9 个 persona（narrator_male 之类）当「谁在说话」的身份表。问题不在名字，
-而在多了一层映射：design/style/line 里写 narrator_male，真正下发给 edge-tts 的却是
-zh-CN-YunyangNeural。任何一层没对齐，表现都是「配了却没生效」，而且要等听成片才发现。
-现在声线一律是 edge voice id（zh-CN-YunxiNeural），映射只发生一次、就在设计里。
+声线只认裸 edge voice id
+------------------------
+声线一律写 edge voice id（zh-CN-YunxiNeural），映射只发生一次、就在设计里。
+多一层 persona 身份映射（写 narrator_male、真正下发给 edge-tts 的却是
+zh-CN-YunyangNeural）时，任何一层没对齐，表现都是「配了却没生效」，
+而且要等听成片才发现。
 
-被删掉的：PERSONA_IDS / VOICE_PERSONAS / _pick_persona / _govern / legacy 分支，
-以及「文本里有引号就偷偷换人」那套规则 —— 身份是数据，不该由一个正则决定。
+身份是数据，不该由一个正则或一张表决定：没有 persona 表，也没有
+「文本里有引号就偷偷换人」那套规则。
 
-但 persona 表里有一件**不能丢**的东西：每把音色的实测响度补偿。删表不补补偿，
-换音色就要人肉重新对电平，正是本次改造要根除的「改了不生效 / 要人调」。
-所以补偿独立成一张按 voice id 的数据表 VOICE_LOUDNESS（没有任何身份含义）。
+每把音色的实测响度补偿**不能丢**：不补补偿，换音色就要人肉重新对电平，
+正是要根除的「改了不生效 / 要人调」。所以补偿独立成一张按 voice id 的数据表
+VOICE_LOUDNESS（没有任何身份含义）。
 
 本模块只做「策展 + 计划」：给出每句用哪个音色、什么语气、语速/音高/音量抖多少、
 前后留白多少。真正的合成仍在 filmkit.tts（Lead 负责接线），因此本模块
@@ -33,24 +33,23 @@ zh-CN-YunyangNeural。任何一层没对齐，表现都是「配了却没生效�
 声线从哪来（高到低）
 --------------------
   lines[].voice（显式 edge id）
-  > script.voice.map / design.audio.voice.map 的 kind 映射（D3 设计）
+  > script.voice.map / design.audio.voice.map 的 kind 映射
   > style_plan["voice"]["map"][kind]（风格包 / designkit.design_to_plan）
   > script.voice.id / design.audio.voice.id / style_plan["voice"]["default"]（主声线）
-没有任何来源就报错（并给出迁移路径）——D3 的设计必须明确「谁在说话」。
+没有任何来源就报错（并给出迁移路径）——设计必须明确「谁在说话」。
 
-声线一旦确定就**不再治理**：以前 _govern 会在段边界偷偷换人、用 max_distinct 限预算，
-那层逻辑只对 persona 有意义（为了「别让一部片出现太多人」）。现在 map 怎么写就怎么念，
-声线策略里的 max_distinct 随之退休 —— 想少换人就少写几个 kind，不需要中间层猜意图。
+声线一旦确定就**不再治理**：map 怎么写就怎么念，没有中间层在段边界偷偷换人、
+也没有按预算限制同一部片出现几把声音。想少换人就少写几个 kind，不需要中间层猜意图。
 
 确定性
 ------
 所有抖动都来自 sha1(title|id|voice)，禁 random / time / hash()（str hash 带盐）。
 同一份 film.json 两次 voice_plan() 完全相等；jitter=0 时与「无抖动」逐字段相等。
 
-迁移（老结构）
---------------
-v0.4 的「顶层 voice 单值」和「没有 design 的 legacy 计划」不再支持：voice_plan 直接抛
-ValueError，消息里给三条可照抄的迁移路径（design.audio.voice / lines[].voice / voice.map）。
+老结构
+------
+顶层 voice 单值与「没有 design 的 legacy 计划」都不受支持：voice_plan 直接抛
+ValueError，消息里给三条可照抄的路径（design.audio.voice / lines[].voice / voice.map）。
 不静默回落是刻意的：静默回落 = 配音变了却没人知道，比报错难查得多。
 
 用法
@@ -58,7 +57,7 @@ ValueError，消息里给三条可照抄的迁移路径（design.audio.voice / l
     import voicekit as VK
     plan = VK.voice_plan(script, ST.resolve_script_style(script))
     VK.describe(plan)
-    VK.spec_key(dict(plan[0], text=script["lines"][0]["text"]))   # v2 缓存键
+    VK.spec_key(dict(plan[0], text=script["lines"][0]["text"]))   # 合成缓存键
     VK.calibrate_voice("zh-CN-YunxiNeural")   # 联网实测；离线 measured=False，不抛
 
     python voicekit.py --list                 # 音色响度表 + 语气档
@@ -85,10 +84,10 @@ import wave
 # 一、响度补偿（数据，不是身份）：换音色不用手调电平
 # ============================================================================
 #
-# 为什么这张表不能跟着 persona 一起删：
-#   9 个 persona 的实测响度跨度 6.0 dB（-3.0 ~ +3.0）。差别来自音色本身（基频、气声、
+# 为什么这张表必须有：
+#   九把音色的实测响度跨度 6.0 dB（-3.0 ~ +3.0）。差别来自音色本身（基频、气声、
 #   端点侧的归一化），跟台词、语气、机器负载都无关，但**换一把音色就会整体偏几 dB**。
-#   删表不补补偿，每次换音色都要试听、手调 gain —— 那正是「改了不生效 / 要人调」。
+#   不补补偿，每次换音色都要试听、手调 gain —— 那正是「改了不生效 / 要人调」。
 #
 # 口径：gain_db = 目标响度 - 实测 rms_db，夹在 ±3 dB（正 = 该音色偏轻，mix 侧补回来）。
 #   - 实测：2026-11-09 在本机用 edge-tts 7.3.1 合成同一句校准文本（CALIB_TEXT，21 个
@@ -105,7 +104,7 @@ VOICE_LOUDNESS = {
     "zh-TW-HsiaoChenNeural": -3.0,        # 软糯女声（台湾腔），原始 -3.46，夹到 -3
     "zh-CN-XiaoyiNeural": -0.6,           # 活泼女声
     "zh-CN-YunjianNeural": 1.0,           # 有力男声
-    "zh-CN-YunxiNeural": 1.9,             # 青年男声（v0.4 的缺省音色）
+    "zh-CN-YunxiNeural": 1.9,             # 青年男声（最常用的旁白音色）
     "zh-CN-YunxiaNeural": 0.3,            # 少年音
     "zh-CN-liaoning-XiaobeiNeural": 0.0,  # 东北女声（本次校准的基准，补偿 0）
     "zh-CN-shaanxi-XiaoniNeural": -0.3,   # 陕西女声
@@ -180,7 +179,7 @@ except Exception:                        # noqa: BLE001 — stylekit 缺失时�
 # 三、小工具：参数解析/格式化、汉字计数、抖动
 # ============================================================================
 # 允许小数（"+4.5%"）：edge-tts 只收整数百分比，所以解析后按 _round_half_away 取整。
-# 以前正则只认整数，"+4.5%" 解析失败 → 静默回落 0 —— 而 0 与 "+0%" 在 spec_key 里
+# 正则只认整数时 "+4.5%" 解析失败 → 静默回落 0，而 0 与 "+0%" 在 spec_key 里
 # 是**同一个 TTS 缓存键**，于是「把语速从 0 调到 4.5%」完全没生效，还复用了旧音频。
 # 这是配置写对了却不生效里最难查的一类：没有报错、没有日志、听起来就是「没反应」。
 _PCT_RE = re.compile(r"^\s*([+-]?)(\d+(?:\.\d+)?)\s*%\s*$")
@@ -283,7 +282,7 @@ def _quantize(v, u):
 # 四、文本规则（说什么）：全部确定性，命中即返回理由
 # ============================================================================
 # 引语起始符。**不含书名号《》**：正文里出现「《设计模式》」是书名，不是引用某人在说话。
-# 实测踩过：把 《 算进引语后，「今天我们聊《设计模式》」这句被判成 quote 语气 ——
+# 把 《 算进引语，「今天我们聊《设计模式》」这句就会判成 quote 语气 ——
 # 整句降速、留白加长，听感像突然换了频道（而这句根本没有人引语）。
 _QUOTE_OPEN = ('"', "\u201c", "\u300c", "\u300e")
 _QUOTE_WORDS = ("他说", "她说", "有人问", "所谓", "据称")
@@ -329,7 +328,7 @@ def _rules(text):
 def _resolve(script, style_plan):
     """拿风格计划：显式参数 > script["_style"]（render 已解析过）> stylekit 现算 > {}。
 
-    返回 {} 不是故障：D3 的声线来源是 design.audio.voice，本模块自己就能读；
+    返回 {} 不是故障：声线来源是 design.audio.voice，本模块自己就能读；
     stylekit 只负责风格包/节奏这一层，缺了它照样能出 voice 计划。
     """
     if isinstance(style_plan, dict) and style_plan:
@@ -346,9 +345,9 @@ def _resolve(script, style_plan):
 
 
 def _design_voice(script):
-    """读 D3 设计的声线：返回 (主声线, {kind: id}, 策略 {auto, jitter})。
+    """读设计里的声线：返回 (主声线, {kind: id}, 策略 {auto, jitter})。
 
-    为什么直接读 script["design"] 而不只依赖 style_plan：D3 的单测/验收会直接
+    为什么直接读 script["design"] 而不只依赖 style_plan：单测/验收会直接
     voice_plan(script)，此时没有 render.py 解析过的 _style；而 stylekit 对「没有
     design」的剧本已经直接报错，_resolve 只能返回 {}。design.audio.voice 是声线的
     唯一事实来源，能读就读，别要求调用方先跑一遍 render。
@@ -385,7 +384,7 @@ def _design_voice(script):
 
 
 def _script_voice(script):
-    """v0.5 形状的 script.voice（dict）：返回 (主声线, {kind: id})。"""
+    """script.voice 写成 dict 时的形状：返回 (主声线, {kind: id})。"""
     vo = script.get("voice")
     if not isinstance(vo, dict):
         return None, {}
@@ -404,7 +403,7 @@ def _style_voice(sp):
     return vmap, default
 
 
-# 迁移说明只写一份：三处报错（persona / 老结构 / map 值）都指向它，避免各处各写一套。
+# 迁移说明只写一份：三处报错（非法声线 / 老结构 / map 值）都指向它，避免各处各写一套。
 _MIGRATE = (
     "声线现在一律写 edge voice id（形如 zh-CN-YunxiNeural）。迁移任选一条：\n"
     "  1) design.json：audio.voice = {\"mode\": \"edge_id\", \"id\": \"zh-CN-YunxiNeural\"}；"
@@ -421,10 +420,10 @@ def _bad_voice(field, value):
 
 
 def _old_structure(script, sp, scalar=None):
-    """老结构（v0.4 单值 voice / 没有 design 的 legacy）不再支持：直说怎么迁移。"""
+    """老结构（顶层 voice 单值 / 没有 design 的 legacy 计划）不受支持：直说怎么迁移。"""
     bits = []
     if scalar:
-        bits.append("顶层 voice = %r，v0.4 的单值声线" % scalar)
+        bits.append("顶层 voice = %r，单值声线" % scalar)
     if sp.get("legacy"):
         bits.append("风格计划判定为 legacy（film.json 里没有 design/style）")
     return ValueError(
@@ -504,11 +503,11 @@ def voice_plan(script, style_plan=None):
     scalar = script.get("voice")
     has_line_voice = any(isinstance(ln, dict) and ln.get("voice") for ln in lines)
     if isinstance(scalar, str) and scalar.strip():
-        # v0.4 的单值声线。D3 之后声线事实来源只有 design.audio.voice（或逐句 voice），
+        # 顶层单值 voice。声线事实来源只有 design.audio.voice（或逐句 voice），
         # 再读它会和 design 打架，而「谁生效」取决于调用顺序 —— 最难查的一类。
         raise _old_structure(script, sp, scalar.strip())
     if not (default or vmap or has_line_voice):
-        # 没有任何来源时**不猜**：以前会静默套 kind 缺省，整片悄悄换声线。
+        # 没有任何来源时**不猜**：静默套 kind 缺省会让整片悄悄换声线。
         # 宁可报错一次，让人把 design.audio.voice 补上。
         if isinstance(script.get("design"), dict):
             raise ValueError(
@@ -537,8 +536,8 @@ def voice_plan(script, style_plan=None):
         rules = _rules(ln.get("text")) if use_rules else {
             "tone": "", "rate": 0, "volume": 0, "tail": 0.0, "reasons": []}
 
-        # 身份只有一个来源，写错就报错，不再「悄悄回落到某个缺省声线」：
-        # 以前拼错 persona 名会静默换人（听感变了但没有任何提示），是本项目最忌讳的坑。
+        # 身份只有一个来源，写错就报错，不「悄悄回落到某个缺省声线」：
+        # 写错名会静默换人（听感变了但没有任何提示），是本项目最忌讳的坑。
         raw_p = ln.get("persona")
         if raw_p not in (None, ""):
             raise _bad_voice("lines[%d].persona" % i, raw_p)
@@ -619,7 +618,7 @@ def voice_plan(script, style_plan=None):
 
 
 # ============================================================================
-# 六、缓存键（v2：trim 进 key，修 v0.4 的静默复用 bug）
+# 六、缓存键（v2：trim 进 key，否则改 trim 会静默复用旧音频）
 # ============================================================================
 def _norm_pct(v, default="+0%"):
     if v in (None, ""):
@@ -636,7 +635,7 @@ def _norm_hz(v, default="+0Hz"):
 def spec_key(spec):
     """v2 合成缓存键：sha1("v2|text|voice|rate|pitch|volume|trim|trim_db")[:16]。
 
-    与 v0.4 的 tts_key（text|voice|rate|pitch）不复用：v0.4 把 trim 漏在 key 外，
+    不复用旧的 tts_key（text|voice|rate|pitch）：那套键把 trim 漏在 key 外，
     同一句改 trim/trim_db 会静默复用旧音频。spec 传一行计划 + text 即可：
     spec_key(dict(plan[0], text=line["text"]))；trim/trim_db 缺省与 filmkit.tts 一致。
     """
@@ -994,7 +993,7 @@ def main(argv=None):
         if only:
             unknown = [x for x in only if not is_edge_voice(x)]
             if unknown:
-                # 以前拼错名字会静默变成空集合 -> 打出「所有音色都合成失败（多半没网）」，
+                # 拼错名字会静默变成空集合 -> 打出「所有音色都合成失败（多半没网）」，
                 # 把配置错误伪装成网络错误。这里先点名校验，给人话可照抄的可用清单。
                 print("[未知音色] %s；可用：%s"
                       % ("、".join(unknown), " / ".join(VOICE_LOUDNESS)), file=sys.stderr)

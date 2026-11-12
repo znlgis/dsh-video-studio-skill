@@ -23,7 +23,7 @@
     },
     "style": {
       "type": "string",
-      "description": "**已废弃（v1.0.1）**：不再有内置风格表，这个键不决定任何外观，写了也不生效（保留只为了让老剧本继续通过契约校验）。外观的唯一来源是 work/design.json（propose.py --confirm 冻结，渲染前由 designkit.design_to_plan 解析）；没有设计就渲染会明确报错，而不是回落到某个默认风格。这里**故意不放 enum**：v1.0.1 起没有任何合法风格 id 可列，列一份清单只会误导 IDE 补全。"
+      "description": "**已废弃**：技能里没有内置风格表，这个键不决定任何外观，写了也不生效（保留只为了让老剧本继续通过契约校验）。外观的唯一来源是 work/design.json（propose.py --confirm 冻结，渲染前由 designkit.design_to_plan 解析）；没有设计就渲染会明确报错，而不是回落到某个默认风格。这里**故意不放 enum**：没有任何合法风格 id 可列，列一份清单只会误导 IDE 补全。"
     },
     "engine": {
       "type": "string",
@@ -38,7 +38,7 @@
         "string",
         "object"
       ],
-      "description": "字符串 = edge-tts voice id（如 zh-CN-YunxiNeural，legacy 单声线路径）；对象 = v0.5 声线策略（map 按 kind 映射 persona、auto、jitter、max_distinct、rate_range、cps_band），此时忽略 rate/pitch 的单值覆盖语义",
+      "description": "字符串 = edge-tts voice id（如 zh-CN-YunxiNeural，legacy 单声线路径）；对象 = 声线策略（map 按 kind 映射音色、auto、jitter、max_distinct、rate_range、cps_band），此时忽略 rate/pitch 的单值覆盖语义",
       "properties": {
         "map": {
           "type": "object",
@@ -243,7 +243,7 @@
               "chart",
               "outro"
             ],
-            "description": "视觉场景类型（v0.9，可选）：决定这段画面长成什么构图——hero 封面 / statement 金句 / list 要点列表 / stat 数字卡 / compare 左右对比 / process 流程轴 / quote 引语 / chapter 章节卡 / chart 数据条 / outro 收尾。与 kind **正交**：kind 管声线、语气、配乐能量，type 只管构图，所以没有新增 kind 值；不写 = 由 grammar.py 按内容自动推导（写错值 filmcheck.py 会报 error）。枚举真值来自 grammar.SCENE_TYPES 与 assets/scenes.py 的 _DRAWERS 键，改那边要同步这里"
+            "description": "视觉场景类型（可选）：决定这段画面长成什么构图——hero 封面 / statement 金句 / list 要点列表 / stat 数字卡 / compare 左右对比 / process 流程轴 / quote 引语 / chapter 章节卡 / chart 数据条 / outro 收尾。与 kind **正交**：kind 管声线、语气、配乐能量，type 只管构图，所以没有新增 kind 值；不写 = 由 grammar.py 按内容自动推导（写错值 filmcheck.py 会报 error）。枚举真值来自 grammar.SCENE_TYPES 与 assets/scenes.py 的 _DRAWERS 键，改那边要同步这里"
           },
           "quote": {
             "type": "string",
@@ -402,12 +402,12 @@
     "lead": {
       "type": "number",
       "minimum": 0,
-      "description": "全局句前留白（秒）。缺省取风格 pacing（v0.5 body 基准 0.62）"
+      "description": "全局句前留白（秒）。缺省取设计的 pacing（body 基准 0.62）"
     },
     "tail": {
       "type": "number",
       "minimum": 0,
-      "description": "全局句后留白（秒）。缺省取风格 pacing（v0.5 body 基准 0.92）"
+      "description": "全局句后留白（秒）。缺省取设计的 pacing（body 基准 0.92）"
     },
     "min_dur": {
       "type": "number",
@@ -464,7 +464,7 @@
     },
     "whoosh": {
       "type": "boolean",
-      "description": "v0.2 兼容：没有 cues.json 时每段开头一声 whoosh（默认 true）"
+      "description": "兼容行为：没有 cues.json 时每段开头一声 whoosh（默认 true）"
     },
     "whoosh_amp": {
       "type": "number",
@@ -510,7 +510,7 @@
     "visual": {
       "type": "object",
       "additionalProperties": true,
-      "description": "视觉覆盖（v0.5）：一般不用写，风格包已经决定；要锁主题/版式时才用",
+      "description": "视觉覆盖：一般不用写，设计已经决定；要锁主题/版式时才用",
       "properties": {
         "theme": {
           "type": "string",
@@ -529,7 +529,7 @@
     "music": {
       "type": "object",
       "additionalProperties": true,
-      "description": "配乐：musicgen 按参数现场编排 / v0.2 和弦床 / 外部 wav / 关掉。不写 mode 时走兼容链（有 bpm 就生成，没有就沿用）。v1.0.1 起没有配乐风格表，不要指望选一个 id 得到一种现成配乐",
+      "description": "配乐：musicgen 按参数现场编排 / 和弦床 / 外部 wav / 关掉。不写 mode 时走兼容链（有 bpm 就生成，没有就沿用）。没有配乐风格表，不要指望选一个 id 得到一种现成配乐",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -543,11 +543,11 @@
             "file",
             "off"
           ],
-          "description": "score = musicgen 参数化编排（bpm/key/scale/mood/sections 全可写）；bed = v0.2 和弦床；file = 用外部 work/music.wav；off = 不要配乐（不读也不删 music.wav）"
+          "description": "score = musicgen 参数化编排（bpm/key/scale/mood/sections 全可写）；bed = 和弦床；file = 用外部 work/music.wav；off = 不要配乐（不读也不删 music.wav）"
         },
         "style": {
           "type": "string",
-          "description": "已废弃：v1.0.1 删除了配乐风格表，写风格 id 没有意义（保留字段只为老剧本校验不失败）"
+          "description": "已废弃：删除了配乐风格表，写风格 id 没有意义（保留字段只为老剧本校验不失败）"
         },
         "mood": {
           "type": "string",
@@ -576,59 +576,59 @@
         },
         "gain_db": {
           "type": "number",
-          "description": "配乐总线增益 dB（v0.7.1 默认 -12：视频以旁白为主，背景必须明显低于人声；旧版 -1.5 会让背景与台词几乎等高）"
+          "description": "配乐总线增益 dB（默认 -12：视频以旁白为主，背景必须明显低于人声；-1.5 会让背景与台词几乎等高）"
         },
         "duck_db": {
           "type": "number",
-          "description": "音效响起时配乐让位深度 dB（v0.7 默认按风格 3.0–5.5）"
+          "description": "音效响起时配乐让位深度 dB（默认按设计 3.0–5.5）"
         },
         "voice_duck_db": {
           "type": "number",
-          "description": "v0.7.1：旁白说话时配乐额外让位深度 dB（默认 6；0 = 关闭旁白侧链）"
+          "description": "旁白说话时配乐额外让位深度 dB（默认 6；0 = 关闭旁白侧链）"
         },
         "voice_duck_sfx_db": {
           "type": "number",
-          "description": "v0.7.1：旁白说话时音效额外让位深度 dB（默认 3；0 = 关闭）"
+          "description": "旁白说话时音效额外让位深度 dB（默认 3；0 = 关闭）"
         },
         "voice_thresh_db": {
           "type": "number",
-          "description": "v0.7.1：语音活跃度阈值 dBFS（默认 -42；低于它算静音间隙，背景恢复）"
+          "description": "语音活跃度阈值 dBFS（默认 -42；低于它算静音间隙，背景恢复）"
         },
         "voice_floor_db": {
           "type": "number",
-          "description": "v0.7.1：语音包络的地板 dBFS（默认 -60；与阈值之间做 0~1 映射）"
+          "description": "语音包络的地板 dBFS（默认 -60；与阈值之间做 0~1 映射）"
         },
         "guard_snr_db": {
           "type": "number",
-          "description": "v0.7.1：旁白清晰度兜底（默认 12）。混音后实测人声活跃区的人声/背景响度差，不足就整体再压背景；0 = 关闭"
+          "description": "旁白清晰度兜底（默认 12）。混音后实测人声活跃区的人声/背景响度差，不足就整体再压背景；0 = 关闭"
         },
         "guard_cap_db": {
           "type": "number",
-          "description": "v0.7.1：SNR 兜底最多补压多少 dB（默认 30，防止把背景压成忽有忽无；补压 >18 dB 会提示检查素材电平）"
+          "description": "SNR 兜底最多补压多少 dB（默认 30，防止把背景压成忽有忽无；补压 >18 dB 会提示检查素材电平）"
         },
         "seg": {
           "type": "number",
           "minimum": 0,
-          "description": "v0.2 和弦床的段长秒数（默认 4.0）"
+          "description": "和弦床的段长秒数（默认 4.0）"
         },
         "amp": {
           "type": "number",
           "minimum": 0,
-          "description": "v0.2 和弦床幅度（默认 0.055）"
+          "description": "和弦床幅度（默认 0.055）"
         },
         "gain": {
           "type": "number",
           "minimum": 0,
-          "description": "v0.2 和弦床增益（默认 0.9）"
+          "description": "和弦床增益（默认 0.9）"
         },
         "xfade": {
           "type": "number",
           "minimum": 0,
-          "description": "v0.2 和弦床交叉淡化秒数（默认 1.2）"
+          "description": "和弦床交叉淡化秒数（默认 1.2）"
         },
         "chords": {
           "type": "array",
-          "description": "v0.2 兼容：和弦频率表 [[220, 261.63, 329.63], ...]；只有 mode=bed/兼容链用得到",
+          "description": "兼容行为：和弦频率表 [[220, 261.63, 329.63], ...]；只有 mode=bed/兼容链用得到",
           "items": {
             "type": "array",
             "items": {
@@ -670,11 +670,11 @@
         },
         "content_seed": {
           "type": "boolean",
-          "description": "v0.7：true（默认）= 每条 cue 的 seed 由 style/content_fp 派生（不同影片同一位置也不同）；false = 回到 v0.6 的 seed_base+i 位置派生（老片逐样本兼容）"
+          "description": "true（默认）= 每条 cue 的 seed 由 style/content_fp 派生（不同影片同一位置也不同）；false = 按 seed_base+i 的位置派生（只跟 cue 顺序，逐样本稳定）"
         },
         "duck_transitions": {
           "type": "boolean",
-          "description": "v0.7：true（默认）= 段落边界前 2.2s 内的 whoosh/riser/reverse_swell 自动 -3 dB，避免与配乐过门在同一频段撞车；false = 不处理"
+          "description": "true（默认）= 段落边界前 2.2s 内的 whoosh/riser/reverse_swell 自动 -3 dB，避免与配乐过门在同一频段撞车；false = 不处理"
         },
         "cues": {
           "type": "array",
@@ -756,12 +756,12 @@
     },
     "words": {
       "type": "boolean",
-      "description": "v0.8 词级时间戳开关（默认 true）。true 时 --stage tts 会额外收 edge-tts 的 WordBoundary 事件落 work/words.json，字幕按词边界折行、cue 可用词锚点 l03:w2、QA 走 G10 门禁；false = 退回整句字幕（不影响出片）。"
+      "description": "词级时间戳开关（默认 true）。true 时 --stage tts 会额外收 edge-tts 的 WordBoundary 事件落 work/words.json，字幕按词边界折行、cue 可用词锚点 l03:w2、QA 走 G10 门禁；false = 退回整句字幕（不影响出片）。"
     },
     "tts": {
       "type": "object",
       "additionalProperties": true,
-      "description": "v0.8 TTS 后端选择（接口化，默认 edge；其它后端需先 filmkit.register_tts_backend 注册）。",
+      "description": "TTS 后端选择（接口化，默认 edge；其它后端需先 filmkit.register_tts_backend 注册）。",
       "properties": {
         "backend": {
           "type": "string",
@@ -779,7 +779,7 @@
     "video": {
       "type": "object",
       "additionalProperties": true,
-      "description": "v0.8 画幅/帧率（**只支持 16:9 横屏**）。内部构图恒为 1920x1080，输出只能更小（编码时 lanczos 下采样）；竖屏 / 非 16:9 / 上采样 / 非法 fps 会被 filmkit.video_plan 直接报错。",
+      "description": "画幅/帧率（**只支持 16:9 横屏**）。内部构图恒为 1920x1080，输出只能更小（编码时 lanczos 下采样）；竖屏 / 非 16:9 / 上采样 / 非法 fps 会被 filmkit.video_plan 直接报错。",
       "properties": {
         "width": {
           "type": "integer",
@@ -817,12 +817,12 @@
     "qa": {
       "type": "object",
       "additionalProperties": true,
-      "description": "v0.8 质检门禁参数：全片 VMAF/SSIM（G11）与 ASR 回读（G12）。",
+      "description": "质检门禁参数：全片 VMAF/SSIM（G11）与 ASR 回读（G12）。",
       "properties": {
         "vmaf": {
           "type": "object",
           "additionalProperties": true,
-          "description": "全片 VMAF/SSIM 门禁（参考帧由场景函数实时渲染，不是成片抽帧）。注意：本对象里的 enabled 与 qa.require_vmaf 是**惰性键**（v0.8 起草时留下，代码无读取点），真正生效的开关是 mode=off / --vmaf off；filmcheck.py 对惰性键会报 WARN。",
+          "description": "全片 VMAF/SSIM 门禁（参考帧由场景函数实时渲染，不是成片抽帧）。注意：本对象里的 enabled 与 qa.require_vmaf 是**惰性键**（代码无读取点），真正生效的开关是 mode=off / --vmaf off；filmcheck.py 对惰性键会报 WARN。",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -841,7 +841,7 @@
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "VMAF 低于此值 -> fail（默认 92，权威定义在 qavmaf.py 的 VMAF_PASS；标定依据见 references/v08-quality.md）"
+              "description": "VMAF 低于此值 -> fail（默认 92，权威定义在 qavmaf.py 的 VMAF_PASS；标定依据见 references/delivery-gates.md）"
             },
             "warn": {
               "type": "number",

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""qavmaf.py — 全片 VMAF/SSIM 画质门禁（v0.8.0）。
+"""qavmaf.py — 全片 VMAF/SSIM 画质门禁。
 
 为什么要有它
 ------------
@@ -83,7 +83,7 @@ report(film_mp4, tl, scenes_mod, script, *, mode="full", out_json=None,
      · 宽高比不是 16:9 横屏（本项目只做 16:9 缩放输出）；
      · 成片尺寸与 timeline.video 声明的交付尺寸不一致（顶层规格被改动）；
      · 读不出成片分辨率。
-   - v0.8 的"下采样交付"是合法配置：内部构图恒 1920x1080，编码时 lanczos
+   - "下采样交付"是合法配置：内部构图恒 1920x1080，编码时 lanczos
      缩到 1280x720 / 960x540。此时本模块**在成片分辨率下比较**——参考流在
      ffmpeg 滤镜图里用 scale=w:h:flags=lanczos 缩到成片分辨率（与 FrameSink
      编码时同口径，不用 PIL resize）；返回 dict 的 ref_scale 记录映射关系。
@@ -108,7 +108,7 @@ CLI
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "1.0.4"
 
 import argparse
 import importlib.util
@@ -451,7 +451,7 @@ def _as_script(script) -> dict:
 
 # ---------------------------------------------------------------- 参考帧管线（复刻 render.py）
 def _looks_legacy(script) -> bool:
-    """有没有"风格"信息：没有就是 v0.4 legacy 外观（与 stylekit 的判据一致）。"""
+    """有没有"风格"信息：没有就是 legacy 外观（与 stylekit 的判据一致）。"""
     vis = script.get("visual") if isinstance(script.get("visual"), dict) else {}
     mus = script.get("music") if isinstance(script.get("music"), dict) else {}
     return ("style" not in script) and not vis.get("theme") and not mus.get("style")
@@ -460,9 +460,9 @@ def _looks_legacy(script) -> bool:
 def _style_plan(script) -> dict:
     """解析剧本风格计划：**design 优先**，其次 script["_style"]，最后 stylekit。
 
-    为什么必须先看 design：v1.0 之后"这一版长什么样"由 work/design.json 决定，
+    为什么必须先看 design："这一版长什么样"由 work/design.json 决定，
     而 qavmaf 是**独立进程**——它拿到的 script 里没有 render 塞进去的 _style。
-    早先这里直接调 stylekit，于是 design 路径的片子会被解析成 tech-deep（默认风格），
+    直接调 stylekit 会把 design 路径的片子解析成 tech-deep（默认风格），
     参考帧用一套主题、成片用另一套：实测 VMAF 1.50、同源抽查 MAE=0.0384。
     这不是"画质劣化"，是**参考帧根本不是同一部片**。
     """
@@ -515,7 +515,7 @@ ASPECT_TOL = 0.01                 # 宽高比容差（与 filmkit.video_plan 一
 def _declared_out_size(tl, script):
     """交付规格：timeline.video（render.py 写出的快照）优先，其次剧本里的 video 块。
 
-    返回 (out_w, out_h)；未声明时返回 None（老 timeline 升级前生成，行为同 v0.7）。
+    返回 (out_w, out_h)；未声明时返回 None（老 timeline 没有 video 块时的行为）。
     """
     for src in ((tl or {}).get("video"), (script or {}).get("video")):
         if not isinstance(src, dict):
@@ -538,7 +538,7 @@ def _judge_sizes(info, tl, script, comp_w, comp_h):
       "scale"  成片是 16:9 下采样交付，参考流在 ffmpeg 滤镜图里 lanczos 缩到成片尺寸
       "fail"   结构性不符：上采样 / 非 16:9 / 读不出尺寸 / 与声明交付尺寸不一致
 
-    v0.8 的合法配置是"内部构图恒 1920x1080，编码时 lanczos 缩到 1280x720/960x540"。
+    合法配置是"内部构图恒 1920x1080，编码时 lanczos 缩到 1280x720/960x540"。
     上采样不是合法交付（只会把 1080p 包装成更高分辨率），这里明确挡住。
     """
     fw, fh = info.get("width"), info.get("height")
@@ -605,7 +605,7 @@ def _prepare_script(script, tl):
 
 
 def _sub_kw_for(script) -> dict:
-    """从已解析的风格计划里取字幕样式参数（v1.0.2，与 render.py:_sub_kw 同口径）。
+    """从已解析的风格计划里取字幕样式参数（与 render.py:_sub_kw 同口径）。
 
     ⚠ 为什么参考帧必须传这些参数（实测的**误杀好片**缺陷）：
     render.py 的 frames / stills 阶段会传 design 的 visual.subtitle（size/align/
@@ -629,7 +629,7 @@ def _sub_kw_for(script) -> dict:
 
 
 def _draw_subtitle_like_render(frame, text, theme, words, kw=None):
-    """烧字幕，与 render.py 同口径（v0.8 带 words 词边界折行，v1.0.2 带设计字幕样式）。
+    """烧字幕，与 render.py 同口径（带 words 词边界折行与设计字幕样式）。
 
     ⚠ 参考帧不传 words 也是**会误杀好片**的缺陷（实测）：
     render.py 的 frames / stills 阶段调 draw_subtitle 时总会传 words，
@@ -678,7 +678,7 @@ def _draw_ref_frame(scenes, scenes_mod, script, theme, fi, fps, total):
             words = fn(scenes, t, hold) if fn is not None else None
         except Exception:               # noqa: BLE001 —— 词表异常不该让参考帧渲不出来
             words = None
-        # 字幕样式也必须与主渲染路径同源（v1.0.2；见 _sub_kw_for 的实测说明）
+        # 字幕样式也必须与主渲染路径同源（见 _sub_kw_for 的实测说明）
         frame = _draw_subtitle_like_render(frame, text, theme, words,
                                            kw=_sub_kw_for(script))
     fade = 1.0
@@ -705,7 +705,7 @@ def _build_filtergraph(fps, step, threads, has_ssim, vmaf_log, ssim_log, dist_fp
       libvmaf/ssim 的 framesync 会按"最近的下界时间戳"凑对，容易错帧。
     - 抽样（step>1）只对成片做 select，参考侧本来只喂抽中的帧，两边帧数天然相等。
     - split=2：**只渲染一遍**参考帧，同时喂 VMAF 与 SSIM 两个滤镜。
-    - ref_scale：v0.8 下采样交付时，把参考流用 lanczos 缩到成片分辨率再比——
+    - ref_scale：下采样交付时，把参考流用 lanczos 缩到成片分辨率再比——
       与 filmkit.FrameSink 编码时的 -vf scale=out_w:out_h:flags=lanczos 同口径
       （不在 PIL 侧缩，避免两套插值口径混用）。
     """
@@ -923,7 +923,7 @@ def report(film_mp4, tl, scenes_mod, script, *, mode="full", out_json=None,
         warnings.append("ffmpeg 构建不含 ssim 滤镜，本次只算 VMAF（SSIM 记为 skipped）")
     rep["ffmpeg"] = ff
 
-    # ---- 3. 成片探测 + 结构性校验（含 v0.8 下采样交付） ----
+    # ---- 3. 成片探测 + 结构性校验（含下采样交付） ----
     info = _probe_film(film)
     rep["film_info"] = info
     W, H = int(getattr(_K, "W", 1920)), int(getattr(_K, "H", 1080))
@@ -1284,7 +1284,7 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
             fp.write(scenes_src)
         script = {"title": "qavmaf selftest", "lines": [
             {"id": "l01", "text": "一", "sub": "自检"}]}
-        # v1.0.1 起没有内置风格表：合成剧本也必须自带一份**现场生成**的设计，
+        # 没有内置风格表：合成剧本也必须自带一份**现场生成**的设计，
         # 否则 _style_plan() 解析不出主题（"不写 style 就走老外观"的兼容路径已移除），
         # 参考帧无法渲染。这里用 designkit 现场采样（seed 固定 = 可复现）、
         # design_to_plan 与 render 同一口径，**不引入任何写死主题/模板**。
@@ -1293,15 +1293,15 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
             _design = _DK.sample_designs({"topic": "qavmaf selftest"}, n=1, seed=1)[0]
             script["_style"] = _DK.design_to_plan(_design)
         except Exception as e:          # noqa: BLE001 —— 缺 designkit 也要给出可读的 FAIL
-            print("[FAIL] 自检需要 designkit.py 现场生成设计（v1.0.1 无内置风格）：%s" % e)
+            print("[FAIL] 自检需要 designkit.py 现场生成设计（无内置风格）：%s" % e)
             return 1
         scenes = [dict(script["lines"][0], start=0.0, end=n / float(fps),
                        dur=n / float(fps), voice_start=0.0, voice_end=n / float(fps))]
         tl = {"total": n / float(fps), "fps": fps, "frames": n, "scenes": scenes,
               "video": {"out_w": W, "out_h": H, "scale": False}}
-        # v0.8 下采样交付：内部构图仍 1920x1080，交付 1280x720（编码时 lanczos 缩）
+        # 下采样交付：内部构图仍 1920x1080，交付 1280x720（编码时 lanczos 缩）
         tl720 = dict(tl, video={"out_w": 1280, "out_h": 720, "scale": True})
-        # 老 timeline（v0.7 及以前没有 video 块）：只按"构图同尺寸"校验
+        # 老 timeline（没有 video 块）：只按"构图同尺寸"校验
         tl_legacy = {k: v for k, v in tl.items() if k != "video"}
         # 非法：声明 2560x1440 输出（内部构图只有 1080p，等于上采样）
         tl_up = dict(tl, video={"out_w": 2560, "out_h": 1440, "scale": True})
@@ -1376,7 +1376,7 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
             return ok and any_w, "frames_compared=%s" % rep["frames_compared"]
 
         def c_downscale_pass():
-            # v0.8 合法配置：1920x1080 内部构图 -> 1280x720 交付，必须 pass；
+            # 合法配置：1920x1080 内部构图 -> 1280x720 交付，必须 pass；
             # 且与 1080p 同规格成片的 VMAF 差 < 3 分（阈值可比）
             rep = report(film_720, tl720, mod, script, mode="full", log=None)
             v1080 = report(film_ok, mode="full", log=None, **base)["vmaf"]["score"]
@@ -1454,7 +1454,7 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="qavmaf.py",
-        description="全片 VMAF/SSIM 画质门禁：参考帧由场景函数实时渲染（v0.8.0）")
+        description="全片 VMAF/SSIM 画质门禁：参考帧由场景函数实时渲染")
     ap.add_argument("--film", default=None, help="成片路径（mp4）")
     ap.add_argument("--timeline", default=None, help="work/timeline.json")
     ap.add_argument("--scenes", default=None, help="scenes.py（含 draw_frame）")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""grammar.py — 场景语法：这段内容该长成什么构图（v0.9 新增）。
+"""grammar.py — 场景语法：这段内容该长成什么构图。
 
 为什么单独一个模块
 ------------------
@@ -7,8 +7,8 @@
 （scene type: hero/list/stat/compare/...）是两个**正交**维度：
   - kind 决定旁白声线、语气、配乐能量（voicekit / scorekit 读它）；
   - scene type 决定这段画面长什么样（scenes.py 的 _DRAWERS 读它）。
-v0.8 及以前两者被混成一个 kind，而 scenes.py 只有 hook/body/outro 三个绘制器，
-quote/emphasis/calm 全部回落到 body —— 这就是"8 套风格只是换皮肤"的根因。
+两者被混成一个 kind 时，scenes.py 只有 hook/body/outro 三个绘制器，
+quote/emphasis/calm 全部回落到 body —— 画面因此只有三种骨架，换配色也换不掉"每屏一个样"。
 
 把"内容 -> 构图"的选择逻辑独立出来，有三个好处：
   1. 纯函数、只依赖标准库：可以单测，不需要 PIL / TTS / 渲染；
@@ -77,7 +77,7 @@ DOWNGRADE = {
 MAX_REPEAT = 2
 
 # ============================================================================
-# 二、确定性哈希（与 stylekit._digest 同口径：sha1 前 8 位）
+# 二、确定性哈希（sha1 前 8 位；禁 hash()：str hash 每次进程带随机盐）
 # ============================================================================
 
 
@@ -136,7 +136,7 @@ def _narrative_of(line):
     """只取"叙述文字"（标题/正文/副标），**不含 items**。
 
     为什么关键词判断必须排除 items：条目是"要点的载荷"，不是"这段在讲什么"。
-    实测反例：模板片第 3 段正文讲"画质三件事"，条目里写的是
+    实测反例：夹具片第 3 段正文讲"画质三件事"，条目里写的是
     "rawvideo -> libx264 CRF17"，其中 "->" 命中了顺序词表，
     于是整段被误判成"流程轴"——画面上出现一条横轴连着四个不相干的要点。
     条目里的箭头/破折号是排版符号，不是叙事顺序。
@@ -235,7 +235,7 @@ def score_types(line, idx, total, dur, chapter, prev_chapter, prev_types):
         add("outro", 5.0, "末段/收尾")
     # 章节卡是"纯标题卡"：章节变了 + 没有条目 + 标题短 + 段也短，才配得上整屏只有一个编号。
     # 三个条件都是实测加上的：
-    #   · 有 items 的段用章节卡会把要点吃掉（模板片 5 条要点的 body 曾被选成 chapter）；
+    #   · 有 items 的段用章节卡会把要点吃掉（夹具片 5 条要点的 body 曾被选成 chapter）；
     #   · 带数字/引语的段有更具体的构图，章节卡会把信息量砍掉；
     #   · 设计稿规定章节卡 ≤3.4s，长段做章节卡等于"整屏只有一个编号停 6 秒"，观众会走。
     if (chapter and chapter != prev_chapter and n_items == 0
@@ -476,7 +476,7 @@ def plan_scenes(scenes, script=None, plan=None):
       ① plan["chapter_layout"] 显式指定（按章名查，查不到用 layout_default）；
       ② plan["layout_cycle"]（≥2 种版式且没有显式 chapter_layout）：按章节首次
          出现的顺序循环取位，**同一章内版式固定**——防止"全片一张版式"；
-      ③ 都没有：layout_default（与 v1.0.1 完全一致）。
+      ③ 都没有：layout_default。
 
     **没有 chapter 的剧本**：按"每段自成一章"处理（轮换照常推进）。
     为什么不把空 chapter 当成"全片同一章"：那样 layout_cycle 在常见的不写 chapter
@@ -492,7 +492,7 @@ def plan_scenes(scenes, script=None, plan=None):
     prev_variant = {}
     chapter_layout = plan.get("chapter_layout") if isinstance(plan.get("chapter_layout"), dict) else {}
     default_layout = plan.get("layout_default") or "left-stack"
-    # ---- 片内版式轮换（v1.0.2）：design_to_plan 会派生 layout_cycle ----
+    # ---- 片内版式轮换：design_to_plan 会派生 layout_cycle ----
     # 为什么需要：没有它时一章只能用一种版式（layout_default），8 段片子 8 屏同骨架 ——
     # 正好是用户原则 5 说的"同一视频内部大面积/长时间重复"。
     # 生效条件（两条都不满足就与过去逐字节一致，金帧/既有自检不漂）：
@@ -568,9 +568,9 @@ def describe(storyboard):
 def _cli(argv=None):
     """自测入口：python grammar.py [film.json] —— 只读，不渲染。
 
-    v1.0.2：加 argparse（在此之前 `--help` 会被当成 film.json 路径，FileNotFoundError，
+    用 argparse 解析（否则 `--help` 会被当成 film.json 路径，FileNotFoundError，
     与仓库里其它 17 个脚本的 CLI 约定不一致）。不传 film.json 时仍打印用法与 10 类构图，
-    退出码 0（保持 v0.9 的行为，便于老 CI 探活）。
+    退出码 0（便于 CI 探活）。
     """
     import argparse
     import json

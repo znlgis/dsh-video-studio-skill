@@ -1,8 +1,8 @@
 # 音频：采样级混音、配乐与音效
 
-> **v0.3.0 新增三节**（§10–§12 是新的推荐做法，§1–§9.5 是底层原理与手写示例，仍然有效）：
+> 读法：§1–§9.5 是底层原理与手写示例；§10–§12 是推荐做法——
 > §10 提示点系统（声音跟着画面走）、§11 程序化配乐（musicgen 参数化编排）、§12 程序化音效（sfxkit）。
-> 先读 §10——它决定了另外两节怎么用。
+> 先读 §10，它决定了另外两节怎么用。
 
 ## 1. 为什么不用 ffmpeg 混音
 
@@ -28,8 +28,8 @@ wav = bus.mix(normalize=True, fade=0.6)
 | 声道 | 单声道总线 → 双声道输出 | 旁白单声道足够 |
 | 母带响度 | **-16 LUFS ± 1** | 网络视频标准 |
 | 真峰 | **≤ -1 dBTP** | AAC 编码会推高约 0.9 dB，混流前留 1.4 dB 余量 |
-| 旁白与间隙比 | ≥ 12 dB | 人声必须明显突出（v0.7.1 起有代码保障：`mix_film` 旁白侧链） |
-| 配乐电平 | 旁白以下 12–18 dB | 否则听不清字（v0.7.1 默认 `music.gain_db=-12`，旧版 -1.5 不合格） |
+| 旁白与间隙比 | ≥ 12 dB | 人声必须明显突出（有代码保障：`mix_film` 旁白侧链） |
+| 配乐电平 | 旁白以下 12–18 dB | 否则听不清字（默认 `music.gain_db=-12`；-1.5 时背景与台词几乎等高，不合格） |
 
 ## 3. 响度链路（三步）
 
@@ -42,7 +42,7 @@ wav = bus.mix(normalize=True, fade=0.6)
 af = K.loudnorm_two_pass("work/audio.wav", target_i=-16.0, target_tp=-1.5)
 ```
 
-> **下面是"设计建议"，本仓库没有实现**（以前这段被写成既有链路，容易误导）：
+> **下面是"设计建议"，本仓库没有实现**：
 > 「各轨目标 LUFS 旁白 -13.5 / 音效 -24.5 / 配乐 -26.5」+「前瞻限幅器补差额」——
 > 这套是专业分轨母带流程，本项目用"相对增益 + 最终 loudnorm"替代，**代码里没有逐轨 LUFS 对齐，
 > 也没有前瞻限幅器**。要那套效果得自己在 `mix_film` 之后接。
@@ -130,20 +130,20 @@ def loop_noise(dur=8.0, sr=48000, lo=180, hi=900, seed=5):
 
 ```python
 # edge-tts 每条尾部约 0.95 s 静音，55 条累计 61.5 s
-# v0.2 起 filmkit.tts(trim=True) 默认裁掉首尾静音，并把裁剪后的 wav 作为 decode 源：
+# filmkit.tts(trim=True) 默认裁掉首尾静音，并把裁剪后的 wav 作为 decode 源：
 #   meta.path -> xxx.trim.wav, meta.dur = 裁剪后实测时长；原 mp3 保留在 meta.mp3
-# 缓存 key = sha1(text|voice|rate|pitch)；改台词会自动重新合成（v0.1 只判文件存在）
+# 缓存 key = sha1(text|voice|rate|pitch)；改台词会自动重新合成
 pcm = K.decode_pcm(mp3)
 trimmed = K.trim_silence(pcm, thresh_db=-42.0, keep_ms=80)   # 不是 trim_tail：本仓库没这个函数
 
 # 轻 EQ：200 Hz 以下衰减 2 dB（去闷），3 kHz 提 1 dB（清晰度）
 ```
 
-### 7.1 声线（edge voice id）与语气（tone）—— v1.0.1 起没有 persona 身份表
+### 7.1 声线（edge voice id）与语气（tone）：没有 persona 身份表
 
-> **v0.5 的 persona 表（`bright_female` / `narrator_male` 之类 9 个身份）在 v1.0.0 已删除。**
-> 现在 `voice` 只认**裸 edge-tts voice id**（如 `zh-CN-YunxiNeural`）+ 实测响度补偿表
-> `assets/voice_loudness.json`；tone 的 6 档（hook/body/quote/outro/emphasis/calm）保留。
+> **没有 persona 身份表**（`bright_female` / `narrator_male` 之类 9 个身份）：`voice` 只认
+> **裸 edge-tts voice id**（如 `zh-CN-YunxiNeural`）+ 实测响度补偿表 `assets/voice_loudness.json`；
+> tone 的 6 档（hook/body/quote/outro/emphasis/calm）照旧。
 
 ```json
 {"voice": {"id": "zh-CN-YunxiNeural",
@@ -160,14 +160,15 @@ python <SKILL_DIR>/scripts/voicekit.py --plan film.json   # 打印逐句声线�
 - **voice id** 直接就是 edge-tts 的音色名；`--list` 里带的是**实测响度补偿**（不同音色天然差 3–7 dB，
   实测跨度 6.0 dB）。写了表里没有的音色，补偿回落 0 = 旁白电平没校准。
 - **tone** 决定相对偏移与句前/句后停顿：hook / body / quote / outro / emphasis / calm
-  （`body` 严格等于 v0.4 基准：lead 0.62 / tail 0.92 / 所有 delta=0）。
+  （`body` 是基准档：lead 0.62 / tail 0.92 / 所有 delta=0）。
 - **内容规则**会自动升级语气：引号句 → quote（并换到 quote 声线）、数字密集 → emphasis、
   问句/感叹 → 稍快稍亮、长句 → 降速加尾部留白；显式 `lines[].voice/tone` 优先级最高。
 - **jitter**（默认 0.35）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感。
 - **governor** 限制全片最多 `max_distinct` 把声音、相邻句不换人 —— 超过就变成广播剧，不是旁白。
 
-**缓存键 v2**：`sha1(v2|text|voice|rate|pitch|volume|trim|trim_db)`。v0.4 的 key 不含 trim，
-于是把 `trim_silence` 改成 false 仍会命中旧的裁剪版 —— "关了裁剪其实没关"。v1 key 仍然保留给老缓存。
+**缓存键**：`sha1(v2|text|voice|rate|pitch|volume|trim|trim_db)`。key 必须含 trim——
+不含 trim 时把 `trim_silence` 改成 false 仍会命中裁剪版，"关了裁剪其实没关"。
+`v1` key 仍给既有缓存保留。
 
 ## 8. 混音自检（必做）
 
@@ -187,7 +188,7 @@ print("peak:", np.max(np.abs(bus.bus)))      # 期望 < 0.99
 |---|---|---|
 | 后半段静音 | ffmpeg 多输入混流 | numpy 总线 |
 | 爆音/削波 | 先 astype 再判 dtype | 先判 dtype 再转；打印中间峰值 |
-| 听起来糊 | 配乐电平过高 | 配乐压到旁白以下 12–18 dB（v0.7.1 默认 -12 且带旁白侧链） |
+| 听起来糊 | 配乐电平过高 | 配乐压到旁白以下 12–18 dB（默认 -12 且带旁白侧链） |
 | 听不清台词 | 背景与人声响度接近 | `music.gain_db` 降到 -12、`voice_duck_db` 开 6；别用"整体拉高"救 |
 | 响度上不去 | AAC 推高真峰后限幅 | 混流前留 1.4 dB 余量 |
 | 环境音接缝咔 | 直接拼接 | 频域整周期噪声 |
@@ -195,9 +196,6 @@ print("peak:", np.max(np.abs(bus.bus)))      # 期望 < 0.99
 | 字幕比声音慢/快 | 按字数估时长 | 实测反推 |
 
 ## 9.5 两条混音路线的取舍（含实测坑）
-
-> 编号说明：本小节原为「§10」，与后加的「§10 提示点系统」重号（v0.3 加节时的历史遗留）。
-> 现改为 §9.5，保证 §10–§12 三段新内容编号唯一。
 
 ### 路线 A：numpy 采样级叠加（推荐）
 
@@ -234,13 +232,13 @@ bus[i0:i0+len(src)] += src * gain      # 精确到 1/48000 秒
 
 ### 首镜必须从 0 开始
 
-历史事故：第一个镜头 `start ≠ 0`，导致全片音画错位 1.2 s（画面先跑，声音从 0 开始）。**时间轴第一段 start 必须严格等于 0**，且 `voice_start ≥ start`。
+典型事故：第一个镜头 `start ≠ 0`，全片音画错位（实测 1.2 s：画面先跑，声音从 0 开始）。**时间轴第一段 start 必须严格等于 0**，且 `voice_start ≥ start`。
 
 ### BGM 循环的淡出陷阱
 
 BGM 素材自带淡出尾音，被 `-stream_loop` 循环后会在每个接缝处"死一下"。做法：循环时只取素材的**稳态段**（裁掉头尾淡入淡出），或改用频域整周期噪声。
 
-## 10. 提示点系统（v0.3.0，先读这一节）
+## 10. 提示点系统（先读这一节）
 
 **问题**：手工把音效放到"第 12.5 秒"，只要片子里改一句台词、加一个停留窗口、把 BPM 从 120 改成 100，
 所有音效就全错位。改一次要重新对一遍时间——这就是为什么很多程序化视频"声音和画面对不上"。
@@ -306,12 +304,10 @@ python qa_frames.py out/film.mp4 --cues work/cues.json   # 看音画同步 dt
 **音画同步 dt > 60 ms 就是错**：人眼/耳对 40–60 ms 以内的错位不敏感，超过就会"感觉哪里不对但说不出来"。
 dt 大的典型原因：cue 挂在字幕出现的时刻上，而画面重击晚 100 ms——应该挂在动画时刻上。
 
-## 11. 程序化配乐（musicgen，v1.0.1）
+## 11. 程序化配乐（musicgen）
 
-> **v1.0.1 起没有「配乐模板」了。** 以前这一节讲的是 scorekit 的 9 套 `MUSIC_STYLES`
-> 风格表（选一个 id 得到一种配乐性格）——那套表已删除。现在配乐由 `musicgen.py`
-> 按参数**现场编排**：没有可选曲风，只有参数。下面仍然是「一张和弦表贯穿全片」的技术思路，
-> 实现落到了参数化编排器上。
+> **没有「配乐模板」。** 配乐由 `musicgen.py` 按参数**现场编排**：没有可选曲风，也没有风格表，
+> 只有参数。下面仍是「一张和弦表贯穿全片」的技术思路，实现落在参数化编排器上。
 
 ```python
 import musicgen as MG
@@ -356,7 +352,7 @@ MG.save("work/music.wav", samples)
 - 同 seed 必须逐采样一致（`np.random.default_rng(seed)`，不许用全局 `np.random`）。
 - 配乐只保证"不削波、不直流、峰值 ≤ -1 dBFS"；**最终响度交给 ffmpeg loudnorm**。
 
-## 12. 程序化音效（sfxkit，v0.3.0）
+## 12. 程序化音效（sfxkit）
 
 ### 12.1 为什么不"画波形"
 
@@ -423,47 +419,47 @@ out.append({"at": "%s+0.3" % s["id"], "type": "text_stream",
 `sfxkit` 的算法思想改编自 `ai-history-film`（MIT）的 `sfx/` 包，实现为本项目单文件重写；
 文件头已注明出处。配方名、参数名保持与上游一致，方便对照上游文档。
 
-## 13. 片间差异与片内分离（v0.7 新增）
+## 13. 片间差异与片内分离
 
-> 完整契约与改动清单见 **references/audio-variation.md**；这里只记"怎么用、怎么验"。
+> 完整契约见 **references/audio-variation.md**；这里只记"怎么用、怎么验"。
 
-### 13.1 为什么 v0.5 之后还会"差不多"
+### 13.1 为什么"差不多"
 
-v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具体样子**：
+"每片都不一样"不能只靠随机，得让**内容进结构**；下面三种做法就会让片子"差不多"：
 
 - 配乐：内容指纹只进 `seed`（音色细节），和弦进行/动机/鼓型/段落骨架全固定
-  → 同风格下两段 20 s 配乐相关性 **0.966**（实测）。
-- 音效：`CueBus.build_audio` 的 seed 是 `seed_base + i`（只跟 cue 顺序）
+  → 两段 20 s 配乐相关性 **0.966**（实测）。
+- 音效：`CueBus.build_audio` 的 seed 取 `seed_base + i`（只跟 cue 顺序）
   → 同一批 cue 跨片逐样本相同。
 - 片内：提示音硬编码 D 小调五声、配乐过门与 sfx 转场在同一段落边界撞车、duck 只有 3 dB。
 
-### 13.2 现在怎么变
+### 13.2 怎么变
 
 | 层 | 行为 | 开关 |
 |---|---|---|
-| 配乐和声/动机/鼓型 | v0.7 时代由内容指纹驱动结构变奏（每两小节、±1 级数、ghost 击）；**v1.0.1 起改由 musicgen 的编排参数直接决定**（没有可挑的曲风表） | `music.seed_from_content` 仍控制 seed 是否掺指纹；结构差来自 `music.sections` / `music.progressions` 等参数，而不是「换一套风格」 |
-| 音效 seed | `content_seed(base, style, fp, type, t)`，随内容变 | `sfx.content_seed`（默认 true；false = 旧 seed_base+i） |
+| 配乐和声/动机/鼓型 | 由 musicgen 的编排参数直接决定：`sections` / `progressions` / `motif` / `drums` 参与事件展开（没有可挑的曲风表） | `music.seed_from_content` 控制 seed 是否掺内容指纹；结构差来自上述编排参数，而不是「换一套风格」 |
+| 音效 seed | `content_seed(base, style, fp, type, t)`，随内容变 | `sfx.content_seed`（默认 true；false = 退回 `seed_base + i`） |
 | 提示音调性 | `in_key(freq, key)` 跟随配乐调性 | `CueBus.build_audio(key=...)`，render.py 自动传 |
 | 段落边界 | [边界-2.2s, 边界] 内的 whoosh/riser 自动 -3 dB | `sfx.duck_transitions`（默认 true） |
 | duck | 按风格 3.0–5.5 dB（默认 4.0） | `music.duck_db` 显式覆盖 |
 
-**legacy 兼容**：不写 `style` 字段 = 全部旧行为（配乐逐样本一致、音效 seed_base+i、提示音 Dm 五声）。
+**兼容开关**：`sfx.content_seed: false` 时音效退回 `seed_base + i`（逐样本可复现）；`key` 为空时提示音回落 D 小调五声。
 
-### 13.2.1 旁白优先（v0.7.1）
+### 13.2.1 旁白优先
 
 视频以旁白为主，**BGM 与音效是可选层**：它们负责情绪与重音，不能抢字。具体做法：
 
 | 手段 | 默认值 | 说明 |
 |---|---|---|
-| 配乐基线 | `music.gain_db=-12` | 旧版 -1.5 时背景与台词几乎等高；-12 是"人声明显压住背景"的经验线 |
+| 配乐基线 | `music.gain_db=-12` | -1.5 时背景与台词几乎等高；-12 是"人声明显压住背景"的经验线 |
 | 旁白侧链（配乐） | `voice_duck_db=6` | 有人声的地方再压 6 dB；间隙由包络自动恢复（不会整片闷住） |
 | 旁白侧链（音效） | `voice_duck_sfx_db=3` | 提示音/转场也让人声 |
 | 语音阈值 | `voice_thresh_db=-42` / `voice_floor_db=-60` | 10 ms 块 RMS 映射成 0~1 的活动度，起音快、释放慢 |
 | 旁白自身 | `voice_gain=1.0` | **不被任何侧链影响**——旁白优先不等于"压人声" |
 | SNR 兜底 | `guard_snr_db=12` / `guard_cap_db=30` | 混音后实测人声活跃区的人声/背景差，不足就整体补压背景（只压背景） |
 
-实测（真实 edge-tts 旁白 + scorekit 配乐）：旧混音 **SNR -4.2 dB**（背景比台词还响，就是"听不清"的原因），
-新混音 **SNR 12.0 dB**；合成信号口径 15.0 dB，真实配乐素材口径 12.9 dB。
+实测（真实 edge-tts 旁白 + scorekit 配乐）：不做上面这些处理时 **SNR -4.2 dB**（背景比台词还响，
+就是"听不清"的原因）；按上表默认值 **SNR 12.0 dB**；合成信号口径 15.0 dB，真实配乐素材口径 12.9 dB。
 设 `voice_duck_db=0` / `voice_duck_sfx_db=0` / `guard_snr_db=0` 可分别关掉对应机制。
 
 ### 13.3 验收：别靠耳朵，跑脚本
@@ -472,13 +468,13 @@ v0.5 的 style pack 决定的是**风格**（8 套），不是**这一部的具�
 python <REPO>/tools/audio_similarity.py --strict   # 在包根执行
 ```
 
-A 组量"同风格换内容指纹"和"换风格"的相关性；B 组量"跨片音效是否还逐样本相同"（同时验
-legacy 兼容）；C 组读 `render.py` 的 duck 默认值并打印质心对照；
+A 组量"同参数换内容指纹"和"换编排参数"的相关性；B 组量"跨片音效是否还逐样本相同"（同时验
+位置派生可复现）；C 组读 `render.py` 的 duck 默认值并打印质心对照；
 D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何一项不达标 exit 1。
 
 ### 13.4 改音频代码后的自检清单
 
-1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C 三组达标（在包根执行）。
-2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **67 条**全 PASS（第 33 条盯 legacy 逐样本兼容，第 35–38 条盯旁白优先，第 39 条盯音频边界）。
+1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C/D 四组达标（在包根执行）。
+2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **69 条**全 PASS（第 33 条盯内容派生 seed、第 35–38 条盯旁白优先，第 39 条盯音频边界）。
 3. `python musicgen.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS（musicgen 的 26 项覆盖编排与确定性）。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

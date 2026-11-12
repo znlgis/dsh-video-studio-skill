@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""filmkit.py — DeepSeek 4.1 Flash + DSH 视频生产内核（v0.3.0）。
+"""filmkit.py — DeepSeek 4.1 Flash + DSH 视频生产内核。
 
-设计原则（v0.2.0 起，全部来自一次 11 分钟真实成片的复盘）：
+设计原则（全部来自真实成片的复盘）：
 1. 质检门禁必须真的会失败。门禁失效比没有门禁更危险。
 2. 缓存必须校验输入。只判断"文件存在"会让"改一句台词不生效"静默发生。
 3. 失败要报错，不要静默降级。尺寸不符、缺字形、峰值爆表都要看得见。
 4. 公共函数可独立测试：不依赖当前目录、不依赖上一次调用留下的状态。
 
-v0.3.0 新增（声音与提示点，借鉴 ai-history-film）：
+声音与提示点：
 5. CueBus：画面登记提示点 -> work/cues.json -> 按提示点合成音效轨（声音跟着画面走，不靠"对齐猜"）。
 6. 立体声总线：AudioBus(channels=2) / wav_write 自动识别单双声道；配乐与音效可以声像。
 7. hold：每句语音结束后额外停留秒数（"让观众看清楚"的停留窗口，不用整片放慢）。
@@ -15,7 +15,7 @@ v0.3.0 新增（声音与提示点，借鉴 ai-history-film）：
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "1.0.4"
 
 import hashlib
 import json
@@ -37,9 +37,9 @@ SR = 48000
 SAFE = (64, 58, 1856, 974)
 SUB_BAND = (180, 872, 1740, 1030)   # 字幕带：两行 + 距画面底部 50px，永不被裁
 SUB_MAX_CHARS = 24                  # 单行字幕中文字数上限
-SUB_MAX_HOLD = None                 # None = 字幕覆盖整句（v0.2.0 默认）；设数字则钳住最大停留秒数
+SUB_MAX_HOLD = None                 # None = 字幕覆盖整句（默认）；设数字则钳住最大停留秒数
 
-# v0.3.0：提示点里好写的语义别名 -> sfxkit 配方名（sfxkit 自己也有同一张表，两边保持一致）
+# 提示点里好写的语义别名 -> sfxkit 配方名（sfxkit 自己也有同一张表，两边保持一致）
 CUE_ALIASES = {
     "blip": "ui_blip", "click": "ui_click", "relay": "relay_click", "chirp": "data_chirp",
     "sub": "sub_drop", "reverse": "reverse_swell", "rewind": "tape_rewind",
@@ -49,8 +49,8 @@ CUE_ALIASES = {
 
 # ---------------------------------------------------------------- ffmpeg
 # ffmpeg 探测必须 fail-closed：候选"文件存在"不等于"能用"。
-# 本机曾静默选中 C:\Program Files\EVCapture\ffmpeg.exe（2019 旧版，没有 xfade），
-# 一路跑到滤镜阶段才挂，报错离原因太远。现在每个候选都必须真的跑通
+# 一个只"存在"却没 xfade 的旧构建（例如 C:\Program Files\EVCapture\ffmpeg.exe）
+# 会一路跑到滤镜阶段才挂，报错离原因太远。所以每个候选都必须真的跑通
 # "ffmpeg -version" 且 returncode == 0 才算可用（超时/异常一律视为不可用）。
 _FFMPEG_ENV = "FILMKIT_FFMPEG"
 _FFMPEG_STRICT_ENV = "FILMKIT_FFMPEG_STRICT"
@@ -195,7 +195,7 @@ def _resolve_ffmpeg():
 
 
 def _find_ffmpeg() -> str:
-    """旧内部接口保留：返回探测到的 ffmpeg 可执行路径。"""
+    """内部接口：返回探测到的 ffmpeg 可执行路径。"""
     return _resolve_ffmpeg()[0]
 
 
@@ -219,7 +219,7 @@ PY = sys.executable
 def _find_ffprobe(ffmpeg=None) -> str:
     """ffprobe 定位：先找 ffmpeg 同目录的 ffprobe(.exe)，再用 shutil.which 兜底。
 
-    不再做 FFMPEG.replace("ffmpeg", "ffprobe")：ffmpeg 被改名（如 ffmpeg-full.exe）时
+    不做 FFMPEG.replace("ffmpeg", "ffprobe")：ffmpeg 被改名（如 ffmpeg-full.exe）时
     字符串替换出来的路径根本不存在，调用要到远处才炸。
     """
     ff = str(ffmpeg or FFMPEG)
@@ -280,7 +280,7 @@ FONT_CANDIDATES = {
 }
 
 
-# ---------------------------------------------------------------- 字体族（v0.5.0）
+# ---------------------------------------------------------------- 字体族
 # 换片要换气质，字体是第一眼。但"换字体族"必须同时换**所有**缓存键，
 # 否则会出现"用 A 字体量宽度、用 B 字体绘制"——文字直接溢出安全区。
 # 每一族都给中文回退：找不到 serif/kai 时退到同族 reg 再退 sans，**绝不退到 mono**（无中文字形）。
@@ -317,7 +317,7 @@ FAMILY_IDS = tuple(FONT_FAMILIES.keys())
 
 
 def font(size: int, weight: str = "bold", family: str = "sans") -> ImageFont.FreeTypeFont:
-    """取字体。family 缺省 sans = v0.4 行为（老调用 font(46, "reg") 输出不变）。"""
+    """取字体。family 缺省 sans，所以老调用 font(46, "reg") 输出不变。"""
     fam = str(family or "sans")
     if fam not in FONT_FAMILIES:
         fam = "sans"                 # 未知族名退到 sans，不让拼写错误炸掉渲染
@@ -354,7 +354,7 @@ def _mask_sig(f, ch):
 def glyph_missing_chars(text: str, size: int = 32, weight: str = "reg"):
     """返回字体缺字形的字符（缺字会被画成 .notdef 方块，脚本零报错）。
 
-    实测：msyhbd 缺 ✓ × >= <= 等；v0.2.0 起 qa 会自动扫剧本里的上屏文字。
+    实测：msyhbd 缺 ✓ × >= <= 等；所以 qa 会自动扫剧本里的上屏文字。
     """
     if not text:
         return []
@@ -558,7 +558,7 @@ def _split_with_seps(text, words):
 
 
 def wrap_by_words(text, f, max_w, words):
-    """按**真实词边界**折行（v0.8）。词表对不上原文时返回 None（调用方回退字符折行）。
+    """按**真实词边界**折行。词表对不上原文时返回 None（调用方回退字符折行）。
 
     为什么值得：中文按字符折行会在一句话的中间硬切（"…不是读/稿"），
     而词边界是 TTS 自己切的分词结果，折出来的断点读起来自然，也更容易和
@@ -589,8 +589,8 @@ def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
                   family="sans", words=None):
     """字幕折行：优先两行，超宽逐级缩字号。返回 (lines, font)。
 
-    v0.8：传 words（句内词表）时优先按词边界折行；词表对不上原文、或折出来
-    仍超过 max_lines 时，**回退到原来的字符折行**——旧项目的排版不会因为升级而变样。
+    传 words（句内词表）时优先按词边界折行；词表对不上原文、或折出来
+    仍超过 max_lines 时，**回退到字符折行**——不带词表的排版逐像素不变。
     """
     for sz in (size, int(size * 0.92), int(size * 0.84), int(size * 0.76)):
         f = font(sz, weight, family)
@@ -613,10 +613,10 @@ def fit_sub_lines(text: str, max_lines=2, max_w=1560, size=46, weight="reg",
 
 
 def subtitle_kwargs(plan):
-    """从已解析的计划里取字幕样式参数（v1.0.2）。
+    """从已解析的计划里取字幕样式参数。
 
     返回可直接 ``draw_subtitle(..., **kw)`` 的 dict；计划里没有 subtitle 时返回空 dict
-    （= 模块默认值 = 过去写死的行为，老项目逐像素不变）。
+    （= 模块默认值 = 最朴素的字幕带，逐像素不变）。
 
     为什么放在 filmkit 而不是 render：**参考帧渲染路径**（qavmaf 的 _draw_ref_frame）
     与主渲染路径必须用同一份字幕参数，否则同源的两帧字幕字号不同，VMAF 会被
@@ -648,13 +648,13 @@ def subtitle_kwargs(plan):
 def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None,
                   theme=None, family=None, words=None, align="center",
                   plate_alpha=None, radius=10, color=None, max_lines=2):
-    """烧字幕。v0.5.0 加 theme（stylekit 主题）与 family（字体族）；
-    theme=None 时与 v0.4 逐像素一致。v0.8 加 words（按词边界折行）。
+    """烧字幕。theme（stylekit 主题）与 family（字体族）可选：
+    theme=None 时用内置墨色/黑背板，逐像素可控。words 传句内词表时按词边界折行。
 
-    v1.0.2 加 align / plate_alpha / radius / color / max_lines（全部可选，
-    默认值 = 过去写死的行为，所以老调用逐像素不变）。为什么加：字幕样式过去是
-    **模块常量**，任何两条片子的字幕带都一模一样 —— 这正是用户说的"大面积重复"。
-    现在这些参数由 design.json 的 visual.subtitle 决定（见 designkit.subtitle_of）。
+    align / plate_alpha / radius / color / max_lines 全部可选，
+    默认值 = 最朴素的字幕带，所以不带这些参数的调用逐像素不变。为什么是参数：
+    字幕样式若是**模块常量**，任何两条片子的字幕带都一模一样 —— 这正是"大面积重复"。
+    这些参数由 design.json 的 visual.subtitle 决定（见 designkit.subtitle_of）。
     """
     if not text or alpha <= 0.01:
         return img
@@ -714,10 +714,10 @@ def draw_subtitle(img, text: str, alpha=1.0, size=46, y=None, band_w=None,
 def wav_write(path, samples, sr=SR, channels=None):
     """写 16-bit PCM WAV。channels=None 时按数组形状自动判断（二维 = 立体声）。
 
-    v0.3.0：支持立体声（配乐/音效要声像）。老调用 wav_write(p, mono) 行为不变。
+    支持立体声（配乐/音效要声像）；wav_write(p, mono) 这类单声道调用行为不变。
     """
     a = np.asarray(samples, dtype=np.float32)
-    # 非有限值必须报错：旧实现 np.clip 保留 NaN/Inf，astype(int16) 把 NaN 静默写成 0、
+    # 非有限值必须报错：np.clip 会保留 NaN/Inf，astype(int16) 把 NaN 静默写成 0、
     # 把 Inf 写成 undefined，wav 里出现"随机哑音"且函数还返回 nan 峰值（下游只看得到 no）。
     if a.size and not np.all(np.isfinite(a)):
         bad = int(a.size - np.count_nonzero(np.isfinite(a)))
@@ -752,8 +752,8 @@ def wav_write(path, samples, sr=SR, channels=None):
 def wav_read(path):
     """读 PCM WAV（16 / 24 / 32-bit），返回 float32 数组：单声道 (n,) / 立体声 (n,2)。
 
-    v0.3.0 起支持 24-bit：musicgen / scorekit 落盘都用 PCM_24（多 8 dB 动态余量），
-    而 v0.2 的 wav_write 只写 16-bit。读取端必须两种都吃。
+    必须同时吃 16-bit 与 24-bit：musicgen / scorekit 落盘都用 PCM_24（多 8 dB 动态余量），
+    而 wav_write 只写 16-bit。
     """
     with wave.open(str(path), "rb") as w:
         n_ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
@@ -820,7 +820,7 @@ def trim_silence_edges(pcm, sr=SR, thresh_db=-42.0, keep_ms=80):
 class AudioBus:
     """采样级音频总线：确定性、1/SR 精度、可单层重放、可中途打印峰值。
 
-    channels=1 为单声道（v0.2 默认行为，向后兼容）；channels=2 时每个来源自动展开成
+    channels=1 为单声道（默认）；channels=2 时每个来源自动展开成
     立体声：单声道来源用 pan 定位，立体声来源原样保留。配乐/音效要做声像时必须用 2。
     """
 
@@ -856,7 +856,7 @@ class AudioBus:
         s = np.asarray(src, dtype=np.float32)
         if i0 < 0:
             # 负起点 = 从 0 秒开始、裁掉前面 |i0| 个采样（与 sfxkit._place 同口径）。
-            # 旧实现把负 i0 直接当负下标切片，n 变成 0 后广播崩（place(src, -0.25) 必炸）。
+            # 把负 i0 直接当负下标切片会让 n 变成 0、随后广播崩（place(src, -0.25) 必炸）。
             if i0 <= -len(s):
                 return self
             s, i0 = s[-i0:], 0
@@ -890,7 +890,7 @@ class AudioBus:
         if not (float(seg) > 0.0):
             # seg=0 时 t 不前进 -> while 变成死循环（100000 次上限只是"慢死"，
             # 6 秒片实测 >2 分钟）。schema 只约束 seg>=0，必须在入口拒绝。
-            raise ValueError("music_bed: seg 必须 > 0，收到 %r（v0.2 和弦床的段长，默认 4.0）"
+            raise ValueError("music_bed: seg 必须 > 0，收到 %r（和弦床的段长，默认 4.0）"
                              % (seg,))
         while t < self.total:
             freqs = chords[idx % len(chords)]
@@ -931,8 +931,8 @@ class AudioBus:
         return out
 
 
-# ---------------------------------------------------------------- 提示点（v0.3.0）
-# 思路来自 ai-history-film：画面在"该响一下"的地方登记一个提示点，音频阶段按提示点合成音效轨。
+# ---------------------------------------------------------------- 提示点
+# 画面在"该响一下"的地方登记一个提示点，音频阶段按提示点合成音效轨。
 # 这样声音跟着画面走，不需要人肉对时间；换 BPM/改停留窗口后，提示点仍然对得上。
 
 CUE_BASE_DB = {
@@ -951,9 +951,9 @@ def cue_time(at, scenes=None, total=None):
       "abs:12.5" / 12.5      -> 绝对秒
       "l03+0.35" / "l03-0.2" -> 场景 id 加/减偏移（相对场景 start）
       "l03"                  -> 场景起点
-      "l03:w2" / "l03:w2+0.1" -> **词锚点**（v0.8）：该句第 2 个词的起点 + 偏移。
+      "l03:w2" / "l03:w2+0.1" -> **词锚点**：该句第 2 个词的起点 + 偏移。
         下标从 1 开始（w1 = 第一个词）；找不到该词时**退化为句偏移**并告警，
-        不让一个写错的锚点把整条 cues 链路炸掉（与 v0.7.2 的"跳过并留痕"一致）。
+        不让一个写错的锚点把整条 cues 链路炸掉（与"跳过并留痕"同一口径）。
     """
     if isinstance(at, (int, float)):
         return round(float(at), 3)
@@ -1014,7 +1014,7 @@ def scenes_anchors(scenes):
 
 
 def content_seed(base: int, style: str, content_fp: str, recipe: str, t: float) -> int:
-    """内容派生 seed（v0.7）：同影片同 cue 稳定，不同影片同一位置也换音色细节。
+    """内容派生 seed：同影片同 cue 稳定，不同影片同一位置也换音色细节。
 
     公式与 sfxkit.content_seed 一致（references/audio-variation.md §3.1）：
         sha1("v0.7|<base>|<style>|<content_fp>|<recipe>|<t 三位小数>") -> 前 8 位 hex -> % 9000 + 1000
@@ -1068,7 +1068,7 @@ class CueBus:
         """按时间排序、去掉明显无效项（超过片长 2 秒 / 负时刻），并**真的**告警。
 
         为什么必须告警：st_sfx 只把 build_audio 的产物当音效轨，被丢掉的 cue 不会进
-        任何报告；以前这里静默 continue（文档却写着"丢弃并告警"），少一个提示音时
+        任何报告；静默 continue（文档却写着"丢弃并告警"）时少一个提示音，
         用户只能靠听。st_sfx 会调两次 resolved()（自己一次 + build_audio 内部一次），
         所以只在**第一次**发现丢弃时打一条汇总，避免同一件事刷两遍。
         """
@@ -1131,17 +1131,17 @@ class CueBus:
                     style=None, content_fp=None, key=None):
         """按提示点合成音效轨 -> (n,2) float32。
 
-        依赖 scripts/sfxkit.py（v0.3.0 新增）。缺 sfxkit 时直接报错，不静默出哑片。
+        依赖 scripts/sfxkit.py。缺 sfxkit 时直接报错，不静默出哑片。
         未知提示点类型：告警一次并跳过（不 crash 整片混音）。
         提示点参数非法（配方不认识的关键字 / 取值连枚举校验都过不了，TypeError 或
         ValueError）：该条跳过并汇总 [WARN]，其余正常落位——不静默改渲染默认音色，
         也不因一条 cue 写错丢整条音效轨。
 
-        v0.7 音频差异化（见 references/audio-variation.md）：
+        音频差异化（见 references/audio-variation.md）：
           - style / content_fp 同时给时，每条 cue 的 seed 由
             content_seed(seed_base, style, content_fp, type, t) 派生 -> 不同影片同一 cue
-            位置也拿到不同音色细节；任一为 None 时退回 seed_base + i（旧路径逐样本兼容）。
-          - key 非空时透传给配方（提示音调性跟随配乐，不再硬编码 Dm）。
+            位置也拿到不同音色细节；任一为 None 时退回 seed_base + i（逐样本与基线一致）。
+          - key 非空时透传给配方（提示音调性跟随配乐，不硬编码 Dm）。
         """
         try:
             import sfxkit as SX
@@ -1179,9 +1179,9 @@ class CueBus:
             try:
                 x = SX.render(kind, seed=seed, **params)
             except (TypeError, ValueError) as err:
-                # 只对"配方不认识这个关键字"逐个删参重试（v0.4 严格签名配方的兼容）；
+                # 只对"配方不认识这个关键字"逐个删参重试（兼容严格签名的旧配方）；
                 # 参数值非法（cue 里 pitch=None 之类）或配方内部 TypeError 不是签名问题，
-                # 必须报告——旧实现一路退化成"只传 seed"，把坏参数静默渲染成默认音色
+                # 必须报告——一路退化成"只传 seed"会把坏参数静默渲染成默认音色
                 # （用户改了 cue 参数却听不出变化，日志里一个字都没有）。
                 extra = dict(params)
                 while True:
@@ -1230,9 +1230,9 @@ class CueBus:
 def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
     """旁白的语音活跃度包络（0~1）：给"旁白优先"混音用的侧链源。
 
-    为什么需要它：v0.7 之前配乐基线只比旁白低 1.5 dB（`music.gain_db=-1.5`），
+    为什么需要它：配乐基线只比旁白低 1.5 dB（`music.gain_db=-1.5`）时，
     而视频是"以旁白为主"的——背景只要不明显低于人声，观众就得费力分辨字。
-    `mix_film` 现在用这条包络在**有人声的地方**把配乐/音效再压下去，
+    `mix_film` 用这条包络在**有人声的地方**把配乐/音效再压下去，
     没人声的间隙自动让背景回来（否则整片背景像被闷住）。
 
     实现：10 ms 块级 RMS -> dB -> 在 [floor_db, thresh_db] 之间线性映射成 0~1 ->
@@ -1247,7 +1247,7 @@ def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
     block = max(1, int(sr * float(block_s)))
     nb = n // block
     if nb == 0:                                # 极短旁白（< 10 ms）：整段当一块并补零
-        nb = 1                                 # （旧实现 reshape(1, block) 直接崩）
+        nb = 1                                 # （直接 reshape(1, block) 会崩）
         x = np.concatenate([x, np.zeros(block - n, dtype=np.float32)])
     seg = x[: nb * block].reshape(nb, block)
     rms = np.sqrt(np.mean(seg * seg, axis=1) + 1e-12)
@@ -1257,7 +1257,7 @@ def voice_env(voice, sr=SR, block_s=0.01, thresh_db=-42.0, floor_db=-60.0):
 
     def _smooth(v, tau_s):
         # 极短旁白时块数可能比核还少：np.convolve(mode="same") 返回 max(len(v), k) 长度，
-        # 两个长度不同的平滑结果再做 np.maximum 会广播失败（v0.7.1 起 voice_env 崩在这里）。
+        # 两个长度不同的平滑结果再做 np.maximum 会广播失败（voice_env 曾崩在这里）。
         k = min(max(1, int(sr * tau_s / block)), len(v))
         w = np.ones(k, dtype=np.float32) / k
         return np.convolve(v, w, mode="same")
@@ -1376,11 +1376,11 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
              guard_snr_db=12.0, guard_cap_db=30.0):
     """三总线混音：旁白 + 配乐 + 音效 -> 立体声 float32。
 
-    **旁白优先**（v0.7.1 起是硬行为，不是文档口号）：
+    **旁白优先**（硬行为，不是文档口号）：
       1. 旁白电平固定 `voice_gain=1.0`，不被任何侧链影响；
       2. 有人声的地方，配乐再压 `voice_duck_db`（默认 6 dB）、音效再压 `voice_duck_sfx_db`（默认 3 dB）
          —— 保证"人声比背景响 ≥12 dB"这条可听清线；没人声的间隙自动恢复；
-      3. 音效响时配乐额外让位（`duck_db`，v0.7 默认 4 dB）；
+      3. 音效响时配乐额外让位（`duck_db`，默认 4 dB）；
       4. 最后统一做峰值保护（真正的响度标准化交给 ffmpeg 的 loudnorm）。
 
     `voice_duck_db=0` / `voice_duck_sfx_db=0` 可单独关掉旁白优先让位（旧片对比用）。
@@ -1413,9 +1413,10 @@ def mix_film(voice, music=None, sfx=None, total=None, sr=SR,
     if not n:
         return np.zeros((0, 2), dtype=np.float32)
 
-    # v0.7.1 旁白优先：先算背景（配乐 + 音效各自让位），再用 SNR 兜底确认"人声压得住"。
-    # 侧链与 SNR 都用"实际交付的人声"（乘过 voice_gain）：voice_gain=0.5 时旧实现用未缩放
-    # 人声算 SNR，日志写"人声/背景=12 dB 达标"、交付出去只有 6 dB（兜底承诺失效）。
+    # 旁白优先：先算背景（配乐 + 音效各自让位），再用 SNR 兜底确认"人声压得住"。
+    # 侧链与 SNR 都用"实际交付的人声"（乘过 voice_gain）：若用未缩放的
+    # 人声算 SNR，voice_gain=0.5 时日志写"人声/背景=12 dB 达标"、交付出去只有 6 dB
+    # （兜底承诺失效）。
     venv_kw = dict(sr=sr, thresh_db=float(voice_thresh_db), floor_db=float(voice_floor_db))
     vg = None
     if v is not None:
@@ -1489,30 +1490,30 @@ MUSIC_PLANS = ("score", "file", "bed", "off", "none", "missing-file", "missing-b
 def music_plan(script, has_music_file: bool = False):
     """统一判定"这次配乐从哪来"，返回 (plan, 说明)。
 
-    为什么要一个统一函数：v0.3.0 的 st_score 说"mode=off 不生成配乐"，但 st_audio
-    又无条件读已存在的 work/music.wav —— 结果用户把 mode 改成 off / 删掉 bpm 之后，
-    上一轮跑出来的旧配乐仍被混进成片（README/SKILL 写的是 off = 不要配乐）。
-    现在 score 与 audio 两个 stage 都用这一份判定，口径不会再打架。
+    为什么要一个统一函数：若 st_score 说"mode=off 不生成配乐"、而 st_audio
+    又无条件读已存在的 work/music.wav —— 用户把 mode 改成 off / 删掉 bpm 之后，
+    上一轮跑出来的旧配乐仍被混进成片（语义上 off = 不要配乐）。
+    score 与 audio 两个 stage 都用这一份判定，口径不会打架。
 
     plan 取值：
       score         现场编排配乐（musicgen -> work/music.wav）；scorekit 仅剩 legacy 原语
       file          外部提供 / 上一轮留下的 work/music.wav
-      bed           v0.2 和弦床（music.chords）
+      bed           和弦床（music.chords）
       off           明确不要配乐（mode=off/none 或 music.enabled=false）
       none          没配 bpm / chords / music.wav，本次没有配乐
       missing-file  mode=file 但没有 work/music.wav（调用方应明确报错）
       missing-bpm   mode=score 但没有 bpm（调用方应明确报错）
       unknown-mode  music.mode 写了不认识的值（调用方应明确报错）
 
-    兼容语义（不写 music.mode，即 v0.2 老项目）：
+    兼容语义（不写 music.mode）：
       有 bpm -> score；没 bpm 但有外部 music.wav -> file；再退和弦床 -> bed。
     """
     mus = script.get("music") or {}
     raw = str(mus.get("mode") or "").strip().lower()
-    # v1.0.1 修：设计路径的配乐参数在 script["_style"]["music"] 里（designkit 生成），
-    # 而 film.json 顶层通常**没有** music 块。早先只看顶层，于是"有设计但没写 music"
-    # 被判成 none（本片无配乐）—— 实测设计里 bpm=122/mood=driving，配乐却整段没出。
-    # 现在顶层与设计计划合并：显式写 music 的字段优先（用户能覆盖设计），没写的用设计值。
+    # 设计路径的配乐参数在 script["_style"]["music"] 里（designkit 生成），
+    # 而 film.json 顶层通常**没有** music 块。只看顶层的话，"有设计但没写 music"
+    # 会被判成 none（本片无配乐）—— 实测设计里 bpm=122/mood=driving，配乐却整段没出。
+    # 所以顶层与设计计划合并：显式写 music 的字段优先（用户能覆盖设计），没写的用设计值。
     plan_mus = ((script.get("_style") or {}).get("music") or {})
     if plan_mus:
         merged = dict(plan_mus)
@@ -1522,7 +1523,7 @@ def music_plan(script, has_music_file: bool = False):
             raw = str(mus.get("mode") or "params").strip().lower()
             if raw == "params":
                 raw = ""            # params == 默认"按参数现场生成"
-    # v0.5.0：bpm 可以是 "auto"（由风格梯度和内容指纹决定）。
+    # bpm 可以是 "auto"（由风格梯度和内容指纹决定）。
     # 这里只判断"有没有 bpm 这个概念"，具体数值由 st_score 传给配乐引擎。
     bpm = mus.get("bpm", script.get("bpm"))
     if raw == "auto":
@@ -1532,7 +1533,7 @@ def music_plan(script, has_music_file: bool = False):
     if not raw and not mus.get("enabled", True):
         return "off", "music.enabled=false：本片不要配乐（不读 work/music.wav）"
     if raw in ("bed", "chord", "chords"):
-        return "bed", "music.mode=bed：v0.2 和弦床（不读 work/music.wav）"
+        return "bed", "music.mode=bed：和弦床（不读 work/music.wav）"
     if raw in ("file", "external", "provided"):
         if has_music_file:
             return "file", "music.mode=file：外部 work/music.wav"
@@ -1545,24 +1546,24 @@ def music_plan(script, has_music_file: bool = False):
     if raw:
         return "unknown-mode", ("music.mode=%r 不认识（可用：score / bed / file / off，"
                                 "或不写 mode 走兼容链）" % mus.get("mode"))
-    # 缺省（v0.2 兼容链）
+    # 缺省（兼容链）
     if bpm not in (None, ""):
         return "score", "缺省配乐：有 bpm=%s，现场编排（musicgen）" % bpm
     if has_music_file:
         return "file", "缺省配乐：沿用已有 work/music.wav（外部提供的配乐）"
     if mus.get("chords"):
-        return "bed", "缺省配乐：没有 bpm，退回 v0.2 和弦床"
+        return "bed", "缺省配乐：没有 bpm，退回和弦床"
     return "none", "缺省配乐：没有 bpm / music.chords / work/music.wav，本片无配乐"
 
 
-# ---------------------------------------------------------------- 风格 / 主题（v0.5.0）
+# ---------------------------------------------------------------- 风格 / 主题
 def _stylekit():
     """惰性 import stylekit（同目录；缺了就明确报错，而不是静默回落到单一样式）。"""
     try:
         import stylekit as ST
         return ST
     except Exception as e:                                  # noqa: BLE001
-        raise RuntimeError("找不到 stylekit.py（v0.5.0 起 scenes/render 都依赖它，"
+        raise RuntimeError("找不到 stylekit.py（scenes/render 都依赖它，"
                            "请与 filmkit.py 放在同一目录）：%s" % e)
 
 
@@ -1570,16 +1571,16 @@ def resolve_theme(script, scene=None):
     """给场景取主题字典。
 
     优先级：scene["theme"]（同明暗族才允许） > script 里解析出的风格主题。
-    stylekit 不在时退回内置 tech-deep（只为了让老工作目录少一个文件也能跑）。
+    没有任何计划就报错并给两步指引（fail-closed，不回落内置外观）。
     """
     plan = script.get("_style") if isinstance(script, dict) else None
     if not isinstance(plan, dict):
         raise ValueError(
             "resolve_theme：剧本里没有已解析的设计计划（script[_style]）。\n"
-            "  v1.0.1 起本技能不提供任何内置主题：每一版外观都必须现场生成并由人确认。\n"
+            "  本技能不提供任何内置主题：每一版外观都必须现场生成并由人确认。\n"
             "  请用 python propose.py --brief \"题材\" --script <film.json> --n 3，"
             "\n  再 --confirm --candidate A 冻结设计；渲染侧走 render.resolve_style(script, work)。")
-    # 设计路径的计划自带完整主题；v1.0.1 起没有内置主题表可回查。
+    # 设计路径的计划自带完整主题；没有内置主题表可回查。
     th = plan.get("theme")
     if not isinstance(th, dict) or not th:
         raise ValueError("resolve_theme：计划里没有 theme 字段（plan 来自 %r）——"
@@ -1591,11 +1592,11 @@ def resolve_theme(script, scene=None):
 
 
 def style_plan(script):
-    """取已解析的风格计划；**不做 legacy 回落**（v1.0.2 起 fail-closed）。
+    """取已解析的风格计划；**不做 legacy 回落**（fail-closed）。
 
-    以前这里 except Exception 后返回一份手写的 legacy 计划（120BPM / Dm / 固定节奏），
-    等于把"没有设计"伪装成"老项目正常出片"，也是模板残留（v1.0.1 原则：不提供任何模板）。
-    现在只认一种情况：script["_style"] 已经是计划（render.resolve_style 挂好的）；
+    不能 except 之后返回一份手写的 legacy 计划（120BPM / Dm / 固定节奏）：
+    那等于把"没有设计"伪装成"老项目正常出片"，也是模板残留（本技能不提供任何模板）。
+    只认一种情况：script["_style"] 已经是计划（render.resolve_style 挂好的）；
     否则明确报错并给两步迁移指引。
     """
     plan = script.get("_style") if isinstance(script, dict) else None
@@ -1603,7 +1604,7 @@ def style_plan(script):
         return plan
     raise ValueError(
         "style_plan：剧本里没有已解析的风格计划（script[_style]）。\n"
-        "  v1.0.1 起没有「不写设计就走老外观」这条兼容路径了。\n"
+        "  没有「不写设计就走老外观」这条兼容路径。\n"
         "  正确用法：\n"
         "    python propose.py --brief \"题材\" --script <film.json> --n 3\n"
         "    python propose.py --confirm --candidate A\n"
@@ -1612,7 +1613,7 @@ def style_plan(script):
 
 # ---------------------------------------------------------------- 程序化音源
 def tone(freq, dur, sr=SR, amp=0.2, kind="sine", decay=2.2, harmonics=(1.0,)):
-    """单音衰减。kind 参数保留以兼容 v0.1（目前只实现 sine）。"""
+    """单音衰减。kind 参数保留以兼容老调用（目前只实现 sine）。"""
     n = max(1, int(dur * sr))
     t = np.arange(n) / sr
     out = np.zeros(n, dtype=np.float32)
@@ -1643,7 +1644,7 @@ def pad_chord(freqs, dur, sr=SR, amp=0.05, detune=0.004):
 
 
 def noise_burst(dur, sr=SR, amp=0.1, lo=0.02, hi=0.35, decay=6.0, seed=7):
-    """噪声脉冲。lo/hi 参数保留以兼容 v0.1（当前用低通近似，不严格按频段切）。"""
+    """噪声脉冲。lo/hi 参数保留以兼容老调用（当前用低通近似，不严格按频段切）。"""
     n = max(1, int(dur * sr))
     r = np.random.RandomState(seed)
     w = r.randn(n).astype(np.float32)
@@ -1674,7 +1675,7 @@ def tts_key_v2(text, voice, rate, pitch, volume="+0%", trim=True, trim_db=-42.0,
                keep_ms=None) -> str:
     """v2 缓存键：把 volume / trim 开关也纳入。
 
-    为什么必须升 v2（v0.4 的真 bug）：trim 不进键，用户把 trim_silence 改成 false 之后，
+    为什么必须升 v2：trim 不进键时，用户把 trim_silence 改成 false 之后，
     老 meta 里 trimmed=True 仍会命中第一条分支，返回**裁剪版**——"关了裁剪其实没关"。
     """
     payload = "%s|%s|%s|%s|%s|%s|%s|%s" % ("v2", text, voice, rate, pitch,
@@ -1683,7 +1684,7 @@ def tts_key_v2(text, voice, rate, pitch, volume="+0%", trim=True, trim_db=-42.0,
 
 
 # ---------------------------------------------------------------- TTS 后端
-# 为什么要有这一层（v0.8）：整条旁白链路现在只挂在一个**非官方**客户端（edge-tts）上。
+# 为什么要有这一层：整条旁白链路只挂在一个**非官方**客户端（edge-tts）上。
 # 它的服务端随时可能改协议/加鉴权，而我们的时间轴、词级字幕、门禁全部建立在这些产物上。
 # 这里只做**接口**（不实现第二个后端）：把"合成一句话 -> 音频 + 词表"这个动作抽象出来，
 # 将来要换 Azure 官方 TTS / 离线引擎，只加一个 register 的实现，timeline/layout/QA 一行不改。
@@ -1709,10 +1710,10 @@ def tts_backend_names():
 
 def tts_words_key(text, voice, rate, pitch, volume="+0%", trim=True,
                    trim_db=-42.0) -> str:
-    """词级元数据的独立缓存键（v0.8）。
+    """词级元数据的独立缓存键。
 
-    为什么不并进 tts_key_v2：并进去会让**所有老项目的音频缓存一次性失效**（必须重新联网
-    合成整片）。分开记 -> 老音频照旧复用，只有"这次显式要词级"时才补一次事件采集。
+    为什么不并进 tts_key_v2：并进去会让**所有已有项目的音频缓存一次性失效**（必须重新联网
+    合成整片）。分开记 -> 已有音频照旧复用，只有"这次显式要词级"时才补一次事件采集。
     """
     payload = "%s|%s|%s|%s|%s|%s|%s" % ("words", text, voice, rate, pitch,
                                        volume, int(bool(trim)))
@@ -1722,7 +1723,7 @@ def tts_words_key(text, voice, rate, pitch, volume="+0%", trim=True,
 def trim_silence_bounds(pcm, sr=SR, thresh_db=-42.0, keep_ms=80):
     """返回 trim_silence 会保留的样本区间 [a, b)。
 
-    v0.8 的词级时间戳需要它：edge-tts 的 WordBoundary offset 是相对**原始 mp3** 的，
+    词级时间戳需要它：edge-tts 的 WordBoundary offset 是相对**原始 mp3** 的，
     而 trim=True 时 timeline 用的是裁剪后的语音。不减去 a，词就会整体提前 ~0.1–1 s。
     与 trim_silence 共用同一套判据（idx[0]/idx[-1] ± keep），保证两边永远一致。
     """
@@ -1746,7 +1747,7 @@ def words_normalize(events, *, offset_shift=0.0, dur=None, min_gap=0.0):
     输出行： {"text":str,"start":秒,"dur":秒,"end":秒}（start/end 都是相对本句语音起点，
              offset_shift 为裁剪掉的句首静音秒数，会从 start 里减掉）。
 
-    两个必须处理的现实（实测 edge-tts 7.3.1 zh-CN）：
+    两个必须处理的现实（实测 edge-tts zh-CN）：
       * 词之间有 0.1–0.3 s 空隙，事件不覆盖空隙 —— 所以 start/dur 会留洞，这是对的；
       * 句尾静音（约 0.5 s）不在任何事件里 —— 排轴时用"整句实测时长"兜底，不用词时长求和。
     """
@@ -1805,17 +1806,17 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
         persona=None, tone=None, words=False, backend="edge"):
     """逐句合成旁白（带输入校验的缓存 + 网络重试 + 可选尾静音裁剪）。
 
-    v0.1 的缓存只判断文件是否存在，改一句台词会静默复用旧音频；
-    v0.2 起把 text/voice/rate/pitch 的哈希写进 meta，变了就重新合成。
-    v0.5.0：加 volume（edge-tts 原生支持，之前一直没传）+ persona/tone 审计字段；
-            缓存键升 v2（把 volume/trim 也纳入，修掉"关了裁剪其实没关"的静默 bug）。
+    缓存必须校验输入：只判断文件是否存在，改一句台词就会静默复用旧音频；
+    所以把 text/voice/rate/pitch/volume 的哈希写进 meta，变了就重新合成。
+    volume 走 edge-tts 原生参数；persona/tone 只作审计字段。
+    缓存键升 v2（把 volume/trim 也纳入，修掉"关了裁剪其实没关"的静默 bug）。
     trim=True 时另外落一份裁剪后的 wav 并在 meta.path 指向它，dur 为裁剪后实测时长。
     """
     out_mp3 = str(out_mp3)
     d = os.path.dirname(os.path.abspath(out_mp3))
     if d:
         os.makedirs(d, exist_ok=True)
-    # 可替换后端（v0.8）：接口只规定"返回音频 + 词表 + 实测时长"，
+    # 可替换后端：接口只规定"返回音频 + 词表 + 实测时长"，
     # 默认仍是 edge 的内联实现（逐字节不变）。
     if str(backend or "edge") != "edge":
         impl = (TTS_BACKENDS.get(str(backend)) or {}).get("fn")
@@ -1860,11 +1861,11 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
                     if _words_ok(m):
                         return m
                     audio_cached = m
-            # v1 老缓存（升级前合成的）只有在参数完全等于 v1 语义时才复用，
-            # 避免"改了一个 volume 却拿到老音频"这种升级期的静默错配。
+            # v1 老缓存（v1 键合成的）只有在参数完全等于 v1 语义时才复用，
+            # 避免"改了一个 volume 却拿到老音频"这种静默错配。
             # trim 也必须一致：v1 的 key 里没有 trim，旧记录若 trimmed=True，用户把
-            # trim_silence 改成 false 后仍会命中并返回**裁剪版**音频（v0.4 修过的同一类
-            # "关了裁剪其实没关"，只是漏在 v1 兼容分支上）。
+            # trim_silence 改成 false 后仍会命中并返回**裁剪版**音频（与 v2 键要防的是
+            # 同一类"关了裁剪其实没关"，只是漏在 v1 兼容分支上）。
             elif (str(m.get("key") or "") == legacy_key and m.get("text") == text
                   and vol in ("+0%", "") and m.get("voice") == voice
                   and bool(m.get("trimmed")) == bool(trim)):
@@ -1882,9 +1883,9 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
             import edge_tts
 
             async def go():
-                # v0.8：要词级时不能再用 save()——save 会把 WordBoundary 丢掉（只写音频）。
+                # 要词级时不能再用 save()——save 会把 WordBoundary 丢掉（只写音频）。
                 # 显式传 boundary="WordBoundary"：默认是 SentenceBoundary，此时一条词事件都收不到
-                # （实测 edge-tts 7.3.1：不传 boundary 时 zh-CN 词事件数 = 0）。
+                # （实测 edge-tts：不传 boundary 时 zh-CN 词事件数 = 0）。
                 c = edge_tts.Communicate(
                     text, voice, rate=rate, pitch=pitch, volume=vol,
                     boundary="WordBoundary" if words else "SentenceBoundary")
@@ -1892,8 +1893,8 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
                     await c.save(out_mp3)
                     return
                 raw_events.clear()
-                # 先写 .part 再 os.replace：中途中失败/断网时**绝不能**截断已有的缓存音频
-                # （旧实现直接 "wb" 打开目标文件，一次失败就把好音频清成 0 字节）。
+                # 先写 .part 再 os.replace：中途失败/断网时**绝不能**截断已有的缓存音频
+                # （直接 "wb" 打开目标文件，一次失败就把好音频清成 0 字节）。
                 part = out_mp3 + ".part"
                 try:
                     with open(part, "wb") as fh:
@@ -1932,8 +1933,8 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
             _time.sleep(1.2 * (attempt + 1))
 
     # trim=True 时同一句 mp3 只需要解码一次：audio_dur() 内部就是 decode_pcm，
-    # 旧实现先 audio_dur 再 decode_pcm，每句多起一个 ffmpeg 进程、多做一次全量解码
-    # （55 句模板片就是 55 次多余的解码 + 进程启动，而 TTS 阶段本身是网络瓶颈）。
+    # 不能先 audio_dur 再 decode_pcm：那是每句多起一个 ffmpeg 进程、多做一次全量解码
+    # （55 句片就是 55 次多余的解码 + 进程启动，而 TTS 阶段本身是网络瓶颈）。
     pcm_raw = decode_pcm(out_mp3) if trim else None
     dur_raw = len(pcm_raw) / float(SR) if pcm_raw is not None else audio_dur(out_mp3)
     used = out_mp3
@@ -1973,8 +1974,8 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
               backend="edge"):
     """并发逐句合成（并发只影响墙钟，不影响产物：每句独立缓存）。
 
-    v0.5.0：plan=[{voice,rate,pitch,volume,persona,tone}, ...]（与 lines 等长）时
-    逐句用各自的声线/语气；plan=None 时行为与 v0.4 完全一致。
+    plan=[{voice,rate,pitch,volume,persona,tone}, ...]（与 lines 等长）时
+    逐句用各自的声线/语气；plan=None 时用上面的全局参数，逐句一致。
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -2015,11 +2016,11 @@ VIDEO_ASPECT = 16.0 / 9.0
 
 
 def video_plan(script=None):
-    """解析 film.json 的 video 块 -> 内部分辨率 / 输出分辨率 / 帧率（v0.8）。
+    """解析 film.json 的 video 块 -> 内部分辨率 / 输出分辨率 / 帧率。
 
     设计取舍（都是刻意的）：
       * **只做横屏 16:9**。竖屏不是"把宽高换一下"：安全区、版式几何、HUD、字幕折行
-        全部按 16:9 的像素坐标写死，换比例要重做一套版式（用户已确认本轮不做）。
+        全部按 16:9 的像素坐标写死，换比例要重做一套版式（竖屏不在支持范围内）。
         竖屏/非 16:9 直接报错，而不是悄悄出个变形或带黑边的片子。
       * **构图恒定 1920x1080，只允许下采样输出**（720p/540p/1440p 里 1440p 需上采样，
         因此默认拒绝）：上采样不会增加信息，只会把"1080p 的清晰度"包装成"4K"，
@@ -2068,7 +2069,7 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
                    hold=0.0, hold_map=None, bar=0.0, lead_map=None, fps=None):
     """由实测语音时长反推时间轴。第一段 start 必须严格为 0。
 
-    hold / hold_map（v0.3.0）：语音结束后额外停留的秒数——这就是 ai-history-film 的"停留窗口"：
+    hold / hold_map：语音结束后额外停留的秒数——这就是"停留窗口"：
       观众没看清的地方加停留，而不是把整片放慢。hold 为全局默认，hold_map 按 id 覆盖，
       行内 `hold` 字段优先级最高。bar > 0 时把每段时长向上取整到 bar 的整数倍
       （配乐小节对齐用，例如 bar=2.0 = 120 BPM 的一小节）。
@@ -2082,7 +2083,7 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
     for ln in lines:
         voice = float(ln.get("dur") or 0.0)
         extra = float(ln.get("hold", (hold_map or {}).get(ln["id"], hold)) or 0.0)
-        # v0.5.0：lead 也支持逐句（行内 lead > lead_map > 全局），
+        # lead 也支持逐句（行内 lead > lead_map > 全局），
         # 与 tail_map 同构 —— 不同语气档的"句前呼吸"本来就不该一样长。
         lead_i = float(ln.get("lead", (lead_map or {}).get(ln["id"], lead)))
         tail_i = float((tail_map or {}).get(ln["id"], tail))
@@ -2102,7 +2103,7 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
         row = dict(ln, start=round(t, 3), end=round(t + d, 3), dur=round(d, 3),
                    voice_start=round(t + lead_i, 3),
                    voice_end=round(t + lead_i + voice, 3))
-        # v0.8：把句内词表平移成**绝对时间**，下游（字幕断行 / cue 词锚点 /
+        # 把句内词表平移成**绝对时间**，下游（字幕断行 / cue 词锚点 /
         # 词级门禁）只需要读 words_abs，不必自己再算一遍 offset。
         if ln.get("words"):
             vs = row["voice_start"]
@@ -2120,14 +2121,14 @@ def build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0, tail_map=None, max_
 def sub_window(scenes, i, max_hold=None):
     """字幕窗口：默认覆盖整句语音，且绝不压下一句。
 
-    v0.1 把 t1 钳在 voice_start + 5.2，导致 10 秒长句字幕在读到一半就消失
-    （语速 +8% 的长句尤其明显）。v0.2 默认不钳；需要钳短时显式传 max_hold。
+    默认不钳：把 t1 钳在 voice_start + 5.2 会让 10 秒长句字幕在读到一半就消失
+    （语速 +8% 的长句尤其明显）。需要钳短时显式传 max_hold。
     """
     s = scenes[i]
     t0 = s["voice_start"] - 0.12
     t1 = s["voice_end"] + 0.45
     if max_hold and float(max_hold) > 0:
-        # 0/负值当"不限制"：旧实现传 -0.5 会把 t1 钳到 voice_start-0.5，窗口倒挂、
+        # 0/负值当"不限制"：传 -0.5 会把 t1 钳到 voice_start-0.5，窗口倒挂、
         # 整句字幕消失。sub_max_hold 是公共参数，外部调用可能原样透传。
         t1 = min(t1, s["voice_start"] + float(max_hold))
     t1 = min(t1, s["end"] - 0.06)
@@ -2144,7 +2145,7 @@ def sub_at(scenes, t, max_hold=None):
 
 
 def sub_words_at(scenes, t, max_hold=None):
-    """取当前时刻上屏字幕对应的**词表**（v0.8）；没有词级就返回 None。"""
+    """取当前时刻上屏字幕对应的**词表**；没有词级就返回 None。"""
     for i, s in enumerate(scenes):
         t0, t1 = sub_window(scenes, i, max_hold)
         if t0 <= t <= t1:
@@ -2181,7 +2182,7 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52,
     """直接写 ASS，并在头里声明 PlayResX/Y=1920/1080。
 
     这样交 libass 不会按 PlayResY=288 反推，避免"字号小得看不见"
-    （v0.1 的已知坑：SRT 交 libass 需要 FontSize/MarginV 乘 3.75）。
+    （已知坑：SRT 交 libass 需要 FontSize/MarginV 乘 3.75）。
     """
     def fmt(x):
         cs = int(round(x * 100))
@@ -2239,7 +2240,7 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52,
 class FrameSink:
     """PIL 帧 -> rawvideo 管道 -> libx264。
 
-    strict=True（默认）时尺寸不符直接报错：v0.1 会静默 resize，
+    strict=True（默认）时尺寸不符直接报错：静默 resize 时
     上限内看着没事，下游却拿不到"场景写错了分辨率"的信号。
     """
 
@@ -2250,7 +2251,7 @@ class FrameSink:
         self.w, self.h, self.fps = int(w), int(h), float(fps)
         self.strict = strict
         self.frames = 0
-        # v0.8：内部构图恒为 w x h（PIL 画布），输出可以更小（只允许下采样）。
+        # 内部构图恒为 w x h（PIL 画布），输出可以更小（只允许下采样）。
         # 缩放放在**编码这一遍**做（-vf scale），不二次编码、也不改变合成内容：
         # 1920→1280 的 lanczos 下采样本身等于 1.5x 超采样，画面不会因为降规格而变糊。
         self.out_w = int(out_w or self.w)
@@ -2304,7 +2305,7 @@ class FrameSink:
             self.proc.stdin.close()
         except (BrokenPipeError, OSError):
             # 编码进程已经死了：真正的死因在 stderr 里，下面统一报，别让 BrokenPipe
-            # 把 ffmpeg 的错误信息顶掉（旧实现只有裸 close，异常时看不到任何诊断）。
+            # 把 ffmpeg 的错误信息顶掉（只有裸 close 时异常看不到任何诊断）。
             pass
         # 先排空 stderr 再 wait：-v error 的报错行也可能多到写满 64KB 管道，
         # 而 wait() 期间没人读它 -> ffmpeg 卡在写 stderr、双方一起死等。
@@ -2342,7 +2343,7 @@ def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
         loudnorm=True, target_i=-16.0, target_tp=-1.5, reencode_video=False):
     """合成成片：视频流默认直接 copy（不再二次编码），音频走两遍 loudnorm。
 
-    v0.1 对已经 CRF18 编好的 silent.mp4 又编了一遍 libx264，既有二次有损
+    不能对已经 CRF18 编好的 silent.mp4 再编一遍 libx264：既有二次有损
     又是纯浪费时间。视频里没有需要再次编码的信息，copy 是正确选择；
     需要改分辨率/插字幕时才用 reencode_video=True。
     """
@@ -2393,7 +2394,7 @@ def loudnorm_two_pass(src, target_i=-16.0, target_tp=-1.5, target_lra=11.0):
         return None
     # 全静音 / 极短音频时 ffmpeg 会报 input_i=-inf、target_offset=inf：这些值塞进
     # measured_* 会被 ffmpeg 拒绝（"Value -inf for parameter 'measured_I' out of range"），
-    # mux 直接失败（旧实现只判"解析到 JSON"，于是拿着 -inf 的滤镜串去编码）。
+    # mux 直接失败（只判"解析到 JSON"就会拿着 -inf 的滤镜串去编码）。
     # 量不到可用测量值就返回 None：mux 会打 WARN 跳过响度标准化，qa 的响度门禁照旧兜底。
     need = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
     try:
@@ -2409,7 +2410,7 @@ def loudnorm_two_pass(src, target_i=-16.0, target_tp=-1.5, target_lra=11.0):
 
 
 def loudness(path):
-    """EBU R128 积分响度 + 真峰。v0.1 用 ebur128 默认参数拿不到 Peak，导致真峰门禁永远不触发。"""
+    """EBU R128 积分响度 + 真峰。必须显式开 ebur128=peak=true：默认参数拿不到 Peak，真峰门禁永远不触发。"""
     p = _run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path),
               "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"])
     txt = p.stderr.decode("utf-8", "replace")
@@ -2430,7 +2431,7 @@ def detect_black(path, dur=0.4, head=1.2, tail=None, pix_th=None):
     """长黑帧检测。head/tail 秒内是刻意的淡入淡出，不算问题。
 
     返回 None 表示**检测根本没跑成**（ffmpeg 打不开文件 / blackdetect 失败）。
-    这一点必须可区分：旧实现把失败也返回 0，qa 门禁于是把"没查"记成"0 段黑帧 = 通过"。
+    这一点必须可区分：失败也返回 0 时，qa 门禁会把"没查"记成"0 段黑帧 = 通过"。
 
     pix_th：多"暗"算黑（0..1）。**必须跟着主题底色走**，否则暗色主题会被整片误判。
     blackdetect 的默认 pix_th 是 0.10，意思是"亮度低于 10% 的像素算黑"；
@@ -2489,8 +2490,8 @@ def qa_text_safe(scenes, tol=1.0, band=SUB_BAND):
 
 # ---------------------------------------------------------------- 编码质量
 # cv2 在 README / THIRD_PARTY / requirements.txt 里都写成**可选**，所以这里必须真的可选：
-# 以前是函数内裸 `import cv2`，装了才算"可选"——没装时 --stage qa 直接 ImportError 崩掉，
-# 而文档写"缺了跳过锐度门禁"。现在缺 cv2 时返回 None，由调用方打 WARN 并跳过该门禁。
+# 函数内裸 `import cv2` 时，装了才算"可选"——没装时 --stage qa 直接 ImportError 崩掉，
+# 而文档写"缺了跳过锐度门禁"。所以缺 cv2 时返回 None，由调用方打 WARN 并跳过该门禁。
 def _cv2():
     """按需取 cv2；没装返回 None（调用方负责降级 + 报警，不静默）。"""
     try:
@@ -2528,7 +2529,7 @@ def encode_quality(film, ref_png, at_sec=None, ref_img=None):
 
     ⚠ 关键：ref 必须是场景函数渲染出的原图，不能用成片自己抽的帧，
     否则 sharp_ref 与 sharp_dec 几乎相同、ratio 恒为 1，门禁形同虚设
-    （v0.1 就是这么写的，本片 0.922 的真实值需要正确参考帧才测得出来）。
+    （成片 0.922 这样的真实值，需要正确参考帧才测得出来）。
 
     没装 cv2 时返回 None（调用方据此跳过锐度门禁并 WARN）。
     """
@@ -2541,7 +2542,7 @@ def encode_quality(film, ref_png, at_sec=None, ref_img=None):
         ref = cv2.imread(str(ref_png), cv2.IMREAD_GRAYSCALE)
     if ref is None:
         return None
-    # 解码帧写进系统临时目录：以前写在 cwd / 参考帧目录，跑一次 --stage qa
+    # 解码帧写进系统临时目录：写在 cwd / 参考帧目录时，跑一次 --stage qa
     # 就在项目根留一个 250KB 的 _dec_tmp.png（既污染目录，也可能被当成交付物）。
     with tempfile.TemporaryDirectory(prefix="filmkit_qa_") as td:
         tmp = os.path.join(td, "_dec_tmp.png")
@@ -2550,9 +2551,9 @@ def encode_quality(film, ref_png, at_sec=None, ref_img=None):
     if dec is None:
         return None
     if ref.shape != dec.shape:
-        # v0.8：输出降到 720p 时，参考帧还是 1080p 的原图。不缩放就比 Laplacian 方差，
-        # 等于拿两个不同分辨率的东西比"锐不锐"——ratio 会假性偏低（v0.8 前只在
-        # 1920x1080 单一时是同一尺寸，所以没暴露）。这里统一缩到**交付分辨率**再比。
+        # 输出降到 720p 时，参考帧还是 1080p 的原图。不缩放就比 Laplacian 方差，
+        # 等于拿两个不同分辨率的东西比"锐不锐"——ratio 会假性偏低（只在
+        # 1920x1080 单一时才碰巧同尺寸）。这里统一缩到**交付分辨率**再比。
         ref = cv2.resize(ref, (dec.shape[1], dec.shape[0]), interpolation=cv2.INTER_AREA)
     sa = float(cv2.Laplacian(ref, cv2.CV_64F).var())
     sb = float(cv2.Laplacian(dec, cv2.CV_64F).var())
@@ -2578,8 +2579,8 @@ def contact_sheet(frames, out_png, cols=4, thumb_w=480, labels=None):
 
 
 # ---------------------------------------------------------------- 拼接
-# 事故背景：混 fps 的片段以前直接 -c copy，拼出半速成片还不报错。
-# 现在拼前先查参数一致性；不一致或 copy 失败都自动降级重编码，只有重编码也失败才 raise。
+# 混 fps 的片段直接 -c copy 会拼出半速成片还不报错。
+# 所以拼前先查参数一致性；不一致或 copy 失败都自动降级重编码，只有重编码也失败才 raise。
 _LAST_CONCAT = {}
 
 
@@ -2756,8 +2757,8 @@ def _concat_reencode(parts, out, infos, ref, lst):
             fc.append("[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a%d]"
                       % (i, i))
         else:
-            # 静音长度必须等于**这一段自己的**视频长度。旧实现取 max(段长, 参照段长)：
-            # 参照段更长时会给短的无音轨段多补几秒静音，拼接后音频比视频长
+            # 静音长度必须等于**这一段自己的**视频长度。取 max(段长, 参照段长)：
+            # 参照段更长时会给出短的无音轨段多补几秒静音，拼接后音频比视频长
             # （实测 3s 有声 + 1s 无声 -> 输出 6s，视频只有 4s，后半段音画差 2s）。
             # 段长读不出来（ffprobe 没有 duration）时才退回参照段时长。
             seg_dur = max(float(inf.get("dur") or 0), 0.0)
@@ -2856,14 +2857,14 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
               expect_w=None, expect_h=None, expect_fps=None):
     """分档质检：errors 必须修，warnings 看情况。
 
-    v0.2 修正：
-    - 真峰现在能测到（loudness 加 peak=true），<= -1 dBTP 才是真门禁；
-    - 码率默认不再当"下限"（暗色简洁内容本来就只有 0.5Mbps，v0.1 会误判）；
-    - 新增字幕条数校验（expected_subtitles），这是"静默丢字幕"的唯一检查点。
+    三条判据的来由：
+    - 真峰必须能测到（loudness 加 peak=true），<= -1 dBTP 才是真门禁；
+    - 码率不当"下限"（暗色简洁内容本来就只有 0.5Mbps，当下限会天天误报）；
+    - 字幕条数校验（expected_subtitles），这是"静默丢字幕"的唯一检查点。
 
-    v0.8：交付规格可配置（expect_w/expect_h/expect_fps）。以前这里死比 K.W/K.H/K.FPS，
-    于是 720p/24fps 的合法交付会被报成"分辨率/帧率不符"——门禁判据跟交付规格脱节，
-    比误报更糟的是它会让人去"修"一个根本没错的东西。缺省仍回落到模块常量（老行为不变）。
+    交付规格可配置（expect_w/expect_h/expect_fps）：死比 K.W/K.H/K.FPS 的话，
+    720p/24fps 的合法交付会被报成"分辨率/帧率不符"——门禁判据跟交付规格脱节，
+    比误报更糟的是它会让人去"修"一个根本没错的东西。缺省回落到模块常量。
     """
     errors, warns = [], []
     W, H, FPS = (int(expect_w or globals()["W"]), int(expect_h or globals()["H"]),

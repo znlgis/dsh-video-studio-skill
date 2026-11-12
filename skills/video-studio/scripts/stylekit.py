@@ -1,42 +1,34 @@
 # -*- coding: utf-8 -*-
-"""stylekit.py — 风格包（Style Packs）：一个 id 同时决定画风、配乐、旁白与节奏。
+"""stylekit.py — 视觉/音频原语库：颜色数学、版式几何、主题体检、视觉语言体检。
 
-v0.5.0 新增。解决的问题是 v0.4 及以前的同质化：画风锁死在 scenes.py 的 THEME 常量、
-配乐锁死在 scorekit 的 Dm/120，旁白锁死在 render.py 的单个 voice —— 每部片必然长一个样。
+本模块是**纯数据 + 纯函数**的技术底座，不提供任何外观成品。
+外观从哪来只有一条路：`work/design.json`——由 `propose.py` 按 brief 现场采样、
+用户 `--confirm` 之后冻结，再由 `designkit.design_to_plan()` 转成同形的计划字典。
 
 设计原则
 --------
-1. 纯数据 + 纯函数：本模块只依赖标准库，不 import filmkit / scorekit / scenes
-   （它们反过来 import 我，成环就炸）。因此可以随便单测、追求确定性。
-2. 一个风格包决定三件事：主题（配色/字体/材质/HUD）、配乐（BPM 梯度/调池/情绪/音色组）、
-   旁白（声线映射），外加节奏（lead/tail/min_dur/条目落位步长）。不允许互相独立配，
-   否则会出现「极简黑白画面 + 史诗管弦」这种打架组合。
-3. 确定性：内容指纹只用 sha1 派生，禁 random / time / hash()（str hash 带随机盐）。
-   同一份 film.json 永远解析出同一个风格；换一部片三个指纹大概率都变。
-4. 向后兼容：不写 style 字段 = legacy，此时 render/scorekit/scenes 走 v0.4 原路径，
-   配乐逐样本一致（selfcheck 有断言）。
-
-三级指纹（专门为了「改个错别字不要换整首曲子」）
----------------------------------------------
-  full   标题 + 所有台词              -> 决定音色细节 / 噪声纹理（seed 派生）
-  tempo  标题 + kind 序列 + 体量桶     -> 决定 BPM 与调性
-  style  关键词评分 + 指纹破平         -> 决定风格 id
+1. 只依赖标准库，不 import filmkit / scorekit / scenes（它们反过来 import 本模块，
+   成环就炸）。因此可以单独测、结果可复现。
+2. 阈值只有一份：对比度门槛（`LINT_LIMITS`）、视觉语言边界都在这里，
+   `designkit` 直接复用，不抄第二份。
+3. 确定性：只用 sha1 派生，禁 random / time / hash()（str hash 每次进程带随机盐）。
+4. 模板不存在：`STYLES` / `THEMES` / `VISUAL_LANGUAGES` 恒为空表，
+   写任何 style id 都会被明确拒绝并给出迁移指引（见 `resolve_script_style`）。
 
 用法
 ----
     import stylekit as ST
-    plan = ST.resolve_script_style(script)      # 纯函数，返回可直接落盘的 dict
-    th   = ST.theme_of(plan["style"])           # 主题字典（元组原样，给 PIL 用）
-    ST.theme_lint(th)                           # 对比度体检，返回问题列表（空 = 过）
+    ST.theme_lint(theme)            # 对比度/明暗/结构体检，返回问题列表（空 = 过）
+    ST.visual_lint_language(lang)   # 视觉语言包的数值边界体检
+    ST.LAYOUTS["left-stack"]        # 版式几何（相对 W/H 与 SAFE，不写死魔法数）
+    ST.is_dark(theme)               # 明暗族判定（同片不许跨族）
 
-    python stylekit.py --list                   # 列所有风格
-    python stylekit.py --show cinema            # 看一套风格的完整字段
-    python stylekit.py --lint                   # 8 套主题全部走对比度门禁
+    python stylekit.py            # 打印本模块的职责说明
+    python stylekit.py --list     # 已移除：没有可选外观清单，exit 2
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import re
 import sys
 
@@ -128,9 +120,9 @@ _HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")
 def _color_of(v, key):
     """把 theme_overrides 里的颜色值统一成 (r,g,b)：支持 [r,g,b] 和 "#rrggbb" / "#rgb"。
 
-    为什么必须支持 hex：schemas/film.schema.json 与 references/style-packs.md 的示例
+    为什么必须支持 hex：schemas/film.schema.json 与 references/appearance.md 的示例
     就是 {"accent": "#ff8a3d"}，而 JSON 没有元组，照着文档写 hex 是必然的。
-    v0.5 旧实现把字符串原样塞进主题，scenes.py 第一次 int("#") 就崩在渲染期
+    字符串必须在**这里**转成元组：原样塞进主题的话，scenes.py 会在渲染期崩
     （实测：ink="#ffffff" -> ValueError: invalid literal for int() with base 10: '#'）。
     """
     if isinstance(v, str):
@@ -157,13 +149,13 @@ _THEME_COLOR_KEYS = frozenset(("bg", "bg2", "surface", "ink", "muted", "dim",
 def apply_theme_overrides(theme, overrides):
     """把 film.json 的 visual.theme_overrides 合并进主题**并做类型校验**。
 
-    契约（schemas/film.schema.json：只接受主题里已存在的键；references/style-packs.md §3）：
+    契约（schemas/film.schema.json：只接受主题里已存在的键；references/appearance.md §3）：
       - 未知键忽略：以后主题加字段时老剧本不因为它不认识就炸；
       - 颜色键（值本来是三色元组的那些）接受 [r,g,b] / "#rrggbb" / "#rgb"，统一成元组；
       - 数值键接受数字或数字字符串；字符串键必须是字符串；
-      - 嵌套结构（card / scale / qa …）不支持覆盖，静默忽略（与 v0.5 一致，避免破坏老配置）；
-        真要改嵌套字段请改风格包。
-    校验只在"值类型不对、旧版会在渲染期崩"的场合抛 ValueError（提前到 --stage style）。
+      - 嵌套结构（card / scale / qa …）不支持覆盖，静默忽略（避免破坏已有配置）；
+        真要改嵌套字段请在 designkit 里改生成逻辑。
+    校验只在"值类型不对、会在渲染期崩"的场合抛 ValueError（提前到 --stage style）。
     返回新的 theme dict（不改入参）。
     """
     out = dict(theme or {})
@@ -189,9 +181,9 @@ def apply_theme_overrides(theme, overrides):
             out[k] = int(round(num)) if isinstance(base, int) else float(num)
             continue
         if isinstance(base, dict):
-            # 嵌套结构（card / scale / qa）不支持覆盖。这里保持 v0.5 的**静默忽略**：
-            # 老配置里如果写了这种覆盖，旧版只是没生效、并不会崩；升级后突然报错是破坏性变更。
-            # 想改嵌套字段请改风格包（STYLES/THEMES），见 references/style-packs.md §7。
+            # 嵌套结构（card / scale / qa）不支持覆盖：静默忽略而不是报错。
+            # 配置里写了这种覆盖时应视为"没生效"而不是"配置坏了"，升级不该突然报错。
+            # 想改嵌套字段要在 designkit 的 _theme_of_design 里改，见 references/appearance.md §7。
             continue
         if isinstance(base, str):
             if not isinstance(v, str):
@@ -251,22 +243,20 @@ def _theme(style_id, label, keywords, palette, material, typ, layout, motion, hu
 
 
 # ============================================================================
-# 二、主题（已删除：v1.0.1 起本技能不提供任何模板）
+# 二、主题：没有内置表，由 designkit 现场构造
 # ============================================================================
 #
-# 这里曾有 8 套命名主题（THEMES：科技深蓝 / 近黑金 / 冷薄荷 / 暖砂金 / 石青灰 /
-# 深林绿 / 暖纸白 / 墨纸白）。它们是**模板**：用户只能在这 8 种外观里选，
-# 第 9 种永远不会出现。
+# `THEMES` 恒为空：本技能不提供任何内置外观，写 style id 一律被拒绝（见 resolve_script_style）。
 #
-# 现在主题由 designkit 从连续空间现场构造：
+# 主题由 designkit 从连续空间现场构造：
 #   · 底色 = (色相 h∈[0,360), 饱和 s, 明度 v) 连续取值，经 _palette_from_hue 算出三段底色；
 #   · 其余 8 个语义色由对比度网格求解（每套都必须过 theme_lint）；
-#   · 产出仍是同形的 35 字段主题字典，scenes.py 不需要知道它从哪来。
+#   · 产出是同形的 35 字段主题字典，scenes.py 不需要知道它从哪来。
 #
-# 保留的**技术原语**（这些不是模板，是造东西的工具）：
-#   luminance / contrast / midpoint / _rgb / _color_of / apply_theme_overrides /
-#   _theme(构造器) / hsv_to_rgb / rgb_to_hsv / LINT_LIMITS / theme_lint / is_dark /
-#   blend_theme / family_compatible / LAYOUTS(几何参数，不是外观目录)
+# 本模块提供的是**造东西的工具**，不是外观目录：
+#   luminance / contrast / _rgb / _color_of / apply_theme_overrides /
+#   _theme(构造器) / hsv_to_rgb / rgb_to_hsv / LINT_LIMITS / theme_lint /
+#   bg_contrast / is_dark / family_compatible / LAYOUTS(几何参数，不是外观目录)
 THEMES = {}
 # 三、版式骨架（LAYOUTS）：3 种，scenes.py 按名字取几何参数
 # ============================================================================
@@ -309,27 +299,18 @@ def layout(name):
 
 
 # ============================================================================
-# 四、风格包（STYLES）：一个 id = 主题 + 配乐 + 旁白 + 节奏
+# 四、风格表：恒为空（本技能不提供模板）
 # ============================================================================
 #
-# music 字段只放「策展层」（BPM 梯度 / 调池 / 情绪 / 音色组偏好），
-# 具体的和弦进行、鼓型、乐器合成在 scorekit 里（合成层）。两边用同一个 style id 对齐。
-
-# ============================================================================
-# 四、风格包（已删除：v1.0.1 起不提供任何模板）
-# ============================================================================
+# 一个设计从哪来只有一条路：work/design.json —— `propose.py` 按 brief 现场采样、
+# 人 `--confirm` 之后冻结。表为空是**契约**，不是没填：selfcheck 断言它们必须为空，
+# 有内容就意味着有人偷偷恢复了外观清单。
 #
-# 这里曾有 STYLES：一个 style id = 主题 + 配乐 + 旁白 + 节奏的整套模板，
-# 外加 pick_style 按关键词/指纹**自动挑一套**。那是本技能最像"模板库"的部分。
-#
-# 现在没有任何 style id：一个设计从哪来只有一条路——work/design.json，
-# 由 propose.py 按 brief 现场采样、人确认后冻结。
-#
-# 保留的：LEGACY_STYLE 常量（只为了让"写 style=legacy"能被明确拒绝并给迁移指引，
-# 而不是抛 AttributeError）。
+# `LEGACY_STYLE` 常量只服务于一件事：让 `style="legacy"` 这类写法被**明确拒绝**并
+# 给出迁移指引，而不是抛 AttributeError。
 STYLE_IDS = ()
 DEFAULT_STYLE = None
-LEGACY_STYLE = "legacy"          # 只为让老剧本被**明确拒绝**时能报出可读的迁移信息
+LEGACY_STYLE = "legacy"
 STYLES = {}
 
 # ---- 调式池：技术原语，不是模板 ----
@@ -339,65 +320,37 @@ MINOR_KEYS = ("Dm", "Am", "Em", "Cm")
 MAJOR_KEYS = ("C", "G", "D", "F", "A", "Bb")
 
 
-# ---- 兼容壳：模板表删掉后，老调用点不该 AttributeError ----
-# 这些函数在 v1.0.1 之前用于"按 style id 取模板"。现在没有模板，它们**必须明确报错**，
-# 而不是返回一个假的默认值（那等于偷偷恢复模板）。
-def style_ids(include_legacy=True):
-    return []
-
-
-def get(style_id):
-    raise KeyError(
-        "没有风格 %r：v1.0.1 起本技能不提供内置风格（模板已删除）。\n"
-        "  每一版外观都必须现场生成：python propose.py --brief \"题材\" --script film.json\n"
-        "  再用 --confirm 冻结 design.json" % (style_id,))
-
-
-def theme_of(style_id):
-    raise KeyError(
-        "没有主题 %r：v1.0.1 起没有内置主题表（模板已删除）。\n"
-        "  主题由 designkit 从 (色相,饱和,明度) 连续空间现场构造，见 work/design.json"
-        % (style_id,))
-
-
-def is_legacy(style_id):
-    return str(style_id or "") == LEGACY_STYLE
 VISUAL_MOTIFS = ("brackets", "hairlines", "handdrawn", "slabs",
                  "minimal", "letterbox", "signal", "rays")
 VISUAL_TRANSITIONS = ("dip", "wash", "paper", "wipe", "cut", "iris")
 NUMBER_STYLES = ("dim", "serif", "cn", "block", "roman", "timecode", "dot", "gilt")
 
 # ============================================================================
-# 五、视觉语言包（已删除：v1.0.1 起不提供任何模板）
+# 五、视觉语言包：名字是绘制原语，不是外观目录
 # ============================================================================
 #
-# 这里曾有 VISUAL_LANGUAGES：8 套命名结构签名（母题/转场/字距/缓动/重心/layout_cycle）。
-# 它们是另一种模板——换风格时用户只能在这 8 组里挑。
+# `VISUAL_LANGUAGES` 恒为空。视觉语言由 `designkit._language_of(design)` 从设计字段
+# 直接拼出来（母题/转场/字距/缓动/重心/layout_cycle 五组），再交给
+# `visual_lint_language` 做体检。
 #
-# 现在视觉语言由 designkit._language_of(design) 从设计字段直接拼出来（同形五组），
-# 再交给 _visual_lint_language 做同一条体检。
-#
-# 保留的：VISUAL_MOTIFS / VISUAL_TRANSITIONS / NUMBER_STYLES（**绘制原语的名字**，
-# scenes.py 按名字分发到具体画法；这是"能画什么"，不是"长什么样"）、
-# visual_lint_language(lang)（对任意 language 字典做体检的纯函数）。
+# 这里保留的是 VISUAL_MOTIFS / VISUAL_TRANSITIONS / NUMBER_STYLES —— **绘制原语的名字**：
+# scenes.py 按名字分发到具体画法。这是"能画什么"，不是"长什么样"。
 VISUAL_LANGUAGES = {}
 
 
 def visual_language(lang=None):
-    """兼容壳：v1.0.1 起没有命名视觉语言，传什么返回什么；传 None 返回空壳。
+    """返回一份可用的视觉语言包：传入字典就原样返回，否则给空壳。
 
-    保留这个函数只是为了让 `plan["language"] = ST.visual_language(...)` 这类老调用点
-    不至于 AttributeError —— 真正的语言包由 designkit 提供。"""
+    真正的语言包由 `designkit._language_of()` 生成并挂在 plan["language"] 上；
+    这个函数只负责让"没有语言包"的调用点拿到一个合法空壳而不是 None。"""
     return lang if isinstance(lang, dict) else {}
 
 
 def visual_lint_language(vl):
-    """结构签名体检：对**任意** language 字典，不要求它属于某个命名风格。
+    """视觉语言体检：对**任意** language 字典，不要求它属于某个命名风格。
 
-    这是从 v0.9 的 visual_lint(style_id) 里抽出来的核心——原来它先查
-    VISUAL_LANGUAGES[style_id] 再体检，模板删掉后没有 style_id 可查了，
-    但仍然需要"这套语言参数越界没有"的检查（否则转场 1 秒、push 0.3 这类
-    会让整片观感崩掉的错误要等渲完 300 帧才发现）。
+    没有这条检查，转场 1 秒、push 0.3 这类会让整片观感崩掉的错误要等渲完 300 帧
+    才发现——所以它在 design 校验阶段就要跑。
     """
     bad = []
     if not isinstance(vl, dict) or not vl:
@@ -457,159 +410,32 @@ def visual_lint_language(vl):
 
 
 def visual_lint(lang=None):
-    """对**任意** language 字典做体检（不再是"某个 style id 的体检"）。"""
+    """对**任意** language 字典做体检；传字符串（风格 id）时明确报错而不是静默通过。"""
     if isinstance(lang, str):
-        # 老的 visual_lint("cinema") 调用：没有命名语言了，明确报错而不是静默通过
-        return ["没有命名视觉语言 %r（v1.0.1 起视觉语言由 design 现场生成）" % lang]
+        return ["没有命名视觉语言 %r（视觉语言由 design 现场生成）" % lang]
     return visual_lint_language(lang or {})
 
 
-def visual_lint_all():
-    """v1.0.1 起没有内置语言可逐一检查，保留空实现只为兼容。"""
-    return {}
 # ============================================================================
-# 五、内容指纹与自动选风格
+# 六、解析：任何"按 style id 取外观"的调用都必须明确失败
 # ============================================================================
-
-FP_VERSION = "style-fp-v1"
-
-
-def _digest(*parts):
-    """sha1 派生的稳定 32 位无符号整数（禁 hash()：str hash 每次进程带随机盐）。"""
-    h = hashlib.sha1(("|".join(str(p) for p in parts)).encode("utf-8")).hexdigest()
-    return int(h[:8], 16)
-
-
-def _text_of(script):
-    """把剧本里所有可读文字摊平（标题权重最高）。"""
-    title = str(script.get("title") or "")
-    chunks = [title, title]                      # 标题 x2
-    for ln in script.get("lines") or []:
-        chunks.append(str(ln.get("chapter") or ln.get("kicker") or ""))
-        chunks.append(str(ln.get("text") or ""))
-        chunks.append(str(ln.get("sub") or ""))
-        for it in ln.get("items") or []:
-            if isinstance(it, dict):
-                chunks.append(str(it.get("text") or ""))
-            else:
-                chunks.append(str(it))
-    return "".join(chunks)
-
-
-def fingerprint(script):
-    """三级内容指纹。同剧本 -> 同指纹；换一部片 -> 三个都变。"""
-    title = str(script.get("title") or "")
-    lines = script.get("lines") or []
-    texts = [str(ln.get("text") or "") for ln in lines]
-    kinds = [str(ln.get("kind") or "body") for ln in lines]
-    dur_bucket = int(len("".join(texts)) // 120)     # 体量桶：改几个字不动它
-    return {
-        "version": FP_VERSION,
-        "full": "%08x" % _digest(FP_VERSION, "full", title, *texts),
-        "tempo": "%08x" % _digest(FP_VERSION, "tempo", title, *kinds, dur_bucket),
-        "style": "%08x" % _digest(FP_VERSION, "style", title),
-    }
-
-
-# —— 自动选风格（score_styles / pick_style / _kind_profile）已删除 ——
-#
-# 这三个函数是"机器替你挑一套内置风格"的实现：按关键词给 8 套 STYLES 打分、同分用指纹破平。
-# v1.0.1 把 STYLES/THEMES 清空后它们必然崩（`THEMES[STYLES[sid]["theme"]]` -> KeyError），
-# 而且留着也没有意义 —— 没有"可选集合"就没有"选"这件事。
-#
-# 为什么必须**删掉**而不是留着报错：留下一个"看起来还能调用"的入口，
-# 下一个维护者会以为它是活的，调通了才发现整个语义已经不成立。
-# 现在的唯一路径是 propose.py 现场采样。
-
-
-# ============================================================================
-# 六、解析：把 script 里所有显式覆盖 + 自动结果合成一份「最终计划」
-# ============================================================================
-
-
-def _pick_from_pool(pool, fp_hex, salt=""):
-    """从池里按指纹稳定取一个。
-
-    salt 用来把"风格 id"混进选择：不同风格即便指纹相同，也会落到池里不同位置。
-    没有 salt 时会出现 paper 与 lo-fi 都选到 84BPM / G 调这种"风格不同但基础参数撞车"，
-    听感上就打了折扣 —— 这正是 v0.4 同质化的另一种形态。
-    """
-    seq = [p for p in pool if p]
-    if not seq:
-        return None
-    v = int(fp_hex, 16)
-    if salt:
-        v += _digest("pick", salt)
-    return seq[v % len(seq)]
-
-
-def _as_bool(v, default=False):
-    if v is None:
-        return default
-    if isinstance(v, str):
-        return v.strip().lower() not in ("0", "false", "no", "off", "")
-    return bool(v)
-
-
-# persona 名 -> edge voice id 的**兼容映射**（v1.0 / D3）。
-# 这不是"身份表"：它不带语速/音高/响度补偿，只是把老 STYLES 表里的字符串翻译成
-# voicekit 现在要求的 edge voice id。真正的声音参数在 design.audio.voice 里。
-_PERSONA_VOICE = {
-    "narrator_male": "zh-CN-YunyangNeural",
-    "narrator_female": "zh-CN-XiaoxiaoNeural",
-    "warm_female": "zh-TW-HsiaoChenNeural",
-    "bright_female": "zh-CN-XiaoyiNeural",
-    "authority_male": "zh-CN-YunjianNeural",
-    "young_male": "zh-CN-YunxiNeural",
-    "teen_male": "zh-CN-YunxiaNeural",
-    "dialect_ne_female": "zh-CN-liaoning-XiaobeiNeural",
-    "dialect_sx_female": "zh-CN-shaanxi-XiaoniNeural",
-}
-
-
-def _persona_to_voice_id(name):
-    """老 persona 名 -> edge voice id；已经是 voice id 就原样返回。"""
-    s = str(name or "").strip()
-    if not s:
-        return s
-    return _PERSONA_VOICE.get(s, s)
-
-
-_AUTO_WARNED = []
-
-
-def _warn_auto_style_once():
-    """每天每进程只喊一次：自动选型已经不该再用了。"""
-    if _AUTO_WARNED:
-        return
-    _AUTO_WARNED.append(1)
-    import sys as _sys
-    print("[stylekit][deprecated] style=auto 的自动选型已停用（v1.0 / D3）。"
-          "\n  现在的主路径是 work/design.json：先 python propose.py --brief \"...\" 出方案，"
-          "\n  再 python propose.py --confirm --candidate A 冻结设计。"
-          "\n  想以出厂预设为起点：python propose.py --preset tech-deep ...",
-          file=_sys.stderr)
 
 
 def resolve_script_style(script):
-    """已删除：v1.0.1 起本技能没有内置风格表，这里只剩「明确报错 + 迁移指引」。
+    """没有设计时的**唯一失败出口**：明确报错并给两步迁移指引。
 
-    历史：v1.0.1 之前本函数按 8 套内置 STYLES 解析出一份风格计划
-    （主题 + 配乐 + 声线 + 节奏 + 版式轮换）。模板删掉后它已经没有可解析的对象——
-    但 v1.0.1 只删了表，没删这条函数，于是留下三个死分支：
-    `pick_style` / `STYLES[sid]` / `THEMES[...]`，任何一个被调用都是 NameError/KeyError，
-    连 `style="auto"` 都直接崩（v1.0.2 实测）。
+    本函数不再解析任何东西——本技能没有内置风格表，"按 style id 取外观"这件事不存在。
+    但它必须**存在且报错**：`filmkit.style_plan` / `scenes.py` / `preflight` / `qavmaf`
+    里都有「拿不到 plan 时回退到这里」的调用点。保留一个能给指引的入口，
+    那些点会得到"先 propose 再 confirm"；删掉函数只会得到 AttributeError。
 
-    为什么保留函数而不是删掉：`filmkit.style_plan` / `scenes.py` / `preflight` /
-    `qavmaf` 里还有「拿不到 plan 时回退到这里」的调用点。保留一个明确报错的入口，
-    那些点会得到一句能照着做的指引；删掉函数只会得到 AttributeError。
-    真正的计划只有两个来源：designkit.design_to_plan（work/design.json）或
-    render.resolve_style（已解析好的 script["_style"]）。
+    真正的计划只有两个来源：`designkit.design_to_plan(work/design.json)`，
+    或 `render.resolve_style()` 解析好挂在 `script["_style"]` 上的那一份。
     """
     raw = script.get("style") if isinstance(script, dict) else None
     extra = ("（收到 style=%r）" % (raw,)) if raw not in (None, "") else ""
     raise ValueError(
-        "这个剧本没有可解析的设计%s：v1.0.1 起本技能不提供任何内置风格/模板，\n"
+        "这个剧本没有可解析的设计%s：本技能不提供任何内置风格/模板，\n"
         "  「写 style 走内置外观」与「不写 style 走老外观」两条路都已删除。\n"
         "  正确做法（两步）：\n"
         "    1) python propose.py --brief \"题材/要求\" --script <film.json> --n 3\n"
@@ -622,8 +448,8 @@ def resolve_script_style(script):
 # 七、门禁：主题体检（对比度 / 明暗 / 结构）
 # ============================================================================
 #
-# 阈值不是拍脑袋：以 v0.4 现行主题实测值当基线（tech-deep：ink 16.3 / muted 7.8 / accent 7.0，
-# 那是旧版按 bg/bg2 中点量的；v0.8 改成按两端最差值量后同一主题是 14.8 / 7.1 / 6.3，仍远高于线）。
+# 阈值来自 WCAG 2.1（inks 取 AAA 正文线，其余取 AA），不是拍脑袋定的。
+# 量法：**按 bg/bg2 两端的最差值**，不看中点——中点会把"一端合格、一端不合格"平均过去。
 
 LINT_LIMITS = {
     "ink": 7.0,          # 正文级（WCAG AAA 正文线）
@@ -641,10 +467,8 @@ def bg_contrast(th, role):
     """文字色对背景的**最差**对比度：bg/bg2 是上下两端的主渐变（scenes._bg 按行插值），
     任何一行文字都可能落在两端附近，所以取二者较小值，而不是看中点。
 
-    为什么不能只看中点：lo-fi 的 muted(86,100,96) 对 bg 5.28、对 bg2 只有 4.42，
-    中点平均 4.84 把 AA 4.5 的门槛"平均"过去了 —— 实测过（v0.8 深审），
-    这一版把门槛改成端点最差值，并同时下调 lo-fi 的 muted 到 (84,98,94)
-    （bg 5.44 / bg2 4.56，两端都过）。
+    为什么不能只看中点：某次实测的 muted(86,100,96) 对 bg 是 5.28、对 bg2 只有 4.42，
+    中点平均 4.84 把 AA 4.5 的门槛"平均"过去了。端点判据不会漏掉这种。
     """
     return min(contrast(th[role], th["bg"]), contrast(th[role], th["bg2"]))
 
@@ -680,16 +504,6 @@ def theme_lint(th):
     return bad
 
 
-def lint_all():
-    """全部内置主题体检，返回 {style_id: [问题...]}（只有有问题的才在里面）。"""
-    out = {}
-    for sid in STYLE_IDS:
-        bad = theme_lint(THEMES[STYLES[sid]["theme"]])
-        if bad:
-            out[sid] = bad
-    return out
-
-
 # ============================================================================
 # 八、片内一致性：明暗族判定（段界不许跨族，否则必触发闪烁门禁）
 # ============================================================================
@@ -704,35 +518,16 @@ def family_compatible(a, b):
     return is_dark(a) == is_dark(b)
 
 
-def blend_theme(a, b, p):
-    """按 p in [0,1] 线性插值两套主题（同族时用于段界缓变，避免整片换底触发闪烁门禁）。"""
-    if not family_compatible(a, b):
-        raise ValueError("不能混合明暗族不同的主题：%s / %s" % (a.get("id"), b.get("id")))
-    q = max(0.0, min(1.0, float(p)))
-    out = dict(a)
-    for k, va in a.items():
-        vb = b.get(k, va)
-        if isinstance(va, tuple) and len(va) == 3 and isinstance(vb, tuple) and len(vb) == 3:
-            out[k] = tuple(int(round(va[i] * (1 - q) + vb[i] * q)) for i in range(3))
-        elif (isinstance(va, (int, float)) and not isinstance(va, bool)
-              and isinstance(vb, (int, float))):
-            out[k] = type(va)(round(va * (1 - q) + vb * q, 4))
-    return out
-
-
 # ============================================================================
-# 九、CLI：v1.0.1 起没有可列/可看的风格（模板已删）
+# 九、CLI：没有可列/可看的风格，只解释能力去了哪
 # ============================================================================
 #
-# 这个 CLI 以前有 --list / --show / --lint 三个动作，列的是内置 STYLES 表。
-# v1.0.1 删表时漏掉了这里，于是：--list/--show 直接 NameError: ALL_STYLE_IDS，
-# --lint 在空表上一条都不检查却 exit 0 —— 后者是最坏的一种：**假通过**。
-# 本版把三个动作改成「明确说明能力已迁移 + 非零退出码」，并把 lint_all / _describe
-# 一并删掉（留着就是死代码，下一个人会以为它还能用）。
+# --list / --show / --lint 三个动作保留**壳**：说明"没有可选外观清单"并以 exit 2 退出。
+# 不能返回 0 —— 在空表上 exit 0 是假通过，脚本会以为"列出来了"。
 
 
 def _explain_removed(what):
-    print("[stylekit] %s 已随内置风格表一起删除（v1.0.1：本技能不提供任何模板）。" % what,
+    print("[stylekit] %s：本技能没有可选外观清单（不用内置风格表）。" % what,
           file=sys.stderr)
     print("  现在没有「可选外观清单」，每一版外观都是现场生成的：", file=sys.stderr)
     print("    python propose.py --brief \"题材/要求\" --script <film.json> --n 3", file=sys.stderr)
@@ -744,10 +539,10 @@ def _explain_removed(what):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="风格包工具（v1.0.1 起无内置风格：本命令只解释迁移，不再列外观清单）")
-    ap.add_argument("--list", action="store_true", help="（已移除）列出内置风格")
-    ap.add_argument("--show", metavar="ID", help="（已移除）查看某个内置风格")
-    ap.add_argument("--lint", action="store_true", help="（已移除）批量体检内置主题")
+        description="视觉原语库（无内置风格：本命令只说明外观从哪来，不列清单）")
+    ap.add_argument("--list", action="store_true", help="（没有此能力）列出外观")
+    ap.add_argument("--show", metavar="ID", help="（没有此能力）查看某个外观")
+    ap.add_argument("--lint", action="store_true", help="（没有此能力）批量体检内置主题")
     ap.add_argument("--json", action="store_true", help="配合 --show 输出 JSON")
     a = ap.parse_args(argv)
     try:

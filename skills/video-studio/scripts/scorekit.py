@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""scorekit.py — 程序化配乐（v0.7.0）。
+"""scorekit.py — 程序化配乐。
 
 用代码写一张能贯穿整部片子的配乐：调性/和弦表、段落能量、节拍网格、律动层、
 段落过门、自动电平与"吸气"，全部由 numpy + sfxkit 现场合成，不用任何采样。
@@ -22,18 +22,16 @@
     render(duration, bpm=120, key="Dm", anchors=None, sections=None, seed=7) -> (samples, report)
     save(path, x, sr=SR) / load(path, sr=SR) / selftest()
 
-v1.0.1 变更（零模板）：
-    **删除了 v0.5 的配乐风格层**（MUSIC_STYLES / MUSIC_STYLE_IDS / render_styled /
-    指纹结构变奏那一整套）。本技能不再提供任何"配乐模板"：需要现场编排的配乐请用
-    musicgen.py（参数化编排器），本模块只保留**技术原语**——
+零模板：本模块不提供曲风表，只提供**技术原语**——配乐的调式/调性/BPM/情绪/编曲请用
+musicgen.py（参数化编排器）现场编排：
       * Score：和声表 / 段落能量 / 节拍网格 / 律动层 / 过门 / 吸气 / 自动电平；
       * _Bus / _Bank：总线、混音、六类合成音色、乒乓延迟、侧链；
       * _k_weighted_mono / _approx_lufs / _short_term_db：响度与频谱测量；
       * save / load：24-bit PCM WAV 读写（NaN/Inf 拒绝写盘）；
-      * render(duration, bpm, key, anchors, sections, seed)：v0.4 的确定性配乐路径，
+      * render(duration, bpm, key, anchors, sections, seed)：确定性配乐路径，
         逐样本可复现（自测第 18 条守着）。
-    render() 仍接受 style/mood/fingerprint/music_plan/pace 这几个**旧参数**，只是为了
-    让老调用方不因 TypeError 静默崩掉；非 legacy 的 style 一律明确报错并指向 musicgen.py。
+    render() 仍接受 style/mood/fingerprint/music_plan/pace 这几个参数，只是为了
+    让既有调用方不因 TypeError 静默崩掉；非 legacy 的 style 一律明确报错并指向 musicgen.py。
 """
 from __future__ import annotations
 
@@ -51,7 +49,7 @@ import numpy as np
 
 import sfxkit as S                      # 唯一音频依赖：numpy + sfxkit
 
-__version__ = "0.7.0"
+__version__ = "1.0.4"
 
 SR = 48000                             # 采样率（与 filmkit / sfxkit 一致）
 BEATS_PER_BAR = 4                      # 4/4
@@ -115,7 +113,7 @@ _DEGREE_TABLE = (
     ("VII", 10, (0, 4, 7, 12), ""),
     ("I", 0, (0, 4, 7, 12), ""),          # 结尾大三和弦（皮卡迪三度）
     ("sus2", 0, (0, 2, 7, 12), "sus2"),   # 悬留色彩，过门/段首可用
-    # ---- v0.5：大调级数与七和弦色彩。只允许在表尾追加；前 10 项顺序不许动（_build_key 依赖） ----
+    # ---- 大调级数与七和弦色彩。只允许在表尾追加；前 10 项顺序不许动（_build_key 依赖） ----
     ("ii", 2, (0, 3, 7, 12), "m"),
     ("iii", 4, (0, 3, 7, 12), "m"),
     ("IV", 5, (0, 4, 7, 12), ""),
@@ -129,7 +127,7 @@ _DEGREE_TABLE = (
     ("V7", 7, (0, 4, 7, 10), "7"),
     ("vi7", 9, (0, 3, 7, 10), "m7"),
     ("i7", 0, (0, 3, 7, 10), "m7"),
-    # ---- v0.7：和弦替换用的七和弦色彩。同根音、同三音，只把五度后的音换成小七度；
+    # ---- 和弦替换用的七和弦色彩。同根音、同三音，只把五度后的音换成小七度；
     # 只允许在表尾追加（前 10 项顺序被 _build_key / 老报告依赖），供 _CHORD_SWAPS 使用。 ----
     ("VI7", 8, (0, 4, 7, 10), "7"),
     ("III7", 3, (0, 4, 7, 10), "7"),
@@ -240,14 +238,14 @@ KEYS = {
     "Em": _build_key("E", 4, "sharp", "E 小调"),
 }
 
-# 大调三档和声进行（v0.5）。小调那边 PROGRESSIONS 保持原样：legacy 路径只读 PROGRESSIONS。
+# 大调三档和声进行。小调那边 PROGRESSIONS 保持原样：legacy 路径只读 PROGRESSIONS。
 PROGRESSIONS_MAJOR = {
     "calm": ("I", "vi", "IV", "V"),
     "body": ("I", "V", "vi", "IV"),
     "drive": ("I", "IV", "V", "I"),
 }
 
-# v0.5：6 个大调（与 stylekit.MAJOR_KEYS 同名同义）。用同一个 _build_key 构建，
+# 6 个大调（与 stylekit.MAJOR_KEYS 同名同义）。用同一个 _build_key 构建，
 # 语义与小调键完全一致（级数表 -> 和弦名/低音/音名）；只是 progression 换成大调级数。
 # 写法按惯例挑：C/F/Bb 用降号、G/D/A 用升号。
 KEYS_MAJOR = {
@@ -262,7 +260,7 @@ for _kname in KEYS_MAJOR:
     KEYS_MAJOR[_kname]["progression"] = dict(PROGRESSIONS_MAJOR)
 del _kname
 
-# 全部可用调：4 个小调 + 6 个大调。KEYS 本身保持 v0.4 的 4 个小调不变（兼容性锚点）。
+# 全部可用调：4 个小调 + 6 个大调。KEYS 本身保持 4 个小调不变（兼容性锚点）。
 KEYS_ALL = dict(KEYS)
 KEYS_ALL.update(KEYS_MAJOR)
 
@@ -1541,21 +1539,21 @@ def render(duration, bpm: float = 120.0, key: str = "Dm", anchors=None, sections
     anchors：timeline.json 的 [{id,kind,start,end}]（自动按 kind 映射能量分段）；
     sections：显式段落（绝对时间或 at 引用），在 anchors 之后追加/覆盖空隙。
 
-    v1.0.1：**配乐风格层已删除**。style 只接受 None / "" / "legacy"（等价于旧路径）；
-    其它风格 id 一律抛 ValueError 并指向 musicgen.py —— 本仓库不再提供配乐模板。
-    mood / fingerprint / music_plan / pace 是为了签名兼容而保留的**废参数**：v0.5 之后
-    它们只影响风格层，风格层没了就一律忽略（不要靠它们调音色，那是模板思维）。
+    没有配乐风格层。style 只接受 None / "" / "legacy"（都走本模块的确定性路径）；
+    其它风格 id 一律抛 ValueError 并指向 musicgen.py —— 本仓库不提供配乐模板。
+    mood / fingerprint / music_plan / pace 是为了签名兼容而保留的**废参数**：
+    它们只影响风格层，风格层不存在就一律忽略（不要靠它们调音色，那是模板思维）。
     """
     sid = "" if style is None else str(style).strip().lower()
     if sid not in ("", "legacy"):
         raise ValueError(
-            "scorekit 的配乐风格层已删除（v1.0.1 零模板）：style=%r 不再可用。\n"
+            "scorekit 的配乐风格层已删除（零模板）：style=%r 不再可用。\n"
             "  需要现场编排的配乐请用 musicgen.py：\n"
             "    import musicgen as MG\n"
             "    samples, report = MG.render(dur, bpm=110, key=%r, scale=\"minor\",\n"
             "                                mood=%r, seed=7)\n"
             "  （成片链路见 render.py 的 _score_with_musicgen）" % (style, key, mood))
-    # ---- 以下与 v0.4 一字不差：legacy 逐样本兼容是硬契约，别在这段里改任何东西 ----
+    # ---- legacy 逐样本兼容是硬契约：这段代码别改任何东西 ----
     sc = Score(duration, bpm=bpm, key=key, seed=seed)
     for s in _merge_sections(anchors, sections, float(duration)):
         sc.section(s["name"], s["start"], s["end"], s["energy"])
@@ -1870,7 +1868,7 @@ def selftest() -> int:
     check("16. 集成形态：anchors+sections 同起点覆盖 / 无 end 自动补到片尾", ok_it,
           " | ".join(f"{b['name']}:{b['start']}-{b['end']}:e{b['energy']}" for b in merged))
 
-    # 17) v1.0.1 大调 & 七和弦表（KEYS 仍是 v0.4 的 4 个小调）（KEYS 仍是 v0.4 的 4 个小调）
+    # 17) 大调 & 七和弦表（KEYS 仍是 4 个小调）
     bad_major = []
     for kname, kv in KEYS_MAJOR.items():
         for deg in ("I", "ii", "iii", "IV", "V", "vi", "vii", "sus4",
@@ -1887,7 +1885,7 @@ def selftest() -> int:
           "; ".join(bad_major[:3]) if bad_major
           else f"{len(KEYS_ALL)} 个调，{len(KEYS_ALL['C']['chords'])} 个级数/调")
 
-    # 18) v1.0.1 legacy 兼容：style=None / "legacy" / 任意 mood 都走 v0.4 原路径，逐样本一致
+    # 18) legacy 兼容：style=None / "legacy" / 任意 mood 都走同一条确定性路径，逐样本一致
     xn, rn = render(6.0, bpm=120, key="Dm", seed=7)
     xl, rl = render(6.0, bpm=120, key="Dm", seed=7, style="legacy")
     xm, _rm = render(6.0, bpm=120, key="Dm", seed=7, style=None, mood="driving",
@@ -2005,7 +2003,7 @@ def main(argv=None) -> int:
     sucks = _parse_suck_list(args.suck)
 
     t0 = time.perf_counter()
-    # legacy：与 v0.4 完全同一段代码（逐字节兼容是硬契约）
+    # legacy：与确定性路径完全同一段代码（逐字节兼容是硬契约）
     if anchors or sections:
         merged = _merge_sections(anchors, sections, float(args.duration))
     else:

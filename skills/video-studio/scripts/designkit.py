@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""designkit.py — 设计 DSL（v1.0）：把"这一版长什么样"写成可校验、可采样的 JSON。
+"""designkit.py — 设计 DSL：把"这一版长什么样"写成可校验、可采样的 JSON。
 
 设计原则（与 stylekit 一致的纪律）
 ----------------------------------
@@ -8,7 +8,7 @@
 2. 确定性：只用 sha1 派生，禁 random / time / hash()（str hash 每进程带随机盐）。
    同一份 brief 永远采样出同一组候选。
 3. fail-closed：设计缺字段、枚举越界、对比度不达标 -> 立刻报错，**绝不静默回落默认值**
-   （静默回落 = 所有片子又长得一样，这正是本次改造要根除的毛病）。
+   （静默回落 = 所有片子又长得一样）。
 
 design.json 的形状（schema=1）
 -----------------------------
@@ -46,13 +46,13 @@ design.json 的形状（schema=1）
 
 配色不是"随便取色"：语义色由对比度求解得到
 -----------------------------------------
-实测（本轮）：纯 HSV 随机取色的 theme_lint 通过率 21/60 = 35%，不可用。
-改成"色相族 + (s,v) 网格求解，取最接近设计意图且满足对比度的色"后：60/60 = 100%。
+实测：纯 HSV 随机取色的 theme_lint 通过率只有 21/60 = 35%，不可用；
+按"色相 + (s,v) 网格求解，取最接近设计意图且满足对比度的色"可达 60/60 = 100%。
 网格是 s,v ∈ {0,0.1,...,1.0} 的 11×11；可行解按 |Δs|+|Δv| 取最小（并列取先遇到者，确定性）。
 7 个语义色的对比度门槛直接取 stylekit.LINT_LIMITS（与 theme_lint 同一份）。
 
-注意：**设计里存的是求解后的 11 个颜色**，不是配色族名——这样 design.json 是自足的，
-换机器/换版本也不会因为"rs 里没有那个族"而漂移；配色族只用于采样期的求解过程。
+注意：**设计里存的是求解后的 11 个颜色**，不是配色名——这样 design.json 是自足的，
+换机器/换版本不会因为"哪儿没有那个名字"而漂移；词 -> 色相锚点只用于采样期的求解过程。
 
 对外接口
 --------
@@ -62,7 +62,7 @@ design.json 的形状（schema=1）
     design_fingerprint(design) -> str
     design_distance(a, b)   -> dict             # 用于"伪多方案"门禁
 
-brief.must_have / avoid 是真过滤（v1.1）
+brief.must_have / avoid 是真过滤
 ----------------------------------------
 词表见 _CONSTRAINT_WORDS：配色 / 母题 / 转场 / 情绪 / 声线，中文按子串认、英文按整词认。
 must_have 是 AND（候选不许违反任何一条），avoid 是否定（违反一条就出局）。
@@ -114,13 +114,13 @@ FPSES = (24, 25, 30, 50, 60)
 HOLD_POLICIES = ("none", "readable", "long")
 SFX_DENSITIES = ("none", "sparse", "normal", "rich")
 
-# 配色：**没有命名家族**（v1.0.1）。
+# 配色：**没有命名家族**。
 #
 # 决定这件事的依据很直白：本技能只提供"生成视频的技术"，不提供模板。既然没有模板，
 # 就不该存在"深蓝 / 近黑金 / 冷薄荷…"这样一份**可选清单** —— 有清单就意味着
-# 用户的片子只能在 8 个预设外观里挑，第 9 种永远不存在。
+# 用户的片子只能在少数几个预设外观里挑，下一个永远不存在。
 #
-# 现在的模型是**连续色相空间**：
+# 模型是**连续色相空间**：
 #   · 底色 = (色相 h ∈ [0,360), 饱和度 s, 明度 v) 三个连续量 -> 直接算出 bg/bg2/surface；
 #   · 其余 8 个语义色（ink/muted/dim/accent/accent2/good/bad/rule）由对比度网格求解；
 #   · 全部通过 theme_lint 才算数（对比度不足就重采，绝不悄悄放行）。
@@ -144,13 +144,13 @@ def _palette_from_hue(hue, sat, val, dark):
     return bg, bg2, surface
 
 
-# 没有"配色族"这个概念了（v1.0.1）。这个空 dict 只是为了让老调用点
+# 没有"配色族"这个概念：这个空 dict 只是为了让按名遍历的调用点
 # （`for name in PALETTE_FAMILIES` 之类）不 AttributeError —— 它必须保持为空：
 # 一旦有人往里加东西，就等于偷偷恢复了一份"可选外观清单"。
 PALETTE_FAMILIES = {}
 
 # 但 brief 里仍然会有人说"要深蓝 / 近黑 / 薄荷"。这些词要能生效，否则用户的
-# 自然语言要求就落空了（那正是 v1.0 的毛病）。
+# 自然语言要求就落空了。
 # 做法：词 -> **色相锚点 + 明暗**，不是"族名 -> 一套现成外观"。锚点只是采样的起点，
 # 色相仍然是连续量（可在锚点附近 ±HUE_WINDOW 内浮动）。
 _PALETTE_ANCHOR = {
@@ -165,10 +165,9 @@ _PALETTE_ANCHOR = {
 }
 _HUE_WINDOW = 26.0          # 锚点附近 ±26°（再宽就不像"深蓝"了，再窄等于恢复成枚举）
 # 多个候选之间的"底色必须看得出不一样"的色相最小间距（度）。
-# 为什么是 12° 而不是"配色族"：v1.0.1 删掉风格表后没有族可枚举；12° 是并排看图时
-# 人眼能稳定分辨的色相下限附近（再小就成了同一片底色的细微偏色）。约束收窄时
-# 可选色相窗口只有 52° 宽，12° 间距仍能放下 3–4 个候选，不会像"24° 分桶"那样
-# 在 n=3 时大半概率采样失败。
+# 为什么是 12° 而不是分桶：12° 是并排看图时人眼能稳定分辨的色相下限附近
+# （再小就成了同一片底色的细微偏色）。约束收窄时可选色相窗口只有 52° 宽，
+# 12° 间距仍能放下 3–4 个候选，不会像"24° 分桶"那样在 n=3 时大半概率采样失败。
 _PALETTE_KEEP_GAP = 12.0
 
 
@@ -194,9 +193,8 @@ _GOOD_HUE = 135.0
 _BAD_HUE = 5.0
 
 # 情绪 -> BPM / 层门限。注意这里**没有"情绪 -> 曲风"的映射**：
-# v1.0 曾有一张 _MUSIC_BY_MOOD 把 7 种情绪映射到 7 套 scorekit 风格表，
-# 那是把"配乐模板"伪装成参数。v1.0.1 起配乐由 musicgen 现场编排，
-# 情绪只决定 BPM 与织体门限，不再指向任何现成风格。
+# 把情绪映射到一套配乐风格表，等于把"配乐模板"伪装成参数。
+# 配乐由 musicgen 现场编排，情绪只决定 BPM 与织体门限，不指向任何现成风格。
 _MOOD_BPM = {
     "calm": 78, "reflective": 86, "hopeful": 92, "steady": 104,
     "driving": 124, "tense": 98, "uplifting": 118,
@@ -219,10 +217,10 @@ _TRANS_WORD = {
 # 声线池：全部是可被 static 校验的 zh-CN-XxxNeural（本模块不 import voicekit——
 # 那会拉起 edge_tts。格式只做正则，不做"这个 id 是否真的存在"的联网校验）。
 #
-# v1.0 / P4：**只从"有响度补偿数据的音色"里采样**。
+# **只从"有响度补偿数据的音色"里采样**。
 # 为什么：voicekit 的响度补偿是一张按 voice id 的数据表（VOICE_LOUDNESS / assets/voice_loudness.json）；
 # 采样器如果产出表里没有的音色，那行的 gain_db 会回落 0 —— 等于"这个候选的旁白电平没校准"。
-# 实测（改造前）：5 个题材 × 3 候选共产出 7 个音色，其中 **4 个没有补偿数据**。
+# 实测：5 个题材 × 3 候选共产出 7 个音色，其中 **4 个没有补偿数据**。
 # 两处各存一份清单必然漂移，所以这里直接读共享 JSON（不 import voicekit）。
 _VOICE_LOUDNESS_PATH = os.path.normpath(
     os.path.join(HERE, os.pardir, "assets", "voice_loudness.json"))
@@ -287,7 +285,7 @@ _STRUCT_KEYS = ("segments", "beats", "hold_policy", "target_sec")
 def _theme_field_keys():
     """主题字段清单：从 _theme 构造器现场造一份样板再取键。
 
-    为什么不再从 ST.THEMES[某套内置主题] 取：v1.0.1 删光了内置主题，没有"参照物"了。
+    为什么不从某套内置主题取：内置主题表已经不存在，没有"参照物"。
     也不手抄一份常量 —— 手抄的清单一定会在某次改构造器时漂移，
     然后表现成"某个颜色字段取不到"这种半夜才能查出来的 KeyError。
     """
@@ -308,16 +306,16 @@ def _theme_field_keys():
 
 
 # 模块加载时立刻算出来：它只是把构造器跑一遍取键名，没有副作用。
-# （曾经写成空元组占位、忘了回填，于是所有 design 都报"主题字段集合不一致"——
+# （占位成空元组而忘了回填，所有 design 都会报"主题字段集合不一致"——
 #   断言本身是对的，错在参照物是空的。）
 _THEME_FIELD_KEYS = _theme_field_keys()
 
 
 _VISUAL_KEYS = ("palette", "family", "typography", "motif", "transition", "motion",
                 "bias", "layout", "layout_cycle", "hud", "size", "fps", "subtitle")
-# 字幕参数（v1.0.2）：以前字幕字号 / 位置 / 背板 / 圆角全写死在 filmkit.draw_subtitle，
-# 于是**任何两条片子**的字幕带都一模一样 —— 恰好是用户原则 5 说的"大面积长时间重复"。
-# 现在这些参数进设计 DSL（可选，缺省 = 过去的行为，老 design.json 逐像素不变）。
+# 字幕参数：字号 / 位置 / 背板 / 圆角若全写死在渲染器里，
+# **任何两条片子**的字幕带都一模一样 —— 恰好是原则 5 说的"大面积长时间重复"。
+# 这些参数进设计 DSL（可选，缺省 = 最朴素的字幕带，不写 subtitle 的 design.json 逐像素不变）。
 _SUBTITLE_DEFAULTS = {
     "size": 46, "y": None, "align": "center", "plate_alpha": 170,
     "radius": 10, "family": None, "color": None, "max_lines": 2,
@@ -404,7 +402,7 @@ def _slug(text):
 
 
 # ============================================================================
-# 三、配色求解：色相族 + (s,v) 网格（本轮实测唯一 100% 通过的做法）
+# 三、配色求解：色相锚点 + (s,v) 网格（实测唯一 100% 通过的做法）
 # ============================================================================
 
 
@@ -430,14 +428,14 @@ def _solve_role(hue, s0, v0, need, refs):
 
 
 def _solve_palette(family, hue_shift=0.0, target_shift=0.0):
-    """一个配色族 -> 11 个颜色（语义色全部求解；无解直接报错，不回落）。
+    """一个配色锚点 -> 11 个颜色（语义色全部求解；无解直接报错，不回落）。
 
-    hue_shift / target_shift 是采样器给同族不同候选留的小扰动（确定性，幅度很小），
+    hue_shift / target_shift 是采样器给不同候选留的小扰动（确定性，幅度很小），
     让"同族不同设计"也有色相差异；扰动不会改变可行性（网格里始终有 v=0/v=1 的端点）。
     """
-    # 只接受 (色相, 饱和度, 明度, 暗色)。v1.0.1 之前还接受 8 个命名族（"deep-blue" 之类），
-    # 那条兼容分支已经删除：design.json 里存的是**算好的 RGB**，从不存族名，
-    # 所以"老 design 带族名"这件事根本不存在——留着就是一个永远走不到、只能误导人的分支。
+    # 只接受 (色相, 饱和度, 明度, 暗色)，不接受命名族（"deep-blue" 之类）：
+    # design.json 里存的是**算好的 RGB**，从不存名字，
+    # 所以"design 带名字"这件事根本不存在——留着分支只会在别处误导人。
     if not isinstance(family, (tuple, list)) or len(family) < 4:
         raise ValueError("配色必须是 (色相, 饱和度, 明度, 暗色) 四元组；收到 %r" % (family,))
     hue, sat, val = float(family[0]), float(family[1]), float(family[2])
@@ -505,7 +503,7 @@ def _safe_bias(bias):
 
 
 def _theme_id(design_id):
-    # 设计 id 已经是 "design-xxxxxxxx"；这里只做字符规整，不再叠前缀。
+    # 设计 id 已经是 "design-xxxxxxxx"；这里只做字符规整，不叠前缀。
     return _slug(design_id)
 
 
@@ -554,7 +552,7 @@ def _theme_of_design(design):
         dict(style=vis["hud"]),
         qa,
     )
-    # 主题的字段清单：v1.0.1 起没有内置主题可参照，改成从构造器现场造一份样板取键。
+    # 主题的字段清单：没有内置主题可参照，从构造器现场造一份样板取键。
     # 为什么还要求"字段完全一致"：scenes.py 按固定键名取色，少一个键就是 KeyError，
     # 多一个键则说明构造器与消费端脱节 —— 两边必须严丝合缝。
     ref = set(_THEME_FIELD_KEYS)
@@ -599,7 +597,7 @@ _VISUAL_PROBE_ID = "__designkit_probe__"
 
 
 def _visual_lint_language(lang):
-    """对任意 language 字典做体检（v1.0.1：直接调纯函数，不再往 stylekit 的表里临时注册）。"""
+    """对任意 language 字典做体检（直接调纯函数，不往 stylekit 的表里临时注册）。"""
     return ST.visual_lint_language(lang)
 
 
@@ -718,14 +716,14 @@ def _validate_music(mu, bad):
     mode = mu.get("mode")
     if mode not in ("params", "file", "off"):
         bad.append("audio.music.mode=%r 必须是 params / file / off" % (mode,))
-    # v1.0.1：**不再要求 style**，也不再限定成 8 个内置名。
+    # **不要求 style**，也不限定成任何内置名。
     # 配乐由 musicgen 现场编排，它吃的是 bpm/key/scale/mood/seed + 可选的
-    # progressions/motif/drums/voices —— 没有"曲风"这个概念了。
-    # 老 design.json 里残留的 style 字段仍被接受（不校验取值），但不参与渲染，
-    # 避免"升级后老设计全部报错"。
+    # progressions/motif/drums/voices —— 没有"曲风"这个概念。
+    # design.json 里残留的 style 字段仍被接受（不校验取值），但不参与渲染，
+    # 避免"带了这个键的设计全部报错"。
     _need(mu, ("scale", "bpm", "key", "mood", "seed"), "audio.music", bad)
     if "style" in mu and not isinstance(mu["style"], str):
-        bad.append("audio.music.style 若存在必须是字符串（v1.0.1 起不参与渲染）")
+        bad.append("audio.music.style 若存在必须是字符串（不参与渲染）")
     if "scale" in mu:
         _enum_of(mu["scale"], SCALES, "audio.music.scale", bad)
     if "mood" in mu:
@@ -944,9 +942,9 @@ def validate_design(design):
         elif vis["fps"] not in FPSES:
             bad.append("visual.fps=%r 不在 %s 里" % (vis["fps"], FPSES))
 
-    # 版式轮换（v1.0.2）：片内按章节轮换版式，防"全片一张版式"。
-    # 不写 = 由 design_to_plan 按设计指纹自动派生一套轮换（老 design.json 行为不变，
-    # 因为 plan 里没有 layout_cycle 时 grammar 仍走 layout_default）。
+    # 版式轮换：片内按章节轮换版式，防"全片一张版式"。
+    # 不写 = 由 design_to_plan 按设计指纹自动派生一套轮换（plan 里没有 layout_cycle
+    # 时 grammar 仍走 layout_default，与不写这个字段等价）。
     if "layout_cycle" in vis and vis["layout_cycle"] is not None:
         cyc = vis["layout_cycle"]
         if not isinstance(cyc, (list, tuple)) or not cyc:
@@ -960,7 +958,7 @@ def validate_design(design):
             if len(set(str(x) for x in cyc)) < 2:
                 bad.append("visual.layout_cycle 至少要有 2 种不同版式（只有一种等于不轮换）")
 
-    # 字幕样式（v1.0.2）：可选；不写 = 过去写死的值（逐像素不变）。
+    # 字幕样式：可选；不写 = 最朴素字幕带的默认值（逐像素不变）。
     sub = vis.get("subtitle")
     if sub is not None:
         if not isinstance(sub, dict):
@@ -1113,18 +1111,18 @@ def design_to_plan(design):
         "theme": th,
         "language": lang,
         "layout_default": vis["layout"],
-        # 片内版式轮换（v1.0.2）：grammar 在 chapter_layout 为空时按章节轮换这个序列。
-        # 没有这个键（老 design.json）时 grammar 行为与过去完全一致。
+        # 片内版式轮换：grammar 在 chapter_layout 为空时按章节轮换这个序列。
+        # 没有这个键（设计里不写 layout_cycle）时 grammar 走 layout_default。
         "layout_cycle": list(vis.get("layout_cycle") or []),
         "chapter_layout": {},
-        # 字幕样式（v1.0.2）：render/filmkit 只读这一份，不再各自写默认值。
+        # 字幕样式：render/filmkit 只读这一份，不各自写默认值。
         "subtitle": subtitle_of(design),
         # 目标时长（可能为 null）：只用于"实测 vs 目标"提示，不改变 TTS 决定的真实时长。
         "target_sec": (None if design.get("structure", {}).get("target_sec") is None
                        else float(design["structure"]["target_sec"])),
         "music": {
-            # v1.0.1：不再有 "style" 这个键 —— 配乐由 musicgen 现场编排，
-            # 没有"曲风表"可指向。老设计里残留的 style 字段被忽略。
+            # 没有 "style" 这个键 —— 配乐由 musicgen 现场编排，
+            # 没有"曲风表"可指向。设计里残留的 style 字段被忽略。
             "scale": mu["scale"],
             "bpm": float(mu["bpm"]),
             "bpm_source": "design",
@@ -1148,11 +1146,11 @@ def design_to_plan(design):
                 "cps_band": (3.6, 5.6),
             },
         },
-        # ---- 声音参数（v1.0.2）----
-        # design.audio.music.gain_db / duck_db 与 audio.sfx.* 以前**只被校验、从不被读**：
-        # 用户改了 design.json 里的音量/音效开关，渲染结果一模一样（实测 enabled=false
-        # 仍出 8 条音效）。现在原样交给 render，由它填进 script 的 music/sfx 缺省位
-        # （film.json 显式写了就仍以 film.json 为准）。
+        # ---- 声音参数 ----
+        # design.audio.music.gain_db / duck_db 与 audio.sfx.* **必须真的被读**：
+        # 只校验不读，用户改了 design.json 里的音量/音效开关，渲染结果一模一样（实测
+        # enabled=false 仍出 8 条音效）。所以原样交给 render，由它填进 script 的
+        # music/sfx 缺省位（film.json 显式写了就仍以 film.json 为准）。
         "audio_overrides": {
             "music": {k: float(mu[k]) for k in ("gain_db", "duck_db") if mu.get(k) is not None},
             "sfx": {k: (bool(au["sfx"][k]) if k == "enabled" else
@@ -1232,11 +1230,10 @@ def _voice_key(design):
 def _music_key(design):
     """design -> 配乐身份（"调式/速度档/情绪"复合键）。
 
-    v1.0.2 修：这里以前读 audio.music.style —— 那是"配乐风格表"时代的字段，
-    v1.0.1 删掉风格表后采样器不再产出它，于是这一维**恒为 None**，两个候选
-    永远"配乐相同"，SKILL §0.5 承诺的"候选至少在含配乐在内的 2 个维度上不同"
-    实际少了一维（也是重采样失败率偏高的原因之一）。
-    现在用参数化配乐真正决定听感的三件事做签名：调式 + BPM 档（±6 归一）+ 情绪。
+    不能读 audio.music.style：那是"配乐风格表"的字段，采样器不产出它，读了这一维
+    就**恒为 None**，两个候选永远"配乐相同"，SKILL §0.5 承诺的"候选至少在含配乐
+    在内的 2 个维度上不同"会实际少一维（也是重采样失败率偏高的原因之一）。
+    签名用参数化配乐真正决定听感的三件事：调式 + BPM 档（±6 归一）+ 情绪。
     """
     mu = _dig(design, ("audio", "music")) or {}
     if not isinstance(mu, dict):
@@ -1356,7 +1353,7 @@ _CONSTRAINT_WORDS = (
 )
 
 _CATEGORY_VALUES = {
-    # 配色没有"可选值清单"了（连续色相空间），这里只保留空元组以兼容旧约束解析路径：
+    # 配色没有"可选值清单"（连续色相空间），这里只保留空元组以兼容约束解析路径：
     # brief 里写"深蓝"这类词会走 _CONSTRAINT_WORDS -> 被解释成色相区间（见 _resolve_constraints）。
     "palette": (),
     "motif": tuple(MOTIFS),
@@ -1434,7 +1431,7 @@ def _resolve_constraints(brief):
 
     must   {类别: (取值, 命中的词, 原句)}
     avoid  {类别: [(取值, 命中的词, 原句), ...]}
-    domain {类别: 允许的取值元组；None = 这一类没被约束（保持 v1.0 的原采样域）}
+    domain {类别: 允许的取值元组；None = 这一类没被约束（保持完整采样域）}
     unmatched 一句都没认出来的原句（按出现顺序去重）——交给顶层提示用户"这条没生效"
     """
     must_raw = [str(x) for x in (brief.get("must_have") or [])]
@@ -1538,10 +1535,10 @@ def _voices_for(genders):
 
 
 def _palette_family_of(design):
-    """design -> 配色族名（反查 bg/bg2/surface 三个锚点；认不出返回 None）。
+    """design -> 配色分桶名（反查 bg 的色相与明暗；认不出返回 None）。
 
     为什么反查而不是在 design 里多存一个 family 字段：design.json 要保持"自足"，
-    配色一旦存了族名，改族名就会让老设计漂移；三个底色是采样时原样写进去的，反查无歧义。
+    配色一旦存了桶名，改桶就会让既有设计漂移；底色是采样时原样写进去的，反查无歧义。
     """
     pal = _dig(design, ("visual", "palette"))
     if not isinstance(pal, dict):
@@ -1675,7 +1672,7 @@ def _voice_gender_of(vid):
 
 
 def _voice_gender(vid):
-    """pitch 文案用的单字：女 / 男（认不出的仍按男声写，与 v1.0 的输出一致）。"""
+    """pitch 文案用的单字：女 / 男（认不出的按男声写，输出口径固定）。"""
     return "女" if _voice_gender_of(vid) == "female" else "男"
 
 
@@ -1692,7 +1689,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     cb = _brief_canon(brief)
     ctext = _canonical(cb)
     # nonce 是"这一次生成本身"的身份：默认每次调用新生成，传入 seed 时固定。
-    # 它必须参与哈希，否则同一 brief 的第二次生成与第一次逐位相同（v1.0 的 bug）。
+    # 它必须参与哈希，否则同一 brief 的第二次生成与第一次逐位相同。
     nonce = brief.get("_nonce") if isinstance(brief, dict) else None
     tag = "%s|%s" % ("" if seed is None else str(seed), nonce or "")
 
@@ -1700,7 +1697,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
         return _digest(salt, ctext, tag, index, attempt)
 
     dom = domain or {}
-    # 配色 = 连续色相空间里的一个点（不再是 8 个名字之一）。
+    # 配色 = 连续色相空间里的一个点（不是若干命名外观之一）。
     # 色相按黄金角 137.5° 步进：相邻候选的色相必不接近（比固定步长更难撞色），
     # 且整体分布均匀 —— 这就是"每条片底色都不同"的来源。
     dark = h("dark") % 100 < 62                       # 约 62% 暗色片（贴合"工程技术片"气质）
@@ -1748,10 +1745,10 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     align = ALIGNS[(h("align") + index) % len(ALIGNS)]
     font_family = FONT_FAMILIES[(h("family") + index) % len(FONT_FAMILIES)]
 
-    # ---- 片内版式轮换（v1.0.2，原则 5）----
-    # 以前一章只能用一种版式：design 的 visual.layout 是单值 → grammar 把它当"全片默认"，
+    # ---- 片内版式轮换（原则 5）----
+    # visual.layout 是单值 → grammar 会把它当"全片默认"，
     # 于是 8 段片子 8 屏都是同一个骨架（左标题右卡片 / 居中大字 / 右标题左卡片 里挑一个），
-    # 观众看到的是"长时间重复"。现在默认派生 2–3 种版式的轮换序列，
+    # 观众看到的是"长时间重复"。所以默认派生 2–3 种版式的轮换序列，
     # 由 grammar 按**章节**轮换（同一章内稳定，换章才换版式）。
     # 用户仍可在 design.visual.layout_cycle 里显式指定（会覆盖这里）。
     _others = [x for x in LAYOUTS if x != layout]
@@ -1760,9 +1757,9 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     cycle_len = 2 if h("layout_n") % 2 == 0 else 3
     layout_cycle = [layout] + _others[:max(0, cycle_len - 1)]
 
-    # ---- 字幕样式（v1.0.2，原则 2/5）----
-    # 过去字幕字号/位置/背板/圆角是 filmkit 里的模块常量：任何两条片子字幕都一模一样，
-    # 是"跨片同质化"里最稳定的一条重复。现在进设计（可选字段，写进 design.json 可改）。
+    # ---- 字幕样式（原则 2/5）----
+    # 字幕字号/位置/背板/圆角若是渲染器里的模块常量，任何两条片子字幕都一模一样，
+    # 是"跨片同质化"里最稳定的一条重复。所以进设计（可选字段，写进 design.json 可改）。
     # 取值范围都留在"好看"的区间内：字号 40–56、背板透明度 96–208、圆角 2–24。
     sub_size = 40 + (h("subsize") % 5) * 4                    # 40..56
     sub_align = "center" if h("subalign") % 4 else "left"     # 多数居中，偶尔左对齐
@@ -1880,10 +1877,10 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
 def sample_designs(brief, n=3, seed=None):
     """现场采样 n 个两两可区分的 design（brief 的 must_have/avoid 在这里硬过滤）。
 
-    **默认"每次都不一样"**（v1.0.1）：
+    **默认"每次都不一样"**：
       - 不传 seed -> 每次调用都生成一个**新的 nonce**，同一 brief 跑两次得到不同设计；
       - 传 seed   -> 固定 nonce，逐字节可复现（调试、回归、写文档示例时用）。
-    为什么把默认反过来：v1.0 的默认是"同一 brief 永远同一结果"，实测两次独立进程
+    默认必须是"每次都不一样"：若默认"同一 brief 永远同一结果"，实测两次独立进程
     产出的指纹完全相同（31f64edd34e502f9 / 52d385953835379e）——那等于把"没有模板"
     做成了"模板藏在哈希里"，用户要新片子只能改 brief 措辞。这不满足"每条视频都不一样"。
 
@@ -1938,16 +1935,15 @@ def sample_designs(brief, n=3, seed=None):
             # 底色必须和已接受候选**拉开色相**。为什么单独管这一条：
             # design_distance 会在"母题/转场/缓动/编号"上找到足够的差异，
             # 于是两个候选可能共用同一片底色却仍被判为"可区分"。
-            # 实测样例（v1.0）：A=近黑金·电影遮幅 / B=近黑金·细线页眉 —— 并排图里第一眼
+            # 实测样例：A=近黑金·电影遮幅 / B=近黑金·细线页眉 —— 并排图里第一眼
             # 就是同一个片子的两种排法，用户不会认为那是两个方案。
             # 底色是整屏第一眼信息，必须先分叉。
             #
-            # v1.0.2 修：这里以前按"配色族"（色相量化到 24° 一档）判重。问题是有
-            # must_have 配色约束时，可选色相被压到 ±26° 窗口里，24° 分桶只剩 2–3 档，
-            # n=3 要求 3 个不同族 → 重采样 50 次成功率约一半；"暖纸色+女声"这类
-            # 常见组合实测 20/20 全失败（brief 本身完全合理）。现在改成直接比**底色
-            # 色相距离**：窗口内只要彼此 ≥ _PALETTE_KEEP_GAP 度就算两片不同底，
-            # 约束不再和判重打架，候选数量也不再受"分桶数"限制。
+            # 判重直接比**底色色相距离**，不按 24° 分桶：有 must_have 配色约束时，
+            # 可选色相被压到 ±26° 窗口里，24° 分桶只剩 2–3 档，n=3 要求 3 个不同族 →
+            # 重采样 50 次成功率约一半；"暖纸色+女声"这类常见组合实测 20/20 全失败
+            # （brief 本身完全合理）。比色相距离则窗口内只要彼此 ≥ _PALETTE_KEEP_GAP 度
+            # 就算两片不同底，约束不与判重打架，候选数量也不受"分桶数"限制。
             if out:
                 hue = _design_bg_hue(cand)
                 clash = None
@@ -1962,7 +1958,7 @@ def sample_designs(brief, n=3, seed=None):
                         if gap < _PALETTE_KEEP_GAP:
                             clash = (o["id"], gap)
                             break
-                # 分档判重（v1.0.2 再修）：brief 把配色约束到窗口里时（如"深蓝"= 210°±26°），
+                # 分档判重：brief 把配色约束到窗口里时（如"深蓝"= 210°±26°），
                 # 52° 的窗口放不下"3 个两两差 12°"的底色 —— 硬要求会让 n=3 有近一半概率
                 # 采样失败（实测 19/40）。所以分两档：
                 #   · 色相差 < 6°：无论别的维度多不同，并排看都是同一片底色 -> 必须换；
@@ -2011,9 +2007,9 @@ def _setup_stdio():
 def _palette_rows(n=8):
     """演示用：从连续色相空间均匀取 n 个点，各自的解出结果。
 
-    早先这里列的是 8 个命名配色族（"深蓝/近黑金/冷薄荷…"）。配色改成连续空间后
-    没有"族"可列了，但**还是得让人看见配色能长什么样**——所以均匀采样给你看，
-    而不是给一份可选清单。这不是模板：打印出来的每个点都可以再调（h/s/v 都是连续量）。
+    配色是连续色相空间，没有"族"可列，但**还是得让人看见配色能长什么样**——
+    所以均匀采样给你看，而不是给一份可选清单。这不是模板：打印出来的每个点
+    都可以再调（h/s/v 都是连续量）。
     """
     rows = []
     for i in range(int(n)):
@@ -2052,10 +2048,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.list_palettes:
-        # v1.0.2 修：这里以前读 r["family"]/r["bg"]/r["accent_hue"]，而 _palette_rows()
-        # 在 v1.0.1 改成连续色相空间后返回的是 hue/dark/ink_hex/... —— 键名对不上，
-        # 命令直接 KeyError: 'family'（--json 分支反而正常，所以自检没发现）。
-        # 现在按行里真实存在的键打印，并说明"这不是可选清单"。
+        # 按 _palette_rows() 真实返回的键（hue/dark/ink_hex/...）打印，不要按老键名
+        # （family/bg/accent_hue）取：键名对不上会 KeyError，而 --json 分支不读这些键、
+        # 照样正常，自检容易漏掉。同时说明"这不是可选清单"。
         rows = _palette_rows()
         if a.json:
             print(json.dumps(rows, ensure_ascii=False, indent=1))

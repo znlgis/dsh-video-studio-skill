@@ -43,7 +43,7 @@ HERE = Path(__file__).resolve().parent
 
 KINDS = ("hook", "body", "quote", "outro", "emphasis", "calm")   # 也是 voicekit 的语气 id
 
-# 视觉场景类型（v0.9）：决定"这段画面长成什么构图"，与叙事 kind **正交**——
+# 视觉场景类型：决定"这段画面长成什么构图"，与叙事 kind **正交**——
 #   kind 管声线/语气/配乐能量（voicekit / scorekit 读它）；
 #   type 只管构图（assets/scenes.py 的 _DRAWERS 读它）。
 # 所以**不新增 kind 值**：hero/stat/... 不是语气，硬塞进 KINDS 会撞 voicekit 的 tone id
@@ -65,8 +65,8 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 CPS = 4.2                                   # 每秒约 4.2 字（voicekit 实测中位口径）
 # 语速区间而不是单一 4.2：voicekit 校准实测 3.84–4.61 cps（9 个 persona，固定校准句），
 # 而 stylekit 的声线策略允许的 cps_band 是 3.6–5.6（rate 覆盖 ±15% 后）。
-# 只用中位数会误报：模板片实测 5.2 字/秒的句子被按 4.2 估 -> 全片多算 5.2 s ->
-# "剧本与 timeline 差 5.23 s"的假 WARN（v0.7.2 修，模板片复现）。
+# 只用中位数会误报：夹具片实测 5.2 字/秒的句子被按 4.2 估 -> 全片多算 5.2 s ->
+# "剧本与 timeline 差 5.23 s"的假 WARN（改按声线带宽判，夹具片可复现）。
 CPS_LO, CPS_HI = 3.6, 5.6
 DEFAULT_LEAD, DEFAULT_TAIL, DEFAULT_MIN_DUR = 0.62, 0.92, 3.0
 TIMELINE_TOL = 0.5                          # 估算与 timeline 差超过这个秒数就 WARN
@@ -211,7 +211,7 @@ LINE_ITEM_SPEC = {
     },
 }
 
-# ---- v0.9 视觉场景字段的嵌套结构（写法照抄 LINE_ITEM_SPEC）----
+# ---- 视觉场景字段的嵌套结构（写法照抄 LINE_ITEM_SPEC）----
 # 这些对象的键由 scenes.py 的 10 个绘制器读：拼错就是"写了不生效"，所以**不**用
 # open=True（那是留给 sfx 配方参数那种真·透传的）。每层列全 props，才能把拼错报成
 # unknown_key（WARN + "是不是想写 X"），把类型写错报成 ERROR。
@@ -282,7 +282,7 @@ LINE_SPEC = {
         "persona": {"t": "str"},
         "tone": {"t": "str", "enum": KINDS},
         "voice": {"t": "str"},
-        # ---- v0.9 视觉场景字段（7 个全可选）----
+        # ---- 视觉场景字段（7 个全可选）----
         # type 缺省由 grammar.py 按内容推导；其余字段是给绘制器的原料，不写就不画。
         # 注意这些字段与 kind **正交**，不是新 kind：kind 仍只有上面 6 个（voicekit 的语气 id）。
         "type": {"t": "str", "enum": SCENE_TYPES},
@@ -322,11 +322,11 @@ SCRIPT_SPEC = {
     "props": {
         "title": {"t": "str", "nonempty_warn": True},
         "end_text": {"t": "str"},
-        # v1.0.2: style is deprecated since v1.0.1 (appearance comes from work/design.json).
-        # It used to use enum_dynamic -> _load_styles(); STYLE_IDS is now empty, so it always
-        # emitted a misleading WARN saying stylekit.py was missing (the file was there).
+        # style is deprecated: appearance comes from work/design.json.
+        # It used to use enum_dynamic -> _load_styles(); STYLE_IDS is empty, so it emitted
+        # a misleading WARN saying stylekit.py was missing (the file was there).
         # Now it is an inert key: accepted (old scripts must not hard-fail) but reported.
-        "style": {"t": "str", "inert": "v1.0.1 起已废弃：外观由 work/design.json 决定（python propose.py --brief ... 再 --confirm），这里写任何值都不生效"},
+        "style": {"t": "str", "inert": "已废弃：外观由 work/design.json 决定（python propose.py --brief ... 再 --confirm），这里写任何值都不生效"},
         "engine": {"t": "str", "enum": ENGINES},
         "voice": {"t": ("str", "dict"), "open": "dict"},
         "rate": {"t": "str", "pattern": RATE_RE, "example": "+6%"},
@@ -369,10 +369,10 @@ SCRIPT_SPEC = {
             "seed": {"t": "int", "min": 0},
             "seed_from_content": {"t": "bool"},
             "gain_db": {"t": "num"}, "duck_db": {"t": "num"},
-            # v0.7.1 旁白优先：mix_film 读这四个（背景在人声处额外让位多少 / 阈值）
+            # 旁白优先：mix_film 读这四个（背景在人声处额外让位多少 / 阈值）
             "voice_duck_db": {"t": "num"}, "voice_duck_sfx_db": {"t": "num"},
             "voice_thresh_db": {"t": "num"}, "voice_floor_db": {"t": "num"},
-            # v0.7.1 SNR 兜底：混音后实测人声/背景差，不足就整体压背景
+            # SNR 兜底：混音后实测人声/背景差，不足就整体压背景
             "guard_snr_db": {"t": "num"}, "guard_cap_db": {"t": "num"},
             "seg": {"t": "num", "min": 0.0}, "amp": {"t": "num", "min": 0.0},
             "gain": {"t": "num", "min": 0.0}, "xfade": {"t": "num", "min": 0.0},
@@ -385,7 +385,7 @@ SCRIPT_SPEC = {
             # render.py 的 st_sfx 把它透传给 CueBus.build_audio()：按配方名覆盖基础电平。
             # 以前 schema/filmcheck 都没写，用户写了会被当未知键警告（其实真的会生效）。
             "base_db": {"t": "dict", "open": True},
-            # v0.7 音频差异化：content_seed 由 CueBus 读（位置派生 vs 内容派生）；
+            # 音频差异化：content_seed 由 CueBus 读（位置派生 vs 内容派生）；
             # duck_transitions 由 render.st_sfx 读（段落边界前的转场音效自动让位）。
             "content_seed": {"t": "bool"},
             "duck_transitions": {"t": "bool"},
@@ -393,10 +393,10 @@ SCRIPT_SPEC = {
         "web": {"t": "dict", "props": {
             "entry": {"t": "str"},
             "chunk_s": {"t": "num", "min": 0.0}}},
-        # ---- v0.8 ----
+        # ---- 词级时间戳 / TTS 后端 ----
         # 词级时间戳开关（字幕按词折行 / cue 词锚点 / G10 门禁都依赖它）
         "words": {"t": "bool"},
-        # TTS 后端选择（v0.8 接口化；默认 edge，其它后端需先 register_tts_backend）
+        # TTS 后端选择（接口化；默认 edge，其它后端需先 register_tts_backend）
         "tts": {"t": "dict", "props": {
             "backend": {"t": "str"},
             "voice": {"t": ("str", "dict")}}},
@@ -410,7 +410,7 @@ SCRIPT_SPEC = {
         # 质检门禁参数（全片 VMAF/SSIM 阻断 + ASR 回读）
         "qa": {"t": "dict", "props": {
             "vmaf": {"t": "dict", "props": {
-                # enabled / require_vmaf 是 v0.8 起草时留下的**惰性键**：schema 与这里都认，
+                # enabled / require_vmaf 是起草时留下的**惰性键**：schema 与这里都认，
                 # 但 render.py / qavmaf.py 全仓没有读取点——写了它门禁照跑，用户以为自己关掉了。
                 # 真正生效的是 mode=off（或命令行 --vmaf off）。这里标 inert 让 filmcheck 报 WARN，
                 # 因为本项目的立场是"写对了却不生效"比"报未知键"更坏。
@@ -418,7 +418,7 @@ SCRIPT_SPEC = {
                 "mode": {"t": "str", "enum": ("full", "sample", "off")},
                 "pass": {"t": "num", "min": 0.0},
                 "warn": {"t": "num", "min": 0.0},
-                # v0.8.1：键名对齐 schemas/film.schema.json 与 qavmaf.report(sample_step=...)。
+                # 键名对齐 schemas/film.schema.json 与 qavmaf.report(sample_step=...)。
                 # 这里以前写的是 sample_s —— 全仓没有任何消费者（render 不读、qavmaf 只认
                 # sample_step），于是"写对了却完全没生效"，而 schema 里合法写完还会被本脚本
                 # 报成未知键。别再兼容 sample_s：它从来没生效过，留着只会让人以为能用。
@@ -561,7 +561,7 @@ def _cue_ref(at):
             float(off)
         except ValueError:
             return "bad", "偏移 %r 不是数字（写 l03+0.35 或 l03-0.2）" % off
-    # v0.8 词锚点：<id>:w<N>[+/-秒]。把 ":wN" 剥掉再做 id 存在性检查，
+    # 词锚点：<id>:w<N>[+/-秒]。把 ":wN" 剥掉再做 id 存在性检查，
     # 否则合法写法会被报成"场景 id 不存在"（假失败比不校验更糟）。
     if ":w" in sid:
         head, _sep, tail = sid.partition(":w")
@@ -633,7 +633,7 @@ def check_cross(script, script_path, rep, ctx):
                 "tail_map）。例如 %s: 1.4" % lid),
                 "inert_line_tail")
 
-    # ---- v0.9 场景语法：绘制器的容量上限（超了会被静默截断） ----
+    # ---- 场景语法：绘制器的容量上限（超了会被静默截断） ----
     # 这是本项目最忌讳的一类坑：作者写对了、跑得通、但画面上少了几条，而没有任何提示。
     # 容量由 assets/scenes.py 的实现决定（stats 取前 3 条、series 前 6 条、steps 前 5 条、
     # sides 每侧前 3 条），改那边要同步改这里。
@@ -656,7 +656,7 @@ def check_cross(script, script_path, rep, ctx):
                              "sides.%s 有 %d 条，但左右对比构图每侧只画前 3 条"
                              % (side, len(its)), "scene_capacity")
 
-    # ---- v0.8 video 块：只支持 16:9 横屏 + 下采样输出 ----
+    # ---- video 块：只支持 16:9 横屏 + 下采样输出 ----
     # **不要在这里重写一遍规则**：允许列表 / 宽高比 / 上采样拒绝的权威实现在
     # filmkit.video_plan()。以前这里是第二套手写判据，于是"1600x900"能过 filmcheck
     # （0 error 0 warning）却在 render 的 st_layout 被 video_plan 拒片——校验器放行、

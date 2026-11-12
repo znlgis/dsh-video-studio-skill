@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """musicgen.py — P2 参数化配乐编排器（纯 numpy + stdlib，确定性、可单独 import）。
 
-D3 目标：删掉 scorekit.MUSIC_STYLES 的 9 套硬编码风格表后，配乐不再由 style id
-决定，而是由一组可采样参数现场编排：
+配乐不由 style id 决定（本仓库没有曲风表），而是由一组可采样参数现场编排：
 
     render(duration, *, bpm=96.0, key='Dm', scale='minor', mood='steady',
            seed=0, sections=None, progressions=None, motif=None,
@@ -1017,7 +1016,7 @@ def _build_plan(duration, bpm, key, scale, mood, seed, sections, progressions,
                        dtype=np.float64)
     # 一小节的能量取"小节内最响的时刻"，窗口 **±0.20 小节**（约半小节）。
     #
-    # 历史：① 只取中心点 -> 段落与小节网格错位时 climax 永远触发不了；
+    # 取舍：① 只取中心点 -> 段落与小节网格错位时 climax 永远触发不了；
     #       ② 窗口放宽到 ±0.42 几乎盖满整小节 -> 收尾小节被前一节的高潮污染
     #          （实测 8 s / 96 BPM 的 outro 被判成 climax）。
     # ±0.20 是两头都照顾的取值：段切在中心附近偏差 ≤0.2 小节能被捕获，
@@ -1284,7 +1283,7 @@ def _arrange(plan):
     # 都在 C5 以上；250–520 Hz 这个"有厚度的区间"没有持续音。
     # 解法不是再开一个合成器，而是让 pad 多叠一层中音区和弦（+12 半音后限幅），
     # 用同一套包络与 pan，成本近零、也不会引入新的调性信息。
-    # 实测各层频段分布（12 s，改造前）：pad 全在 250–2000 Hz（120–250 Hz 只有 0.7%）、
+    # 实测各层频段分布（12 s）：pad 全在 250–2000 Hz（120–250 Hz 只有 0.7%）、
     # bass 96% 在 20–120 Hz、arp/lead 90%+ 在 500 Hz 以上 —— 所以 120–250 Hz 是挖空的。
     # 补法：把和弦**根音再降一个八度**叠一层（MIDI 40–55，即 82–196 Hz 的上半段），
     # 它的基频正好落在 120–250 Hz；用 pad 音色与包络，音量压到 pad 的 0.42 倍，

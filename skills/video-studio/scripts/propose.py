@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""propose.py — 提案器（v1.0）：先出 N 个方案，用户确认后才允许出片。
+"""propose.py — 提案器：先出 N 个方案，用户确认后才允许出片。
 
 为什么单独一个入口而不是塞进 render.py
 --------------------------------------
@@ -15,7 +15,7 @@ render.py 的 13 个 stage 是一条"内容 → 成片"的生产线；提案是*
     revise   ->  rev2（不覆盖 rev1，带 feedback 原文）
     diff     ->  两个 rev 的设计向量差异
 
-每次都不一样：同 brief 不传 seed 会得到**不同**的候选（v1.0.1 起，满足"每条视频都不同"）；
+每次都不一样：同 brief 不传 seed 会得到**不同**的候选（满足"每条视频都不同"）；
 可复现：显式 --seed 时同 seed 得到同一组候选（designkit 内部 sha1 派生，禁 random）。
 离线：预览只走合成时间轴（previewkit），**不联网、不合成旁白**；--with-audio 才多生成
       12 秒样音（仍全程离线，musicgen/scorekit 任选其一）。
@@ -89,10 +89,10 @@ def _sha(obj, n=16):
 
 
 # ============================================================================
-# 片间去重：设计台账（v1.0.2）
+# 片间去重：设计台账
 # ============================================================================
 #
-# 用户原则 5：**不同视频的整体风格不能大面积重复**。v1.0.1 的"每条视频都不同"
+# 用户原则 5：**不同视频的整体风格不能大面积重复**。只靠采样 nonce 的"每条视频都不同"
 # 靠的是采样 nonce —— 同一 brief 两次采样确实不同，但**没有记住已经交付过什么**：
 # 连续拍同题材的三条片，仍有概率撞到相近的配色/版式组合（设计空间大，但不是保证）。
 # 台账把"最近交付过的设计"记在用户级目录里，提案时主动避开它们：
@@ -233,9 +233,9 @@ _NEGATIVE_WORDS = ("不要", "不想要", "别用", "别", "避开", "排除", "
 
 
 
-# ---------------------------------------------------------------- 时长解析（v1.0.2）
-# brief 里最常见的硬要求之一就是时长（"做个 2 分钟的""60 秒短视频"）。v1.0.1 之前
-# 它**完全不生效**：_brief_of 只填 topic/must_have/avoid，duration_target 恒为 None，
+# ---------------------------------------------------------------- 时长解析
+# brief 里最常见的硬要求之一就是时长（"做个 2 分钟的""60 秒短视频"）。不解析它
+# 就**完全不生效**：_brief_of 只填 topic/must_have/avoid，duration_target 恒为 None，
 # 连 design.structure.target_sec 都不会有值。用户以为要求被接住了，成片却按台词长度来。
 # 这里把它解析出来：① 影响候选的段落数（designkit 按目标时长决定 segments）；
 # ② 渲染时对账"目标 vs 实测"，差超过 15% 当场告警——**不截断旁白**，只把事实说清。
@@ -304,7 +304,7 @@ def parse_duration(text):
 def _brief_of(text, script):
     """把用户一句话变成 brief dict。剧本的标题是隐含 topic（避免空 brief）。
 
-    v1.0.1 修：以前这里把整句话塞进 topic 就完事，**must_have/avoid 恒为空数组**。
+    以前这里把整句话塞进 topic 就完事，**must_have/avoid 恒为空数组**。
     后果是 `--brief "深蓝配色的科技解说"` 里的"深蓝"完全不生效 —— 实测采出来的是
     h087 / h316（橙 / 紫），用户看到的需求与结果无关。designkit 明明有一张
     32 个词的关键词表（_constraint_words），但没人喂给它。
@@ -336,7 +336,7 @@ def _brief_of(text, script):
                 continue                       # 认不出来的短句留给 topic，由上层提示
             neg = any(w in seg for w in _NEGATIVE_WORDS)
             (avoid if neg else must).append(seg)
-    # v1.0.2：时长要求也要接住（以前恒为 None，用户写了「2 分钟」等于没写）。
+    # 时长要求也要接住（漏了就是恒为 None，用户写了「2 分钟」等于没写）。
     dt = parse_duration(text)
     return {"topic": topic, "duration_target": dt,
             "must_have": must, "avoid": avoid}
@@ -401,9 +401,9 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
     parent = prev.get("rev") if prev else None
     feedback = str(brief_text or "").strip() if rev > 1 else ""
 
-    # v1.0 起唯一的出方案方式是**按 brief 现场采样**：没有预设、没有模板可套。
+    # 唯一的出方案方式是**按 brief 现场采样**：没有预设、没有模板可套。
     #
-    # v1.0.2 片间去重：读台账里最近交付过的设计，若这批候选与其中某一份"太像"
+    # 片间去重：读台账里最近交付过的设计，若这批候选与其中某一份"太像"
     # （离散维度差距 < LEDGER_MIN_GAP），换 nonce 重采一次，最多试 LEDGER_RETRIES 轮，
     # 取"最后一批"里与历史距离最大的那组。重试仍近就**明说**（不静默放过）。
     recent = [] if no_ledger else ledger_load()

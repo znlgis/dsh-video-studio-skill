@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""qa_frames.py — 帧级 / 时间轴级深度质检（v0.3.0）。
+"""qa_frames.py — 帧级 / 时间轴级深度质检。
 
-成片质检 v0.2 只看容器、响度、黑帧、锐度，看不出"画面内部"的问题：
+只看容器、响度、黑帧、锐度的容器级质检看不出"画面内部"的问题：
 一帧白闪、一段近黑空窗、音效 cue 与视觉事件没对上——这些只有逐帧解码才能发现。
 
 本模块提供：
@@ -12,9 +12,9 @@
 4. luma_curve / loudness_curve：亮度与响度时间曲线（响度是近似值，见文档）。
 5. static_warnings（"_static_warnings"，报告里进 warnings）：画面长时间"完全没有运动"
    （卡帧 / 忘了加动画）。判据是"最活跃的 8x8 块在 0.5 s 里是否变了 > 1.5 级灰度"，
-   连续 6 s 全部不动才告警——v0.4.0 换掉了原来"全帧平均亮度 3 s 波动 < 0.002"的判据
-   （后者对逐字入场这类局部动画不敏感，自带模板片误报 4 段）。
-6. sync_check：cues.json 的音频提示点与视觉事件配对，报 dt 超容差项。v0.4.0 起支持
+   连续 6 s 全部不动才告警（不用"全帧平均亮度 3 s 波动 < 0.002"这类判据：它对逐字
+   入场这类局部动画不敏感，自带模板片会误报 4 段）。
+6. sync_check：cues.json 的音频提示点与视觉事件配对，报 dt 超容差项。支持
    cue 自带 visual_at / visual_t 画面锚点（PIL 路线没有 window.getEvents() 也能自校验），
    并可用 require_sync（环境变量 QA_REQUIRE_SYNC=1 / CLI --require-sync）把
    "同步门禁没执行"从 warning 升级为 error。
@@ -22,7 +22,7 @@
    （亮度曲线 + 响度曲线 + 闪烁点 + 空窗区 + 同步偏差，一眼看出问题位置）。
 
 判据与阈值来自 ai-history-film（MIT）的实测经验：
-- docs/开发日志.md 第十四轮"单帧闪烁"：逐帧解码成 160x90、每帧减去前后两帧平均、分块统计，
+- 开发日志第十四轮"单帧闪烁"：逐帧解码成 160x90、每帧减去前后两帧平均、分块统计，
   找"只亮一帧"的格子。实测真实异常 10–15，正常运动画面 ≤ 6.4，因此默认阈值 6.0。
 - 第五轮"画面空窗"：逐帧亮度扫出 ≥ 1 s 近黑片段（保留片头、片尾等刻意黑）。
 - video/qa_sync.js：画面视觉事件（闪白/震屏/冲击环）与音频 cue 对照。
@@ -39,7 +39,7 @@ FILMKIT_FFMPEG）。正常 import 不做重活、不打印。
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "1.0.4"
 
 import argparse
 import json
@@ -83,7 +83,7 @@ FLICKER_ISO = 1.5       # 孤立性比值：当前帧异常度 >= 1.5 x 前后�
 FLICKER_RETURN_RATIO = 1.6
 # 符号一致度下限：块内像素"同向"变化的比例。真闪白/闪黑整块同向（0.75–1.0）；
 # 文字入场 / 母题动画 / 镜头缓推是有增有减的纹理变化（实测 0.42）。
-# 低于此值不判 error（降级 warning 供人复核）——v1.0.2 修掉零拷贝首片的 G9 误杀。
+# 低于此值不判 error（降级 warning 供人复核）——否则零拷贝首片会被 G9 误杀。
 FLICKER_AGREE_MIN = 0.60
 # 与已登记视觉事件（闪白/震屏/冲击环）重合多久内视为"设计好的重击"，不计 error
 FLICKER_EXPLAIN_WIN = 0.2
@@ -102,18 +102,17 @@ TAIL_SKIP = 1.2         # 片尾多少秒内不算（刻意淡出）
 # 音画同步
 SYNC_TOL = 0.06         # dt 容差（秒）
 SYNC_SAME_WIN = 2.0     # 同 kind 配对的最大搜索窗（秒）
-# 异 kind 的"就近配对"现在只用于**确认同步**（|dt| <= tol 才认可），不再有独立的搜索窗；
+# 异 kind 的"就近配对"只用于**确认同步**（|dt| <= tol 才认可），没有独立的搜索窗；
 # 这个常量保留给"events 每项带可选 cue 字段、允许跨 kind 显式配对"的下一版（CONTRACT §5.4 兼容位）。
 SYNC_NEAR_WIN = 0.5
 
-# 画面"长时间静止"警告（可能卡帧 / 忘了加动画）—— v0.4.0 重写判据
+# 画面"长时间静止"警告（可能卡帧 / 忘了加动画）
 #
-# 旧判据（v0.3.0）：160x90 全帧平均亮度在 3 s 滑动窗内波动 < 0.002。
-# 它对**局部动画**天生不敏感：逐字入场、数字滚动、卡片切换只占全屏几个百分点，
-# 平均亮度几乎不动。实测自带模板片（30.10 s）因此报出 4 段假"亮度长时间无变化"
-# （411/814 个窗口命中），而画面一直在动——这是本轮修掉的假阳性。
+# 不用"全帧平均亮度 3 s 滑动窗内波动 < 0.002"这类判据：它对**局部动画**天生不敏感，
+# 逐字入场、数字滚动、卡片切换只占全屏几个百分点，平均亮度几乎不动。实测自带模板片
+# （30.10 s）会因此报出 4 段假"亮度长时间无变化"（411/814 个窗口命中），而画面一直在动。
 #
-# 新判据看"画面里最活跃的 8x8 块，在 0.5 s 里变了多少级灰度"：
+# 本判据看"画面里最活跃的 8x8 块，在 0.5 s 里变了多少级灰度"：
 #   drift[t] = max over 8x8 blocks of mean |F[t] - F[t-lag]| * 255,  lag = 0.5 s * fps
 # 物理含义：把画面切成 8x8 块（160x90 下共 20x11 块，单块占全屏 0.53%），取
 # "0.5 秒内变化最大的那一块的平均变化量"（单位：灰度级 0–255）。
@@ -376,9 +375,9 @@ def _block_max(diff, block, signed=None) -> tuple:
     中值是复核线索：整块一起变亮（真单帧事件）时中值也高；只有小块元素在动时
     均值被少数像素拉高、中值仍接近 0（见 references/frame-qa.md 的 16.933 s 案例）。
 
-    v1.0.2 加符号一致度（signed 传带符号的二阶差分时才算）：整块**同向**变亮/变暗
+    符号一致度（signed 传带符号的二阶差分时才算）：整块**同向**变亮/变暗
     = 真闪白/闪黑；文字逐字入场、母题动画、镜头缓推产生的只是**有增有减**的纹理变化，
-    符号一致度低。实测（v1.0.2 零拷贝首片）：t=5.867s 被误报的块 score 51.5 / median 44.5，
+    符号一致度低。实测（零拷贝首片）：t=5.867s 被误报的块 score 51.5 / median 44.5，
     但符号一致度只有 0.42；同一位置人为注入 +50 灰闪白后一致度 0.75。
     """
     h, w = diff.shape
@@ -660,10 +659,10 @@ def _src_of(obj) -> str:
 def _src_compatible(cue, ev) -> bool:
     """两个条目能不能做同步配对：只有**双方都明确标了来源且不同**时才认为时间基准不同。
 
-    v0.7.1 起 render.py 在 engine=web 时把三路 cue 合并（film.json / scenes.py / 页面），
+    render.py 在 engine=web 时把三路 cue 合并（film.json / scenes.py / 页面），
     其中 scenes.py 的 cue 按 PIL 时间轴、页面事件按页面时间轴——跨基准配对会报假 FAIL
     （实测：cue ui_blip @7.725s 配 页面事件 @9.550s，dt=+1.825s）。
-    没标 src 的条目（手写 events / 老版本 cues.json）一律视作兼容，保持向后兼容。
+    没标 src 的条目（手写 events / 缺 src 的 cues.json）一律视作兼容，保持向后兼容。
     """
     cs, es = _src_of(cue), _src_of(ev)
     return not (cs and es and cs != es)
@@ -676,7 +675,7 @@ def _compatible_events(cue, events) -> list:
 def _match_cue(cue, events, tol) -> tuple[dict | None, float | None, str]:
     """给一个 cue 找对应视觉事件。
 
-    规则（v0.3.0 收紧）：
+    规则：
       1. 同 kind：kind == cue.type，搜索窗 SYNC_SAME_WIN（2 s）；
       2. 异 kind：只取时间最近者，且**只有 |dt| <= tol 时才认可**（用作"确实同步了"的佐证）。
          超过容差就不配对——跨 kind 的"最近事件"不是"预期事件"，据此判超差会制造假 FAIL。
@@ -715,10 +714,10 @@ def sync_check(cues, events, tol=SYNC_TOL) -> list[dict]:
 
     返回 [{"cue","cue_t","event_t","dt"}]，dt = event_t - cue_t（秒，3 位小数）。
     配对规则（按优先级）：
-      0. **cue 自带视觉锚点**（v0.4.0 新增）：cue 里写了数值 visual_at / visual_t 时，
+      0. **cue 自带视觉锚点**：cue 里写了数值 visual_at / visual_t 时，
          直接拿它当"这条音效对应的画面时刻"自校验，不需要 events。
          这条是给 PIL 路线补的口子——pil 引擎没有 window.getEvents()，events 恒空，
-         原来的 sync 检查在 PIL 路线**永远是空的**，但 SKILL.md §7 把"
+         没有这条口子 sync 检查在 PIL 路线**永远是空的**，但 SKILL.md §7 把"
          dt ≤ 60 ms"写成通用门禁（文档承诺、代码没做到）。
          用法：scenes.py 的 cues() 钩子里返回
              {"at": "l03+0.35", "type": "impact", "visual_at": "abs:12.42"}
@@ -728,7 +727,7 @@ def sync_check(cues, events, tol=SYNC_TOL) -> list[dict]:
          超过容差就不配对——跨 kind 的"最近事件"不是"预期事件"，据此判超差会制造假 FAIL。
     配不上的 cue 视为"没有对应视觉事件"，不判超差（很多音效本来就没有画面事件）。
     ⚠ 命名约定见 references/frame-qa.md §2.5：events 与 cue 不同名时本检查会静默全过。
-    ⚠ 来源（src）过滤（v0.7.1 起）：cue 与事件**双方都标了 src 且不同**时不配对——web 引擎
+    ⚠ 来源（src）过滤：cue 与事件**双方都标了 src 且不同**时不配对——web 引擎
     三路合并时 PIL 时间轴的 cue 与页面事件基准不同，跨基准配对会报假 FAIL。跳过数量由
     _sync_coverage().src_skipped 计数并在 _load_cues 里转成 warning（不静默）。
     """
@@ -872,7 +871,7 @@ def _load_cues(cues_json):
     cues = [c for c in (data.get("cues") or []) if isinstance(c, dict)]
     raw_events = [e for e in (data.get("events") or []) if isinstance(e, dict)]
     # 只认"带有限数值 t"的事件：sync_check 内部本来就这么过滤（e.get("t") is not None），
-    # 但 _sync_coverage / 命名约定守卫以前拿的是**未过滤**的列表 —— 于是 events 里只要有
+    # 但 _sync_coverage / 命名约定守卫必须用**过滤后**的列表 —— 否则 events 里只要有
     # {"kind": "impact"} 这种缺 t 的条目，judged 就会被算成 1，命名约定守卫也被骗过，
     # 结果是"门禁看起来在查、实际一条都没判"且不报警（实测：cues=1/events=[{kind:impact}]
     # -> coverage judged=1，report errors=[] warnings=[]）。
@@ -983,7 +982,7 @@ def _visual_event_times(events) -> list[float]:
 def _static_segments(drift, fps, blacks=None) -> list[tuple[float, float]]:
     """画面长时间"完全没有运动"（卡帧 / 忘了加动画）-> [(t0, t1)] 秒区间。
 
-    判据（v0.4.0 重写，替换原来的"全帧平均亮度 3 s 波动 < 0.002"）：
+    判据（不用"全帧平均亮度 3 s 波动 < 0.002"，理由见下）：
       对每个窗口起点 i，看 (i+lag, i+w] 这 w-lag 个 drift 值（drift[t] = "t 与 t-lag
       之间最活跃的 8x8 块平均变了多少级灰度"）是否都 <= FLAT_DRIFT_EPS。
     全部命中 → 这 6 秒里画面里任何一个 8x8 块在任意 0.5 s 内都没动过，人眼就是一张定格。
@@ -1039,7 +1038,7 @@ def _static_warnings(drift, fps, blacks=None) -> list[str]:
     for t0, t1 in segs:
         out.append(
             "画面长时间静止（可能卡帧/忘了加动画）：%.2f–%.2fs（连续 %.1fs 内最活跃的 8x8 块"
-            "在任意 %.1f s 里的变化都 < %.1f 级灰度；判据见 references/frame-qa.md §2.7）"
+            "在任意 %.1f s 里的变化都 < %.1f 级灰度；判据见 references/frame-qa.md §2.4b）"
             % (t0, t1, t1 - t0, FLAT_LAG_S, FLAT_DRIFT_EPS))
     return out
 
@@ -1062,7 +1061,7 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     cues_json 可以是路径或已载入的 dict；events 里闪白/震屏/冲击环时刻会用来排除
     "设计好的重击"（记 warning，不记 error）。
 
-    require_sync（v0.4.0 新增）：把"音画同步门禁没能执行"从 warning 升级为 error。
+    require_sync：把"音画同步门禁没能执行"从 warning 升级为 error。
       默认 None = 读环境变量 QA_REQUIRE_SYNC（1/true/yes/on 时开启），便于不改进 render.py
       就整体开闸（render.py 的 st_qa 调的正是本函数）。
       背景：SKILL.md §7 把"音画同步 dt ≤ 60 ms"写成通用门禁，但 --engine pil 时 cues.json
@@ -1107,10 +1106,10 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
         msg = ("t=%.3fs score=%.1f（孤立比值 %.2f，块中值 %.2f，异常块 %d,%d–%d,%d，阈值 %.1f）"
                % (fl["t"], fl["score"], fl.get("ratio", 0.0), fl.get("median", 0.0),
                   bb[0], bb[1], bb[2], bb[3], FLICKER_THRESH))
-        # v1.0.2：符号一致度 = 块内像素是否**同向**变亮/变暗。
+        # 符号一致度 = 块内像素是否**同向**变亮/变暗。
         # 真闪白/闪黑整块同向（实测 0.75–1.0）；文字逐字入场、母题动画、镜头缓推
-        # 是"有增有减"的纹理变化（实测 0.42）。后者以前会被判成闪烁，让新用户首片
-        # 就 fail 在 G9（零拷贝自测实测：t=5.867s 标题逐字入场被误判）。
+        # 是"有增有减"的纹理变化（实测 0.42）。不降级的后果是首片就 fail 在 G9
+        # （零拷贝自测实测：t=5.867s 标题逐字入场被误判）。
         # 处理：低于阈值不静默放过，降级为 warning 并保留全部数值，交给人工复核。
         fl["sign_agree"] = fl.get("agree")
         if fl.get("agree") is not None and float(fl["agree"]) < FLICKER_AGREE_MIN:
@@ -1182,7 +1181,7 @@ def report(film, *, cues_json=None, expect_duration=None, out_json=None, out_png
     rep = {"flicker": flicker, "black_windows": blacks, "luma": luma, "loudness": loud,
            "sync": sync, "errors": errors, "warnings": warnings,
            # sync_info：同步门禁到底查了多少（render.py:1172 一直在读 deep["sync_info"]["judged"]，
-           # 但 report() 以前从来不写这个键 —— 所以 QC 报告的 G9 永远显示"同步未判"）。
+           # 缺了这个键 QC 报告的 G9 就永远显示"同步未判"）。
            "sync_info": dict(sync_info)}
     if out_json:
         _write_json(rep, out_json)
@@ -1431,7 +1430,7 @@ def _draw_png(rep, film, fps, duration, events, out_png):
              "重合（设计重击，不计 error）" % SYNC_TOL)
     d.text((PLOT_ML, 788), foot1, fill=gray, font=f_small)
     d.text((PLOT_ML, 808), foot2, fill=gray, font=f_small)
-    d.text((W - PLOT_MR, 808), "qa_frames v0.3.0", fill=(160, 163, 172), font=f_small,
+    d.text((W - PLOT_MR, 808), "qa_frames", fill=(160, 163, 172), font=f_small,
            anchor="ra")
 
     out_png = str(out_png)
@@ -1889,8 +1888,8 @@ def selftest() -> int:
                          out_json=out_json, out_png=out_png)
             keys = {"flicker", "black_windows", "luma", "loudness", "sync",
                     "errors", "warnings"}
-            # sync_info 是 v0.7.2 的**增量**字段（render.py 的 G9 从 deep["sync_info"]["judged"]
-            # 读"同步到底判了几条"，以前 report() 不写它 -> QC 报告永远显示"同步未判"）。
+            # sync_info 是报告里的**增量**字段（render.py 的 G9 从 deep["sync_info"]["judged"]
+            # 读"同步到底判了几条"，缺了它 -> QC 报告永远显示"同步未判"）。
             # 契约 §4.5 的 7 个键必须齐全，允许额外的只读统计键。
             if not keys.issubset(set(rep)):
                 return False, "顶层字段 %s 缺 §4.5 键" % sorted(keys - set(rep))
@@ -2020,7 +2019,7 @@ def selftest() -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="qa_frames.py",
-        description="帧级 / 时间轴级深度质检：单帧闪烁、画面空窗、音画同步（v0.3.0）")
+        description="帧级 / 时间轴级深度质检：单帧闪烁、画面空窗、音画同步")
     ap.add_argument("film", nargs="?", help="成片路径（.mp4 等）")
     ap.add_argument("--cues", default=None,
                     help="work/cues.json（§4.2：cues 音频提示点 + events 视觉事件）")

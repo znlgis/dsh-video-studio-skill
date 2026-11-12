@@ -4,20 +4,20 @@ Agent 看不见画面、听不见声音，所以**验收必须脚本化 + 静帧
 
 > ## ⚠ 两套编号别混用
 >
-> 本页的 `G0–G8` 是 v0.3 起的**方法论分组**（按"查什么"分类，写给写剧本/写场景的人看）。
+> 本页的 `G0–G8` 是**方法论分组**（按"查什么"分类，写给写剧本/写场景的人看）。
 > `render.py` 落进 `work/gates.json` 与 `out/QC-REPORT.md` 的，是**运行时账本 id**（按"哪一步判"排）。
 > 两套编号**有重名但不同义**，看到 `G0` 先确认是哪一套：
 >
 > | 本页（方法论） | 账本 id（运行时） | 关系 |
 > |---|---|---|
-> | G0 内容门禁：上屏数字可溯源 | `G0` 渲染前资源预检（v0.8） | **同名不同义**：账本 G0 查字形/字体/TTS/web 页，不核对数字出处 |
+> | G0 内容门禁：上屏数字可溯源 | `G0` 渲染前资源预检 | **同名不同义**：账本 G0 查字形/字体/TTS/web 页，不核对数字出处 |
 > | G1 帧级门禁（确定性/单帧预算/元素存在性） | — | 人工/代码评审，不进账本 |
 > | G2 静帧门禁（母版预览目检） | `signoff`（`stills` 闸） | 目检结论走人工签核 |
 > | G3 音频门禁（音效/混音/母带） | `G5` 响度/真峰 | 账本只查成片级的两个数 |
 > | G4 成片门禁（容器/时长/锐度/字幕/黑帧） | `G4` 容器 · `G5` 响度 · `G6` 锐度比 · `G7` 字幕条数 · `G8` 黑帧 | 账本把 G4 拆成 5 行 |
 > | G7 时间层门禁（闪烁/空窗/同步） | `G9` 帧级深检 | **同名不同义**：账本 G9 才是时间层 |
 > | G8 页面层门禁（web 文字重叠/出画） | web 引擎 qa_text 结果 | 只有 `--engine web` 才有 |
-> | — | `G10` 词级时间戳 · `G11` VMAF/SSIM · `G12` ASR 回读 | **v0.8 新增**，详见 [v08-quality.md](v08-quality.md) 与 [word-timeline.md](word-timeline.md) |
+> | — | `G10` 词级时间戳 · `G11` VMAF/SSIM · `G12` ASR 回读 | 详见 [delivery-gates.md](delivery-gates.md) 与 [word-timeline.md](word-timeline.md) |
 >
 > 一句话记法：**本页 G0–G8 是"查什么"，账本 G0 + G4–G12 是"哪一行判"**。
 > 账本里**没有** `G1`/`G2`/`G3`：`G0` 之后直接从 `G4` 开始（容器），人工目检走 `signoff` 的 `stills` 闸，不进 gate matrix。
@@ -81,8 +81,8 @@ pr = K.probe(film); f = pr["format"]
 # 容器
 assert f["duration"] > 0
 v = [s for s in pr["streams"] if s["codec_type"] == "video"][0]
-# v0.8：比的是**交付规格**不是内部构图。qa_report(expect_w=, expect_h=, expect_fps=) 会从
-# timeline.json 的 video 块取期望值；缺省回落 1920x1080@30（老项目行为不变）。
+# 比的是**交付规格**不是内部构图。qa_report(expect_w=, expect_h=, expect_fps=) 会从
+# timeline.json 的 video 块取期望值；缺省回落 1920x1080@30。
 assert (v["width"], v["height"]) == (W, H)   # W/H 这里代表交付宽高，不是 1920x1080 常量
 assert any(s["codec_type"] == "audio" for s in pr["streams"]), "无音轨"
 
@@ -169,7 +169,7 @@ q = K.encode_quality("out/film.mp4", "work/qa/snap.png", at_sec=12.0)
 
 ---
 
-# v0.3.0 新增：时间层门禁（G7）与页面层门禁（G8）
+# 时间层门禁（G7）与页面层门禁（G8）
 
 > G0–G6 都是"某一帧/某一条音效"层面的检查。**时间层检查的是"看完全片才能发现的问题"**：
 > 单看任何一帧都正常，整片看下来却"一帧白闪过去了""这段没东西看""这一下没有声音"。
@@ -186,14 +186,14 @@ python qa_frames.py out/film.mp4 --cues work/cues.json \
 | 单帧闪烁 | 0 条 | `flicker[]` | 只亮一帧、前后帧都正常（`bbox` 指出位置） |
 | 画面空窗 | 首尾外 0 段 | `black_windows[]` | ≥0.8 s 平均亮度极低 |
 | 音画同步 | `\|dt\| ≤ 60 ms` | `sync[]` | 视觉事件与 cue 的时间差 |
-| **画面长时间静止（v0.4）** | 连续 6 s 内最活跃 8×8 块 0.5 s 漂移 ≤ 1.5 级灰度 | `warnings[]` | warning：可能卡帧，也可能是刻意定版 |
+| **画面长时间静止** | 连续 6 s 内最活跃 8×8 块 0.5 s 漂移 ≤ 1.5 级灰度 | `warnings[]` | warning：可能卡帧，也可能是刻意定版 |
 | 音画同步"没在查" | `sync[]` 为空且 `sync_info.judged == 0` | warning（默认）/ error（开 `QA_REQUIRE_SYNC=1`） | **最危险的一条：看起来零超差，其实一条都没查** |
 | 时长复核 | 与预期差 ≤ 0.5 s | `errors[]` | error：独立于容器层再查一次 |
 | 响度曲线 | 无 >12 s 低于 -40 LUFS | `loudness[]` | warning：长段无声 |
 
-> **画面静止的判据在 v0.4 换过**：旧版用"全帧平均亮度 3 s 波动 < 2%"，对逐字入场/数字滚动这类
-> 局部动画天生不敏感（自带示例片误报 4 段）。现在看的是"最活跃 8×8 块在 0.5 s 内的漂移"，
-> 详见 `references/frame-qa.md` §2.4b。**别再按旧公式调阈值。**
+> **画面静止的判据是"最活跃 8×8 块在 0.5 s 内的漂移"**，详见 `references/frame-qa.md` §2.4b。
+> 不要用"全帧平均亮度 3 s 波动 < 2%"这类公式：全帧均值对逐字入场/数字滚动这类局部动画
+> 天生不敏感（自带示例片会误报 4 段）。
 
 ### 单帧闪烁的判据（照抄实测有效的做法）
 
@@ -243,5 +243,5 @@ python webengine.py textqa ./web/index.html --step 0.2
 信号：-16.3 LUFS / 真峰 -1.2 dBTP / 锐度比 0.94 / 黑帧 0 / 字幕 86 条 = 剧本 86 句
 时间：单帧闪烁 0 / 画面空窗 0 / 音画同步最大偏差 38 ms
 页面：文字重叠 0 / 出画 0 / 一闪而过 0 / 从没露面 0
-自检：python selfcheck.py -> PASS 55 / FAIL 0 / SKIP 0
+自检：python selfcheck.py -> PASS 69 / FAIL 0 / SKIP 0
 ```

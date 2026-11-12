@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""previewkit.py — 离线方案预览（v1.0）：先看 3 个方案，再出片。
+"""previewkit.py — 离线方案预览：先看 3 个方案，再出片。
 
 解决什么问题
 -------------
@@ -16,11 +16,11 @@
 编码函数）。产出的 PNG 与真实成片的差别只在"哪一帧是哪一句"，不在"这一帧画成什么样"——
 后者正是方案预览要回答的问题。
 
-12 秒样音（v1.1）
+12 秒样音
 -----------------
 ``render_audio_preview`` 是本文件唯一会"出声"的地方：按设计里的 bpm/key/scale/mood/seed
 生成 12 秒配乐，回答"这一版的情绪对不对"。优先走 musicgen（参数化作曲器）；它没就绪时
-退回 scorekit 的 legacy 路径（v1.0.1 起 scorekit 没有风格表，那条路只保证"还能出声"，
+退回 scorekit 的 legacy 路径（scorekit 没有风格表，那条路只保证"还能出声"，
 音乐固定为 Dm/120，不能当作方案预览）。两条都不在就返回 ok=False。**样音失败绝不
 打断提案**：提案是决策环节，不该因为配乐引擎没装好就整条断掉。
 
@@ -56,7 +56,7 @@ times 的语义：**全片绝对秒**（0 <= t <= total）。也接受 ``[scene_
 """
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "1.0.4"
 
 import argparse
 import hashlib
@@ -75,11 +75,10 @@ ASSETS = os.path.normpath(os.path.join(HERE, os.pardir, "assets"))
 def _default_scenes():
     """默认 scenes.py：**先看同目录**，再回落到 <skill>/assets/。
 
-    为什么不能只写死 assets/：SKILL.md 教用户把 scripts/*.py 拷到工作目录
-    （myfilm/ 下有 film.json、scenes.py、各脚本），此时本模块位于 myfilm/，
-    而 <myfilm>/../assets/scenes.py 根本不存在 —— 实测报
-    "scenes.py 不存在：<myfilm>/../assets/scenes.py"，提案直接跑不起来。
-    仓库内部使用（脚本仍在 <skill>/scripts/）时，同目录没有 scenes.py，回落到 assets/。
+    为什么不能只写死 assets/：用户可能把自己的 scenes.py 放在**剧本同目录**（myfilm/ 下只有
+    film.json 与 scenes.py），此时按相对路径推出来的 <myfilm>/../assets/scenes.py 根本不存在——
+    实测报 "scenes.py 不存在：<myfilm>/../assets/scenes.py"，提案直接跑不起来。
+    脚本仍在 <skill>/scripts/ 时，同目录通常没有 scenes.py，于是回落到 assets/。
     """
     for cand in (os.path.join(HERE, "scenes.py"),
                  os.path.join(ASSETS, "scenes.py")):
@@ -480,7 +479,7 @@ def _musicgen():
 def _scorekit():
     """惰性 import scorekit：它拉起 numpy，import 期就要几百毫秒，默认不该付这笔钱。
 
-    v1.0.1 起 scorekit 的 9 套配乐风格表已删除（零模板），它只剩 legacy 逐样本兼容
+    scorekit 的配乐风格表已经没有了（零模板），它只剩 legacy 逐样本兼容
     路径（固定 Dm/120、无 style/mood 参数）。这里保留它只是"兜底还能出声"：
     musicgen 没就绪时不至于整条样音链路断掉。
     """
@@ -522,7 +521,7 @@ def _render_musicgen(params, path, secs):
 
 
 def _render_scorekit(params, path, secs):
-    """兜底：scorekit 的 legacy 路径（v1.0.1 起没有 style/mood 参数，别传）。"""
+    """兜底：scorekit 的 legacy 路径（没有 style/mood 参数，别传）。"""
     K = _scorekit()
     samples, report = K.render(secs, bpm=params["bpm"], key=params["key"],
                                seed=params["seed"])
@@ -606,7 +605,7 @@ def render_audio_preview(design, out_dir, seconds=AUDIO_PREVIEW_SECONDS):
     """生成一个候选的 12 秒样音（48 kHz 立体声），返回结果 dict，**绝不抛异常**。
 
     为什么优先 musicgen：它直接吃设计里的 bpm/key/scale/mood/seed，12 秒一次合成；
-    没就绪就退回 scorekit 的 legacy 路径（v1.0.1 起它没有风格表，出的是固定 Dm/120），
+    没就绪就退回 scorekit 的 legacy 路径（它没有风格表，出的是固定 Dm/120），
     engine 字段会写明是谁出的，调用方据此知道这条样音能不能代表方案。
     两条都不可用时返回 {"ok": False, "reason": ...}——提案是决策环节，配乐引擎缺位不该
     让整条提案断掉，但也不许假装成功（ok=True 却指着一个不存在的文件比报错更糟）。

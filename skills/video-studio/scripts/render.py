@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""render.py — 一条命令从剧本到成片（v0.5.0）。
+"""render.py — 一条命令从剧本到成片。
 
     python render.py --script film.json --scenes scenes.py --out out/film.mp4 [--stage all]
 
 阶段（每个 stage 只做自己的事，不顺手重渲全片）：
-    style   解析风格包 -> work/style.json（画风/配乐/旁白/节奏一次定死，v0.5）
+    style   解析设计 -> work/style.json（画风/配乐/旁白/节奏一次定死）
     tts     逐句合成旁白 + 实测时长（带输入校验的缓存；按声线计划换人换语气）
     layout  由实测时长排时间轴 -> timeline.json / sub.srt / sub.ass（含停留窗口 hold）
     cues    画面提示点 -> work/cues.json（web 引擎从页面导出，pil 引擎从 film.json 生成）
@@ -22,9 +22,9 @@
 --stage all 按顺序跑完；单跑某个 stage 时，若前置产物缺失会明确报错并提示先跑哪个。
 --engine 覆盖 film.json 的 engine：pil = Pillow 逐帧（默认，依赖最少）；web = 无头浏览器逐帧。
 
-v0.6.0 起每个 stage 都往「门禁账本」记结论（pass / fail / skipped 三档），并在
+每个 stage 都往「门禁账本」记结论（pass / fail / skipped 三档），并在
 --stage qa（或 --stage all 收尾）写出 out/QC-REPORT.md：这是**机器可读的交付结论**，
-取代"agent 在对话里复述质检结果"。人工签核走 --stage accept，绑内容指纹——
+而不是"agent 在对话里复述质检结果"。人工签核走 --stage accept，绑内容指纹——
 改了剧本 / scenes.py / 引擎，旧签核自动失效。
 """
 from __future__ import annotations
@@ -111,7 +111,7 @@ def _frames_plan_stamp(tl, script, scenes_path, chunk):
                    script=hashlib.sha1(body.encode("utf-8")).hexdigest()[:16])
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
-# 可选模块（v0.3.0）：缺哪个就明确报错/跳过，不影响老流程
+# 可选模块：缺哪个就明确报错/跳过，不影响主流程
 HERE_SCRIPTS = str(HERE)
 
 
@@ -177,7 +177,7 @@ def _web_where(entry):
 
 # ---------------------------------------------------------------- 装载
 def load_module(path: str, name="film_scenes"):
-    """每次都用独立模块名 + 全新 module 对象，避免跨片污染（历史坑：渲染出上一部片）。"""
+    """每次都用独立模块名 + 全新 module 对象，避免跨片污染（否则会渲染出上一部片）。"""
     path = str(Path(path).resolve())
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -206,7 +206,7 @@ def load_script(p) -> dict:
     for k in ("music", "sfx", "web"):
         if s.get(k) is not None and not isinstance(s.get(k), dict):
             raise SystemExit("film.json 的 %s 必须是对象（当前是 %s）" % (k, type(s[k]).__name__))
-    # v0.5：bpm 允许 "auto"（由 stylekit 按风格梯度 + 内容指纹决定）。
+    # bpm 允许 "auto"（由风格梯度 + 内容指纹决定）。
     # 同时允许写在 music.bpm 里（优先级更高）。
     for _k, _v in (("bpm", s.get("bpm")),
                    ("music.bpm", (s.get("music") or {}).get("bpm"))):
@@ -260,7 +260,7 @@ def _to_gif(mp4, gif, fps=12, width=640):
 
 
 def _atomic_json_retry(path, obj, tries=3, sleep_s=0.1):
-    """原子写 JSON + 有限退避（v0.8）。
+    """原子写 JSON + 有限退避。
 
     Windows 上文件被杀毒/预览进程短暂占用时，一次写入失败会让**整片**跑挂。
     只对"可重试的写状态"退避，不对内容生成盲目重试（那会掩盖真错误）。
@@ -288,14 +288,14 @@ def _need(cond, msg):
         raise SystemExit("[前置产物缺失] " + msg)
 
 
-# ---------------------------------------------------------------- 风格解析（v0.5.0）
+# ---------------------------------------------------------------- 风格解析
 def _stylekit():
     """惰性 import stylekit；缺文件时给一句能照着做的错，而不是 ModuleNotFoundError。"""
     try:
         import stylekit as ST
         return ST
     except Exception as e:                                  # noqa: BLE001
-        raise SystemExit("[缺少 stylekit] v0.5 起 render.py 需要同目录的 stylekit.py"
+        raise SystemExit("[缺少 stylekit] render.py 需要同目录的 stylekit.py"
                          "（skills/video-studio/scripts/stylekit.py）：%s" % e)
 
 
@@ -304,10 +304,10 @@ def _design_path(work):
 
 
 def _plan_from_design(script, work, verbose=True):
-    """v1.0：如果 work/design.json 存在（用户已确认提案），**以它为准**解析计划。
+    """如果 work/design.json 存在（用户已确认提案），**以它为准**解析计划。
 
-    D3 之后这是唯一主路径：design.json 是"这一版长什么样"的冻结点，剧本只提供台词。
-    返回 None 表示没有 design（调用方回落到 stylekit 的旧解析，P3 会删掉那条路）。
+    这是唯一主路径：design.json 是"这一版长什么样"的冻结点，剧本只提供台词。
+    返回 None 表示没有 design（调用方按 fail-closed 报错并给出两步指引）。
     """
     direct = script.get("design")
     design = None
@@ -329,7 +329,7 @@ def _plan_from_design(script, work, verbose=True):
     except ImportError as e:
         raise SystemExit("[design] 缺少 designkit.py（%s）——design.json 需要它解析成计划" % e) from e
     # 骨架版/半成品 designkit 会 import 成功但接口没实现：那种情况必须给一句人话，
-    # 不能让 AttributeError 的 traceback 冒充"渲染器坏了"（v0.9 之前这种误报踩过多次）。
+    # 不能让 AttributeError 的 traceback 冒充"渲染器坏了"（这种误报踩过多次）。
     missing = [n for n in ("validate_design", "design_to_plan")
                if not callable(getattr(DK, n, None))]
     if missing:
@@ -347,10 +347,10 @@ def _plan_from_design(script, work, verbose=True):
 
 
 def _apply_audio_overrides(script, plan):
-    """把 design.audio 里的音量/音效参数填进 script 的 music/sfx **缺省位**（v1.0.2）。
+    """把 design.audio 里的音量/音效参数填进 script 的 music/sfx **缺省位**。
 
     为什么需要：design.json 里 audio.music.gain_db / duck_db 与 audio.sfx.enabled /
-    density / gain_db 一直被 validate_design 接受、却从来没有被任何渲染代码读过——
+    density / gain_db 若只被 validate_design 接受、没有任何渲染代码读它，
     用户改了它们，成片一模一样（audit 实测：enabled=false 仍出 8 条音效）。
 
     优先级（明确且可预期）：**film.json 显式写了的 > design 的值 > 模块内置默认**。
@@ -380,10 +380,10 @@ def _apply_audio_overrides(script, plan):
 def resolve_style(script, work=None, verbose=True):
     """解析风格计划并挂到 script["_style"] 上（同一进程内各 stage 共享）。
 
-    优先级（v1.0）：
+    优先级：
       1. script["_style"] 已存在（同进程内各 stage 复用）
-      2. work/design.json（用户已确认的提案）—— 这是正式主路径
-      3. stylekit 旧解析（P3 之后会删除；现在保留是为了让未迁移的项目还能跑）
+      2. work/design.json（用户已确认的提案）—— 这是唯一正式主路径
+      3. 都没有 -> fail-closed 报错（没有内置风格可回落）
 
     纯函数 + 落盘 work/style.json（审计用：用户能看到"为什么是这套风格"）。
     """
@@ -400,11 +400,11 @@ def resolve_style(script, work=None, verbose=True):
             except Exception as e:                          # noqa: BLE001
                 print("   [WARN] style.json 落盘失败：%s" % e)
         return plan
-    # v1.0.1：**没有第三优先级了**。以前这里会回落到 stylekit 的"按关键词自动选风格"，
-    # 那是模板库的核心；删掉模板后这条路径没有意义，必须明确报错。
+    # **没有第三优先级**：回落到"按关键词自动选风格"等于模板库，
+    # 那正是本技能不提供的，所以必须明确报错，不静默回落。
     raise SystemExit(
         "[style] 找不到设计（work/design.json）：\n"
-        "  v1.0.1 起本技能不提供任何内置风格，每一版外观都必须现场生成并由人确认。\n"
+        "  本技能不提供任何内置风格，每一版外观都必须现场生成并由人确认。\n"
         "  正确做法：\n"
         "    1) python propose.py --brief \"题材/要求\" --script film.json   # 出 3 个方案\n"
         "    2) python propose.py --confirm --candidate A                   # 冻结设计\n"
@@ -413,12 +413,11 @@ def resolve_style(script, work=None, verbose=True):
 
 
 def _theme_for(script, work=None):
-    """返回当前片的主题字典；legacy 返回 None（= v0.4 的硬编码外观，逐字节兼容）。
+    """返回当前片的主题字典；legacy 计划返回 None（现存的兼容分支）。
 
-    work **必须传**：design 路径的身份在 work/design.json 里。v1.0.1 之前不传会回落到
-    stylekit 的 auto 分支（已删除），现在不传就直接 SystemExit —— 但"传错 work"仍然值得防：
-    work 指到别的目录时会读到**另一份** design.json，参考帧与成片不同源
-    （历史实测：--stage qa 单独跑 VMAF 1.07，全部内联跑 97.15）。
+    work **必须传**：design 路径的身份在 work/design.json 里，不传就直接 SystemExit ——
+    但"传错 work"仍然值得防：work 指到别的目录时会读到**另一份** design.json，
+    参考帧与成片不同源（实测：--stage qa 单独跑 VMAF 1.07，全部内联跑 97.15）。
     """
     plan = script.get("_style") if isinstance(script.get("_style"), dict) else None
     if plan is not None and plan.get("legacy"):
@@ -434,14 +433,13 @@ def _theme_for(script, work=None):
     th = plan.get("theme")
     if isinstance(th, dict):
         return th
-    # v1.0：**先看 plan["theme"]**（designkit 生成的计划自带完整 35 字段主题），
-    # 只有老计划（stylekit 解析、没有 theme 字段）才回查内置表。
-    # 早先无条件 THEMES[plan["theme_id"]]，于是设计路径的 theme_id（如 "a-44957fb5"）
-    # 在表里查不到 -> KeyError，整条出片链路在 layout 阶段崩掉。
+    # **先看 plan["theme"]**（designkit 生成的计划自带完整 35 字段主题）。
+    # 不能按 theme_id 去查表：没有内置主题表，设计路径的 theme_id（如 "a-44957fb5"）
+    # 查不到 -> KeyError，整条出片链路会在 layout 阶段崩掉。
     th = plan.get("theme")
     if isinstance(th, dict) and th:
         return th
-    # v1.0.1：内置主题表已删除，没有 theme 计划就是"这份 script 没走过 design/propose"。
+    # 没有 theme 计划就是"这份 script 没走过 design/propose"。
     # 明确报错并给迁移指引，不静默回落（静默回落 = 用一套不存在的默认外观出片）。
     raise SystemExit(
         "[style] 这份剧本没有可用的主题：\n"
@@ -461,7 +459,7 @@ def _print_style(plan):
     print("        主题: %s  版式: %s" % (plan["theme_id"],
                                          ",".join(sorted(set(plan["chapter_layout"].values())))
                                          or plan["layout_default"]))
-    # v0.9：视觉语言（结构签名）也要能在这里看到 —— 用户判断"这套风格是不是只是换色"
+    # 视觉语言（结构签名）也要能在这里看到 —— 用户判断"这套风格是不是只是换色"
     # 的第一现场就是 --stage style 的打印，藏起来等于让他去读 style.json。
     vl = plan.get("language") if isinstance(plan.get("language"), dict) else None
     if vl:
@@ -473,9 +471,9 @@ def _print_style(plan):
               % (mf.get("kind"), tr.get("kind"), float(tr.get("dur") or 0.0),
                  float(ty.get("tracking") or 0.0), ty.get("number"),
                  float(bi.get("x") or 0.0), float(bi.get("y") or 0.0)))
-    # v1.0.2 修：这里以前无条件读 m["style"] —— 而 designkit 自 v1.0.1 起明确不再写
-    # 这个键（配乐风格表已删），于是公开命令 `--stage style` 100% KeyError: "style"。
-    # 现在按「参数化配乐」的真实身份打印：调式 + BPM + 调性 + mood。
+    # 不能无条件读 m["style"]：designkit 明确不写这个键（配乐风格表已删），
+    # 那样公开命令 `--stage style` 会 100% KeyError: "style"。
+    # 按「参数化配乐」的真实身份打印：调式 + BPM + 调性 + mood。
     _music_id = m.get("arranger") or m.get("style") or ("%s %gBPM" % (m.get("scale", "?"), m.get("bpm", 0)))
     print("        配乐: %s  BPM %g（%s）  调性 %s（%s）  mood %s"
           % (_music_id, m["bpm"], m["bpm_source"], m["key"], m["key_source"], m["mood"]))
@@ -507,11 +505,11 @@ def st_style(script, work):
 
 # ---------------------------------------------------------------- TTS
 def _voice_plan(script, plan):
-    """声线计划（voicekit）。缺 voicekit 时返回 None -> tts_batch 走 v0.4 单声线路径。"""
+    """声线计划（voicekit）。缺 voicekit 时返回 None -> tts_batch 走单声线路径。"""
     try:
         import voicekit as VK
     except Exception as e:                                  # noqa: BLE001
-        print("   [WARN] 没有 voicekit.py，本次旁白单声线（v0.4 行为）：%s" % e)
+        print("   [WARN] 没有 voicekit.py，本次旁白单声线（单声线兼容）：%s" % e)
         return None
     try:
         vp = VK.voice_plan(script, plan)
@@ -526,7 +524,7 @@ def st_tts(script, work, force=False):
     plan = resolve_style(script, work)
     print("== TTS (%d 句)" % len(lines))
     if plan["legacy"]:
-        print("   声线: v0.4 兼容（单一声线 %s）" % script.get("voice", "zh-CN-YunxiNeural"))
+        print("   声线: 兼容模式（单一声线 %s）" % script.get("voice", "zh-CN-YunxiNeural"))
         vp = None
     else:
         vp = _voice_plan(script, plan)
@@ -561,7 +559,7 @@ def st_tts(script, work, force=False):
 
 
 def _write_words(work, done, want_words):
-    """把逐句词级时间戳汇总成 work/words.json（v0.8）。
+    """把逐句词级时间戳汇总成 work/words.json。
 
     结构：{schema, enabled, lines:{<id>:{dur, n, covered, tail, mono, words:[...]}}, stats}
     门禁与字幕都从这里读，不再各自去翻 *.mp3.json（单一事实来源）。
@@ -600,7 +598,7 @@ def st_layout(script, work, lines=None):
     print("== Layout")
     pace = plan["pacing"]
     # 逐句 lead/tail：voicekit 的 voice_plan 已经算好每句的停顿，这里只负责喂给时间轴。
-    # 旧项目（legacy）没有 voice_plan.json，lead_map/tail_map 都是 None -> 全局常数，v0.4 行为。
+    # legacy 计划没有 voice_plan.json，lead_map/tail_map 都是 None -> 全局常数。
     vp = None
     vp_path = os.path.join(work, "voice_plan.json")
     if not plan["legacy"] and os.path.exists(vp_path):
@@ -631,7 +629,7 @@ def st_layout(script, work, lines=None):
              "，编码时 lanczos 缩放" if vp["scale"] else ""))
     tl["title"] = script["title"]
     tl["voice"] = script.get("voice", "zh-CN-YunxiNeural")
-    # v0.8：词级时间戳（句子时长仍是权威；词只用于字幕断行/锚点/门禁）
+    # 词级时间戳（句子时长仍是权威；词只用于字幕断行/锚点/门禁）
     tl["words"] = bool(script.get("words", True))
     wp = os.path.join(work, "words.json")
     if tl["words"] and os.path.exists(wp):
@@ -647,8 +645,8 @@ def st_layout(script, work, lines=None):
                    "legacy": plan["legacy"],
                    "chapter_layout": plan["chapter_layout"],
                    "item_stagger": pace["item_stagger"]}
-    # ---- v0.9 场景语法：内容 -> 构图选型（落 timeline.scenes[] 与 work/storyboard.json） ----
-    # legacy 不注入：v0.4 的三个老绘制器只读 kind，注入新字段等于给基线加噪声。
+    # ---- 场景语法：内容 -> 构图选型（落 timeline.scenes[] 与 work/storyboard.json） ----
+    # legacy 不注入：兼容绘制器只读 kind，注入新字段等于给基线加噪声。
     if not plan["legacy"]:
         try:
             import grammar as G
@@ -672,7 +670,7 @@ def st_layout(script, work, lines=None):
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
     # 同上：设计计划自带 theme，不能假定 theme_id 一定在内置表里（见 _theme_for 的注释）
-    # v1.0.1：没有内置主题表了，theme 必须由计划自带（design 路径一定有）
+    # 没有内置主题表：theme 必须由计划自带（design 路径一定有）
     theme = (plan.get("theme") if not plan["legacy"] else None)
     n_ass = K.write_ass(tl["scenes"], os.path.join(work, "sub.ass"), theme=theme)
     print("   总时长 %.2fs / %d 帧 / %d 段 / srt %d 条 / ass %d 条"
@@ -689,8 +687,8 @@ def st_layout(script, work, lines=None):
             print("     %-6s %-7s %r" % (lid, fld, chars))
     for s in tl["scenes"]:
         print("   %-8s %7.2f-%7.2f  %s" % (s["id"], s["start"], s["end"], s["text"][:40]))
-    # ---- 目标时长对账（v1.0.2）----
-    # brief 里写的「2 分钟 / 60 秒」过去只影响 design.structure.segments 与 target_sec，
+    # ---- 目标时长对账 ----
+    # brief 里写的「2 分钟 / 60 秒」只影响 design.structure.segments 与 target_sec，
     # 而成片时长由 TTS 实测决定 —— 用户以为"我要求了时长"，实际拿到 23s。
     # 不改时长（截断旁白或拉长留白都是坏做法），但**必须当场说出来差多少**，
     # 并给出可执行的做法（加台词 / 调 hold / 减台词）。
@@ -748,10 +746,10 @@ def st_cues(script, work, tl, engine="pil"):
     # scenes.py 里的 cues() 钩子：允许直接返回 [{at,type,...}] 或调用 bus.add(...)
     n_hook = 0
     mod = None
-    # v1.0.2 修：scenes.py 的 cues() 常要读主题/视觉语言（assets 版就调 resolve_script_style）。
+    # scenes.py 的 cues() 常要读主题/视觉语言（assets 版就调 resolve_script_style）。
     # 单跑 `--stage cues` 时前面没有 stage 把 script["_style"] 挂好，钩子就会去解析"设计"
     # 并直接 raise —— 公开命令 100% 崩，报错还指向"先去提案"（其实设计已确认）。
-    # 这里在调用钩子前解析一次（幂等，已挂 _style 时直接复用）。
+    # 所以在调用钩子前解析一次（幂等，已挂 _style 时直接复用）。
     if script.get("_scenes") and os.path.exists(script["_scenes"]) and not isinstance(script.get("_style"), dict):
         try:
             script["_style"] = resolve_style(script, work)
@@ -769,7 +767,7 @@ def st_cues(script, work, tl, engine="pil"):
         except Exception as e:                              # noqa: BLE001
             raise SystemExit("scenes.py 的 cues() 钩子报错：%s" % e) from e
         n_hook = _extend_safe(got, "scenes.py")
-        # v0.7.2：web 引擎下要提醒"两套时间基准混用"。
+        # web 引擎下要提醒"两套时间基准混用"。
         # scenes.py 的 cues() 是按 **PIL 时间轴**（timeline.json 的段落与 visual_at）算的，
         # 页面动画则按 **页面自己的时间轴**（window.DURATION）。两者合并进同一份 cues.json 后：
         #   - 音效会按 PIL 时间响（页面画面此刻可能正在另一幕）；
@@ -839,8 +837,7 @@ def _st_cues_web(script, work):
 def _score_with_musicgen(script, work, tl, plan_s, mus):
     """用参数化编排器出成片配乐（与 previewkit 的样音同一个引擎、同一组参数）。
 
-    为什么不复用 scorekit 那条路：scorekit 的 9 套 MUSIC_STYLES 是**风格表**，
-    而本技能 v1.0.1 起不再提供任何模板 —— 配乐必须由设计里的参数现场生成。
+    为什么必须走参数化编排：本技能不提供风格表/模板，配乐必须由设计里的参数现场生成。
     musicgen 的六个参数（progressions / motif / drums / voices / mood / sections）
     全部参与事件展开，实测参数相关性 seed 0.16 / mood 0.32 / voices 0.22，无一是死旋钮。
     """
@@ -863,7 +860,7 @@ def _score_with_musicgen(script, work, tl, plan_s, mus):
         mood=str(mp.get("mood") or "steady"),
         # seed_effective 是"内容指纹掺进去之后"的 32 位大数；musicgen 内部按
         # sha1(seed) 派生，直接给大整数没问题，但统一夹到 2^31-1 内可以保证
-        # 与 scorekit 时代的取模口径一致（老 work/ 目录里的 score.json 能对上）。
+        # 取模口径固定（既有 work/ 目录里的 score.json 能对上）。
         seed=int(mp.get("seed_effective") or mp.get("seed") or 0) % (2 ** 31 - 1),
         sections=sections,
     )
@@ -902,12 +899,12 @@ def st_score(script, work, tl):
     配乐来源由 K.music_plan 统一判定（与 st_audio 共用同一份语义）：
       - mode=off/none 或 enabled=false：不出配乐，也不删已存在的 music.wav
         （删文件会误删"外部提供的配乐"，而 off 的语义只是"本片不要配乐"）；
-      - mode=bed：走 v0.2 和弦床，不生成 musicgen 产物；
+      - mode=bed：走和弦床，不生成 musicgen 产物；
       - mode=file：外部 work/music.wav，原样交给 audio 阶段；
-      - 缺省：有 bpm 就生成，没有 bpm 沿用已有 music.wav / 和弦床（v0.2 兼容）。
+      - 缺省：有 bpm 就生成，没有 bpm 沿用已有 music.wav / 和弦床。
 
     需要真的生成配乐时，**只有 musicgen 一条路**：legacy 计划或 musicgen.py 缺失都会
-    明确报错并给迁移指引，不再用 scorekit 的配乐模板兜底（v1.0.1 零模板）。
+    明确报错并给迁移指引，不用 scorekit 的配乐模板兜底（零模板）。
     """
     print("== Score")
     mus = script.get("music") or {}
@@ -918,19 +915,19 @@ def st_score(script, work, tl):
         return None
     if plan in ("missing-file", "missing-bpm", "unknown-mode"):
         raise SystemExit("[score] " + why)
-    # v1.0.1：**配乐只有 musicgen 一条路**（参数化编排器，没有风格表）。
+    # **配乐只有 musicgen 一条路**（参数化编排器，没有风格表）。
     #
-    # 为什么必须换：v1.0 里 previewkit 用 musicgen 出 12 秒样音，而 st_score 用 scorekit
-    # 出成片音乐 —— 两者是**两个不同的作曲器**，实测同一设计下相关系数 -0.0057（就是两首
+    # 为什么必须同源：若 previewkit 用 musicgen 出 12 秒样音、而 st_score 用 scorekit
+    # 出成片音乐，两者是**两个不同的作曲器**，实测同一设计下相关系数 -0.0057（就是两首
     # 不同的曲子）。用户看样音选方案，成片音乐完全不同，等于"确认"这个动作在音频上失效。
     #
-    # v1.0.1 把 scorekit 的 9 套 MUSIC_STYLES 风格表整个删了（零模板），它的 render()
-    # 只剩 legacy 逐样本兼容路径。所以这里**不再有 scorekit 回退**：scorekit 一旦回来
-    # 当兜底，成片音乐就又变成一套固定模板，与"每条视频都不一样"直接冲突。
+    # scorekit 没有风格表（本技能不提供模板），它的 render() 只剩 legacy 逐样本兼容路径。
+    # 所以这里**没有 scorekit 回退**：scorekit 一旦回来当兜底，成片音乐就又变成一套
+    # 固定模板，与"每条视频都不一样"直接冲突。
     plan_s0 = resolve_style(script, work)
     if plan_s0.get("legacy"):
         raise SystemExit(
-            "[score] legacy 配乐路径已移除（v1.0.1 零模板）：\n"
+            "[score] legacy 配乐路径已移除（零模板）：\n"
             "  scorekit 的 9 套配乐风格表已删除，legacy 回退会把成片配乐锁死成一套固定模板。\n"
             "  正确做法（两步）：\n"
             "    1) python propose.py --brief \"题材/要求\" --script film.json   # 出 3 个方案\n"
@@ -940,18 +937,17 @@ def st_score(script, work, tl):
     if _try_module("musicgen") is None:
         raise SystemExit(
             "[score] 找不到 musicgen.py，无法生成配乐：\n"
-            "  v1.0.1 起配乐只有参数化编排器一条路（scorekit 的风格模板已删除，不再兜底）。\n"
-            "  检查 <SKILL_DIR>/scripts/musicgen.py 是否被拷到工作目录——\n"
-            "  quickstart 的 cp <SKILL_DIR>/scripts/*.py . 会把它一起拷过来；\n"
+            "  配乐只有参数化编排器一条路（scorekit 的风格模板已删除，不再兜底）。\n"
+            "  检查 <SKILL_DIR>/scripts/musicgen.py 是否存在（技能脚本就在技能目录里跑，不用拷）；\n"
             "  只需要旁白/音效时把 film.json 的 music.mode 设为 off 或 file。")
     return _score_with_musicgen(script, work, tl, plan_s0, mus)
 
 
 def _sfx_seed_context(script, work=None):
-    """v0.7：算音效的内容派生上下文 (style, content_fp, key, enabled)。
+    """算音效的内容派生上下文 (style, content_fp, key, enabled)。
 
-    legacy（没写 style 字段）时返回全 None -> CueBus 走旧的 seed_base + i 路径，
-    v0.4 及以前的片子逐样本不变。参考 references/audio-variation.md §3.2 / §4。
+    legacy（没写 style 字段）时返回全 None -> CueBus 走 seed_base + i 路径，
+    逐样本与基线一致。参考 references/audio-variation.md §3.2 / §4。
     """
     plan = resolve_style(script, work)
     sfx_cfg = script.get("sfx") or {}
@@ -964,7 +960,7 @@ def _sfx_seed_context(script, work=None):
 
 
 def _duck_transition_sfx(samples, cues, scenes, sr=K.SR, depth_db=-3.0, window=2.2):
-    """段落边界前的转场音效自动让位（v0.7，契约 §4）。
+    """段落边界前的转场音效自动让位（契约 §4）。
 
     配乐在段落交界自己已经有一段过门（编排器写的 swell / riser / sub_boom），
     sfx 轨再在同一时刻放 whoosh / riser，同一频段叠两层就是"配乐和音效听起来像同一套"。
@@ -1019,8 +1015,8 @@ def _duck_transition_sfx(samples, cues, scenes, sr=K.SR, depth_db=-3.0, window=2
 def st_sfx(script, work, tl):
     """按提示点合成音效轨 -> work/sfx.wav。没有 cues.json 就跳过。
 
-    v0.7：非 legacy 时走内容派生 seed（跨片同一位置不再逐样本相同），
-    并把配乐调性透传给提示音配方（不再硬编码 Dm）；
+    非 legacy 时走内容派生 seed（跨片同一位置不逐样本相同），
+    并把配乐调性透传给提示音配方（不硬编码 Dm）；
     段落边界前的转场音效自动让位（不与配乐过门撞车）。
     """
     print("== SFX")
@@ -1062,9 +1058,10 @@ def st_sfx(script, work, tl):
 def _voice_track(tl, script):
     """把逐句旁白铺成一条总线，返回 (n,) 单声道。
 
-    v0.5.0 修一个 v0.4 的静默 bug：voice_gain 原来在这里和 mix_film 里**各乘一次**
-    （净效果 voice_gain^2，默认 1.0 时看不出来）。现在全局增益只在 mix_film 乘一次，
-    这里只负责**逐句**增益（voicekit 的 gain_db，默认 0 dB -> 1.0，与 v0.4 一致）。
+    全局增益只能在一处乘：voice_gain 若在这里和 mix_film 里**各乘一次**，
+    净效果是 voice_gain^2（默认 1.0 时看不出来，改了才炸）。
+    所以全局增益只在 mix_film 乘一次，这里只负责**逐句**增益
+    （voicekit 的 gain_db，默认 0 dB -> 1.0）。
     """
     bus = K.AudioBus(tl["total"])
     for s in tl["scenes"]:
@@ -1076,7 +1073,7 @@ def _voice_track(tl, script):
 
 
 def _legacy_music(tl, script):
-    """v0.2 的和弦床（没有 music.wav 时的兜底）。"""
+    """和弦床（没有 music.wav 时的兜底）。"""
     mus = script.get("music") or {}
     if not (mus.get("enabled", True) and mus.get("chords")):
         return None
@@ -1092,11 +1089,11 @@ def _legacy_music(tl, script):
 def st_audio(tl, work, script):
     """三总线混音：旁白 + 配乐 + 音效 -> audio.wav（立体声）。
 
-    v0.3.0 起把三条总线分开处理再合：
+    三条总线分开处理再合：
       - 旁白：单声道，居中（voice_gain 可调）
       - 配乐：来源由 K.music_plan 判定（score/file/bed/off），口径与 st_score 完全一致——
         music.mode=off 时一条配乐都不混，即使 work/music.wav 还在（外部配乐请用 mode=file）
-      - 音效：work/sfx.wav（按 cues.json 合成）；没有 cues 时退回 v0.2 的转场 whoosh
+      - 音效：work/sfx.wav（按 cues.json 合成）；没有 cues 时退回转场 whoosh
     音效响起时配乐自动让位（duck_db），避免重击被配乐吃掉。
     """
     print("== Audio")
@@ -1108,8 +1105,8 @@ def st_audio(tl, work, script):
     music_path = os.path.join(work, "music.wav")
     plan, why = K.music_plan(script, has_music_file=os.path.exists(music_path))
     if plan == "off":
-        # 关键语义：mode=off = 不要配乐。旧实现会无条件读 work/music.wav，
-        # 于是"上一轮跑出来的配乐"仍被混进新片（用户改了 mode 却听不出变化）。
+        # 关键语义：mode=off = 不要配乐。无条件读 work/music.wav 的话，
+        # "上一轮跑出来的配乐"仍会被混进新片（用户改了 mode 却听不出变化）。
         print("   配乐: " + why)
     elif plan == "bed":
         music = _legacy_music(tl, script)
@@ -1135,7 +1132,7 @@ def st_audio(tl, work, script):
         sfx, _ = K.wav_read(sfx_path)
         print("   音效: sfx.wav（按 cues.json 合成）")
     elif script.get("whoosh", True) and not os.path.exists(os.path.join(work, "cues.json")):
-        # v0.2 兼容：没有提示点时才用"每段开头一声 whoosh"的旧行为
+        # 兼容路径：没有提示点时才用"每段开头一声 whoosh"的行为
         bus = K.AudioBus(total, channels=2)
         for s in tl["scenes"][1:]:
             if float(s["start"]) < 0.2:
@@ -1148,7 +1145,7 @@ def st_audio(tl, work, script):
     plan_s = resolve_style(script, work)
     # 风格化的 duck 深度：轻快/极简风格的配乐更"薄"，让位可以浅一点；
     # 电影/史诗要压得更狠。用户显式写 music.duck_db 时永远以用户为准。
-    # v0.7：整体 +1 dB —— 旧值（2.0/2.5/3.0/4.5）下配乐只比音效低 1.5 dB、duck 仅 3 dB，
+    # 整体 +1 dB 的来由：更低的值（2.0/2.5/3.0/4.5）下配乐只比音效低 1.5 dB、duck 仅 3 dB，
     # 段落过门时两者在同一频段几乎等高，是"配乐和音效听起来像同一套"的混音侧成因。
     duck_default = 4.0
     if not plan_s["legacy"]:
@@ -1156,7 +1153,7 @@ def st_audio(tl, work, script):
                         "cinema": 5.5, "epic": 5.5}.get(plan_s["style"], 4.0)
     samples = K.mix_film(voice, music, sfx, total=total,
                          voice_gain=float(script.get("voice_gain", 1.0)),
-                         # v0.7.1 旁白优先：配乐基线从 -1.5 dB 降到 -12 dB。
+                         # 旁白优先：配乐基线 -12 dB。
                          # 视频以旁白为主，-1.5 dB 时背景与台词响度几乎等高，观众要费力分辨字；
                          # 12 dB 是"人声明显压住背景"的经验线（audio.md §2 的那条设计标准）。
                          music_gain_db=float(mus.get("gain_db", -12.0)),
@@ -1180,9 +1177,9 @@ def st_audio(tl, work, script):
 
 # ---------------------------------------------------------------- 预检闸门
 def _run_preflight(script, work, engine, tl=None, skip=False):
-    """渲染前资源闸门（v0.8）：缺字形 / 坏音频 / 缺字体，在渲第一帧之前就 fail。
+    """渲染前资源闸门：缺字形 / 坏音频 / 缺字体，在渲第一帧之前就 fail。
 
-    为什么值得单独立一道闸：这类问题以前都是"片渲完、QA 才报"——870 帧白跑，
+    为什么值得单独立一道闸：这类问题若只在"片渲完、QA 才报"——870 帧白跑，
     而且 reports 里只有一句"缺字形"，说不清是哪个字段哪句台词。
     三档语义：没装 preflight.py -> skipped（写明原因）；有 error -> fail；
     只有 warning -> pass（warning 仍进账本，不静默）。
@@ -1228,14 +1225,14 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
     return True
 
 
-# ---------------------------------------------------------------- 字幕样式（v1.0.2）
+# ---------------------------------------------------------------- 字幕样式
 _SUB_CACHE = {}
 
 
 def _sub_kw(script):
     """从已解析的 plan 里取字幕参数（缓存按 script 对象身份，连续帧不重复解析）。
 
-    v1.0.2：字幕样式由 design.json 的 visual.subtitle 决定；参考帧渲染路径
+    字幕样式由 design.json 的 visual.subtitle 决定；参考帧渲染路径
     （qavmaf._draw_ref_frame）必须调用同一个 filmkit.subtitle_kwargs(plan)，
     否则两帧字幕参数不同会把同源好片的 VMAF 拉低。
     """
@@ -1305,7 +1302,7 @@ def _seg_usable(path, frames):
 
     为什么不能只看 size>1024：Ctrl-C / 杀进程留下的半截 mp4 也 >1024，被当成
     "已存在"跳过后，拼接只在最后报一句"拼接后时长 0.07s != 预期 29.00s"。
-    v0.7.2 起分块先写 .part 再 os.replace，正常中断不会留下半截正式文件；这里
+    分块先写 .part 再 os.replace，正常中断不会留下半截正式文件；这里
     再补一道头部 nb_frames 比对，挡住"文件在/大小对但帧数不对"的异常（例如被
     外部工具截断过）。
 
@@ -1334,15 +1331,14 @@ def _render_chunk_worker(args):
     tl = json.load(open(tl_path, encoding="utf-8"))
     script = json.load(open(script_path, encoding="utf-8"))
     script["_total"] = tl["total"]
-    # v0.6.0 修：JSON 快照会把元组变成 list（主题色是 (r,g,b) 元组），子进程里
-    # scenes._bg() 拿 th["bg"] 当缓存键 -> TypeError: unhashable type: "list"，
+    # 不能直接用 JSON 快照里的计划：JSON 会把元组变成 list（主题色是 (r,g,b) 元组），
+    # 子进程里 scenes._bg() 拿 th["bg"] 当缓存键 -> TypeError: unhashable type: "list"，
     # 于是 --jobs >1 整条并行路径直接崩。计划是**纯函数**，这里按剧本重新解一次，
     # 既拿回元组，也保证子进程的主题与父进程逐字段一致。
     #
-    # v1.0 修：重解时**必须带上 work**。design 路径的身份在 work/design.json 里，
-    # 不带 work 就只能走 stylekit 的 auto 分支 -> 画出一套完全不同的主题。
-    # 实测后果：--jobs 4 的成片是 tech-deep（偏蓝），而 --jobs 1 / QA 参考帧是
-    # 设计本身的近黑金；两者 MAE 0.059、VMAF 直接掉到 1.49。
+    # 重解时**必须带上 work**。design 路径的身份在 work/design.json 里，
+    # 不带 work 就只能走 fail-closed 报错 -> 画出一套完全不同的主题。
+    # 实测后果：--jobs 4 的成片与 --jobs 1 / QA 参考帧 MAE 0.059、VMAF 直接掉到 1.49。
     # 这种"并行度不同就出不同片子"的 bug 最隐蔽——单线程跑一遍永远看不见。
     script.pop("_style", None)
     try:
@@ -1488,10 +1484,10 @@ def st_frames(tl, work, scenes_mod, script, jobs=1, resume=True, engine="pil"):
 
 
 def _web_style_payload(we, script, tl=None, work=None):
-    """把风格包解析成 webengine 能吃的 __STYLE__ 载荷（v0.8）。
+    """把风格包解析成 webengine 能吃的 __STYLE__ 载荷。
 
     style=None（legacy 项目 / 解析失败）时返回 None —— webengine 收到 None 连
-    add_init_script 都不调，页面行为与 v0.7 逐字节一致（这是兼容性硬要求）。
+    add_init_script 都不调，页面行为逐字节不变（这是兼容性硬要求）。
     """
     try:
         style_plan = resolve_style(script, work, verbose=False)
@@ -1520,7 +1516,7 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
 
     页面的 window.DURATION / window.FPS 是切块与校验的唯一真值来源：
     和 timeline.json 对不上就直接报错（十有八九是改了剧本没重新 layout）。
-    v0.8：把风格包与画幅/帧率一起注入页面（window.__STYLE__），页面不再是深蓝橙写死。
+    把风格包与画幅/帧率一起注入页面（window.__STYLE__），页面颜色不再写死。
     """
     we = _opt_module("webengine",
                      "浏览器渲染需要 webengine.py（本技能 scripts/ 里自带；还需要 pip install playwright）")
@@ -1591,8 +1587,8 @@ def _qa_gates(lg, rep, deep, tl, work):
     v = next((s for s in streams if s.get("codec_type") == "video"), {})
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = pr.get("format") or {}
-    # v0.8：容器门禁比对的是**交付规格**（timeline 里记的 video 块），不是引擎内部常量。
-    # 老 timeline（升级前生成的）没有 video 字段 -> 回落到 1920x1080，行为不变。
+    # 容器门禁比对的是**交付规格**（timeline 里记的 video 块），不是引擎内部常量。
+    # 没有 video 字段的 timeline -> 回落到 1920x1080。
     _vp = tl.get("video") or {}
     W = int(_vp.get("out_w") or K.W)
     H = int(_vp.get("out_h") or K.H)
@@ -1656,7 +1652,7 @@ def _qa_gates(lg, rep, deep, tl, work):
     else:
         lg.ok("G8", "首尾之外无长黑帧", "0 段")
 
-    # ---- G10 词级时间戳（v0.8）：覆盖率 / 单调 / 末词偏差 ----
+    # ---- G10 词级时间戳：覆盖率 / 单调 / 末词偏差 ----
     _word_gate(lg, tl, work)
 
     # ---- G9 帧级深检（闪烁 / 空窗 / 音画同步）----
@@ -1668,7 +1664,7 @@ def _qa_gates(lg, rep, deep, tl, work):
         ns = len(deep.get("sync") or [])
         judged = (deep.get("sync_info") or {}).get("judged")
         sync_note = ("同步查了 %s 条" % judged) if judged is not None else "同步未判（没写 visual_at）"
-        # v1.0.2：门禁要按 **deep.errors** 判，而不是按 flicker 条数。
+        # 门禁要按 **deep.errors** 判，而不是按 flicker 条数。
         # qa_frames 会把"块内像素有增有减"（文字入场/母题动画/镜头缓推）的候选从
         # flicker 降级进 warnings（见 FLICKER_AGREE_MIN），此时 flicker 仍非空但已不成问题；
         # 按条数判会让降级形同虚设（零拷贝首片实测：降级后仍判 fail）。
@@ -1691,7 +1687,7 @@ WORD_COVER_MIN = 0.45         # 词时长之和 / 句实测时长：中文有词
 
 
 def _word_gate(lg, tl, work):
-    """词级时间戳门禁（v0.8）。
+    """词级时间戳门禁。
 
     为什么值得单独一道闸：词级数据是"字幕按词折行 / cue 词锚点"的依据，
     但它来自一个**逆向接口**（edge-tts）。服务端一改，最可能的表现是"仍返回音频、
@@ -1755,12 +1751,12 @@ def _word_gate(lg, tl, work):
 
 
 # ⚠ 阈值**只有一套**：权威定义在 qavmaf.py（VMAF_PASS=92 / VMAF_WARN=96，SSIM 仅诊断）。
-# 这里刻意不设第二套常量——本仓库的规矩是"同一事实只能有一个权威值"（CHANGELOG v0.4 D 节）。
+# 这里刻意不设第二套常量——本仓库的规矩是"同一事实只能有一个权威值"。
 # 真实标定（qavmaf 作者实测，参考帧含字幕与片头片尾淡入淡出）：
 #   模板片 crf17 VMAF 97.24(pass) / crf30 95.74(pass+warning) / 二次编码坏片 29.45(fail)
 # 想按片收紧或放宽就写 film.json 的 qa.vmaf.pass / qa.vmaf.warn，会透传给 qavmaf。
 def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
-    """全片 VMAF/SSIM 门禁（v0.8）：参考帧由场景函数实时渲染，与成片逐帧比较。
+    """全片 VMAF/SSIM 门禁：参考帧由场景函数实时渲染，与成片逐帧比较。
 
     为什么值得全片跑（用户明确要求"全片 + 阻断"）：锐度比只在 4 个时刻采样，
     能发现"整体发虚"，但发现不了"某 30 秒里字幕糊了 / 某段梯度出现色带"。
@@ -1845,7 +1841,7 @@ def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
     return res
 
 
-# v0.8 实测标定（同一部模板片，29 s，faster-whisper small / CPU int8）：
+# 实测标定（同一部模板片，29 s，faster-whisper small / CPU int8）：
 #   干净成片：字符召回 0.828（专有名词 "DeepSeek 4.1 Flash" 被听成 DIXX/DeepSeek 变体，
 #            4 段全对上、缺句 0）—— 这不是流水线坏了，是 ASR 对中英混排专名的正常误差。
 #   所以默认线取 0.85 / 0.72：**低于 0.72 才说明"整句丢了/音轨跟剧本不是一套"**，
@@ -1856,7 +1852,7 @@ QA_ASR_RECALL_WARN = 0.72
 
 
 def _qa_asr_gate(lg, film, work, script, tl=None, cfg=None):
-    """ASR 回读门禁（v0.8）：把成片音轨转回文字，和剧本逐句对账。
+    """ASR 回读门禁：把成片音轨转回文字，和剧本逐句对账。
 
     为什么值得：容器/响度/帧级质检都默认"音轨里念的就是剧本那几句"。TTS 缓存串了、
     换声线漏句、混音压没了、音轨是旧的——这些从波形和容器上都看不出来，只有转回
@@ -1969,9 +1965,9 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
         print("   [WARN] 锐度比门禁未执行（没有参考帧）")
     safe = K.qa_text_safe(tl["scenes"])
     print("   字幕安全区:", "OK" if not safe else safe[:2])
-    # 字幕安全区 / 缺字形以前只 print，不进 qa_report 的 warnings ——
-    # 于是 CI、前端、任何只读 JSON 的人**看不到**这两条（"门禁可以保守，但不能静默"）。
-    # 现在它们进 warnings（仍是 warning 级，不阻断，但能被程序读到）。
+    # 字幕安全区 / 缺字形若只 print、不进 qa_report 的 warnings，
+    # CI、前端、任何只读 JSON 的人都**看不到**这两条（"门禁可以保守，但不能静默"）。
+    # 所以它们进 warnings（仍是 warning 级，不阻断，但能被程序读到）。
     for _m in (safe or [])[:4]:
         rep["warnings"].append("字幕安全区: %s" % _m)
     _glyph = K.check_glyphs((script or {}).get("lines") or [])
@@ -1981,7 +1977,7 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
     sheet = K.contact_sheet(shots, os.path.join(work, "qa", "sheet.png"))
     if sheet:
         print("   联系表:", sheet, "  <- 必须亲眼看")
-    # ---- 帧级深检（v0.3.0）：单帧闪烁 / 画面空窗 / 音画同步 / 响度曲线 ----
+    # ---- 帧级深检：单帧闪烁 / 画面空窗 / 音画同步 / 响度曲线 ----
     deep = _qa_deep(film, work, tl, script)
     if deep:
         for w in deep.get("warnings") or []:
@@ -2127,10 +2123,10 @@ def _reload_ledger_from_disk(work, ledger):
 def _report_path(a):
     """QC 报告的唯一落点：**站在成片旁边**（--out 的目录），不猜 work 的兄弟目录。
 
-    v0.7.2 修：accept 分支以前用 dirname(abspath(work))/out/QC-REPORT.md，而 all/mux/qa
-    用 dirname(abspath(out))。--out 指到任何非 out/ 的目录（deliver/、中文工作区/成品/…）
+    accept 与 all/mux/qa 必须用同一个函数算路径：若前者用 dirname(abspath(work))/out/、
+    后者用 dirname(abspath(out))，--out 指到任何非 out/ 的目录（deliver/、中文工作区/成品/…）
     时，签核更新的是另一份没人交付的文件，交付出去的那份仍是"未签核"——正好打穿
-    "报告是交付凭据"这条承诺。两处必须走同一个函数。
+    "报告是交付凭据"这条承诺。
     """
     return os.path.join(os.path.dirname(os.path.abspath(str(a.out))), "QC-REPORT.md")
 
@@ -2202,8 +2198,8 @@ def _load_batch(path):
         {"films": [{"script": "a/film.json", "work": "a/work",
                     "scenes": "a/scenes.py", "out": "out/a.mp4"}]}
 
-    限制来自 MoneyPrinterTurbo 的工程经验（B 线调研）：批量最容易死在"第 7 条跑一半
-    才发现清单写错"，所以数量/体积先卡死，并且在**开跑之前**全部预检一遍。
+    批量最容易死在"第 7 条跑一半才发现清单写错"，所以数量/体积先卡死，
+    并且在**开跑之前**全部预检一遍。
     """
     p = str(path)
     if not os.path.exists(p):
@@ -2334,11 +2330,11 @@ def run_batch(a):
     return 0 if okn == len(results) else 1
 
 
-# ---------------------------------------------------------------- 提案闸（v1.0）
+# ---------------------------------------------------------------- 提案闸
 def _proposal_gate(a):
     """提案闸：frames 之前必须先有"已确认的设计"。
 
-    D3 之后本项目的主路径是"先提案、再出片"，所以这条闸是语义要求，不是可选装饰。
+    本项目的主路径是"先提案、再出片"，所以这条闸是语义要求，不是可选装饰。
     但它默认只警告（0 退出码），加 --require-proposal 才失败——原因只有一条：
     --stage frames 是开发期高频命令（改一帧看一帧），硬拦会让调试变得没法用。
 
@@ -2388,9 +2384,9 @@ def _builtin_scenes() -> str:
 def _resolve_scenes(scenes_arg, script_path) -> str:
     """定位场景模块，按优先级：显式 --scenes > 剧本同目录 scenes.py > 技能内置 scenes.py。
 
-    为什么要这条回退链（v1.0.2）：旧流程要求用户把 assets/scenes.py 拷进工作目录，
-    即「提供一份模板代码」——与 v1.0.1「不提供任何模板」直接冲突，而且用户每部片都得
-    重拷一份 98KB 的绘制代码。现在把内置渲染器当**默认能力**：工作目录里没有 scenes.py
+    为什么要这条回退链：要求用户把 assets/scenes.py 拷进工作目录，
+    即「提供一份模板代码」——与「不提供任何模板」直接冲突，而且用户每部片都得
+    重拷一份 98KB 的绘制代码。所以把内置渲染器当**默认能力**：工作目录里没有 scenes.py
     时直接用它出片；需要改画面再写自己的 scenes.py（显式指定或用同目录约定）。
     """
     if scenes_arg:
@@ -2450,7 +2446,7 @@ def main():
                     help="把'提案未确认'当成失败（默认只警告；先跑 propose.py 再出片）")
     ap.add_argument("--cost", action="store_true",
                     help="每个 stage 往 work/cost.jsonl 记一行实测耗时")
-    # ---- v0.8 ----
+    # ---- 批量 / 画质门禁 ----
     ap.add_argument("--batch", default="",
                     help="批量清单（JSON 数组或 {\"films\":[...]}，≤100 条）："
                          "先全量预检，再逐条渲染，单条失败不阻断其余")
@@ -2481,11 +2477,11 @@ def main():
     script["_engine"] = engine
     script["_scenes"] = _resolve_scenes(a.scenes, a.script)
 
-    # ---- 门禁账本（v0.6.0）----
+    # ---- 门禁账本 ----
     global _LEDGER
     # engine=web 时把入口页实际引用的同目录页面脚本一起纳入内容指纹：web 的画面逻辑在
-    # web/*.js 里，不在 scenes.py 里——不纳入的话改动画后旧签核仍然"有效"，正好违背
-    # v0.6「签核绑内容指纹，改了画面代码旧签核自动失效」的承诺。
+    # web/*.js 里，不在 scenes.py 里——不纳入的话改动画后旧签核仍然"有效"，
+    # 正好违背「签核绑内容指纹，改了画面代码旧签核自动失效」这条承诺。
     web_entry = ""
     if engine == "web":
         try:
@@ -2502,7 +2498,7 @@ def main():
     def _sources():
         """源头输入：剧本、scenes.py、冻结设计（改它们等于改了所有下游的依据）。
 
-        design.json 是 v1.0 新增的第三个源头：它由 propose.py --confirm 写出，
+        design.json 是第三个源头：它由 propose.py --confirm 写出，
         记录"这一版长什么样"。改设计 = 画面必须重渲，所以它必须进 stagewatch 的
         源头指纹，否则"改了配色但没重跑 frames"这种事故查不出来。
         """
@@ -2524,7 +2520,7 @@ def main():
         """stage 开始时查新鲜度并计时。返回 t0。
 
         report() 自己负责打印 "[stale] <stage>: <原因>" 与"最小重跑"两行
-        （v0.7.2 修：以前只调不接，用户只看到"最小重跑"不知道是哪个阶段、
+        （必须接它的返回值，否则用户只看到"最小重跑"不知道是哪个阶段、
         为什么过时，得上 --stage explain 才知道）。
         --allow-stale 也要调用：它承诺的是"放行并留痕"（QC 报告里记一条 skipped），
         直接跳过检查连痕都没有——那就成了静默。
@@ -2545,7 +2541,7 @@ def main():
             if errs:
                 # --strict-stale 的承诺是"上游产物过时算失败"。stagewatch.report 只把
                 # 问题放进返回值（并往账本记一条 fail），它自己不抛异常——所以必须在这里
-                # 真的失败。以前丢弃了返回值，于是 --stage layout --strict-stale 报完过时
+                # 真的失败。丢弃返回值的话，--stage layout --strict-stale 报完过时
                 # 照跑、退出码 0，help 文本与行为对不上。
                 #
                 # 选择"立刻退出"而不是"跑完再在收尾处报"：过时的输入会把旧产物掺进
@@ -2628,8 +2624,8 @@ def main():
     def load_scenes(strict=True):
         """加载场景模块：strict=False 时失败只 WARN（qa 缺参考帧也要能跑）。
 
-        v1.0.2：路径用 main() 里解析好的 script["_scenes"]（显式 --scenes / 剧本同目录 /
-        技能内置三档回退），不能再用原始 a.scenes —— 缺省时它是空串，会变成
+        路径用 main() 里解析好的 script["_scenes"]（显式 --scenes / 剧本同目录 /
+        技能内置三档回退），不能用原始 a.scenes —— 缺省时它是空串，会变成
         `load_module("")` 这种 "NoneType has no attribute loader" 的怪错误。
         """
         scenes_path = script.get("_scenes") or _resolve_scenes(a.scenes, a.script)
@@ -2652,7 +2648,7 @@ def main():
 
     stage = a.stage
 
-    # ---- preview：前 N 秒试片（v0.8）----
+    # ---- preview：前 N 秒试片 ----
     if a.preview:
         try:
             secs = float(a.preview)
@@ -2671,7 +2667,7 @@ def main():
         print("== Preview（前 %.1fs / %d 帧）" % (n / float(tl["fps"]), n))
         sc2 = dict(script)
         sc2["_total"] = tl["total"]
-        # 注意这里之前写成 setdefault(_style, resolve_style(script))：
+        # 不能写成 setdefault(_style, resolve_style(script))：
         # 对 sc2 做 setdefault 却传 script 的解析结果 —— script 有 _style 时，
         # setdefault 的第二参数**仍会被求值**（Python 先算参数），等于多做一次无用解析；
         # 而 script 没有 _style 时又把 work 漏了，单跑 --preview 会报"找不到设计"。
@@ -2680,7 +2676,7 @@ def main():
                       str(script.get("preset", "medium")), progress=False)
         # 有 audio.wav 就带上声音（没有也能看画面；不阻断）。
         # 注意：**必须先把音轨截到预览时长**——K.mux 会校验音视频时长差 < 0.05s，
-        # 直接拿全长 audio.wav 去配 8 秒画面必然被判"音视频时长不一致"（v0.8 开发期实测）。
+        # 直接拿全长 audio.wav 去配 8 秒画面必然被判"音视频时长不一致"（实测）。
         audio = os.path.join(a.work, "audio.wav")
         if os.path.exists(audio):
             tmp = out_mp4 + ".mux.mp4"
@@ -2775,7 +2771,7 @@ def main():
         return 0
 
     if stage in ("all", "style"):
-        # --stage all 也要把 style 这一行记进 manifest：以前 _nm 在 all 下是 None，
+        # --stage all 也要把 style 这一行记进 manifest：若 _nm 在 all 下是 None，
         # 而 _stage_begin/_stage_end 对 None 是空操作 -> work/style.json 写出来了、
         # manifest.json 却从来没有 style 记录。于是之后任何一次 `--stage style` 都会
         # 命中「产物在但没有记录」的判据，报成 no-manifest（--stage all 的用户 100% 踩到）。
@@ -2833,8 +2829,8 @@ def main():
         _stage_end("audio", _t0)
 
     if stage == "stills":
-        # 母版预览是"上手第一件事"，可它需要 timeline。以前干净目录直接 SystemExit，
-        # 而文档三步上手就把它排在第 4 步（照抄必失败）。这里自动补前置：
+        # 母版预览是"上手第一件事"，可它需要 timeline。干净目录直接 SystemExit 的话，
+        # 文档三步上手就把它排在第 4 步（照抄必失败）。所以这里自动补前置：
         # 缺 tts.json 就真合成一次旁白（要联网），缺 timeline 就排一次轴——
         # 但每一步都**明说**自己在补什么，不偷偷跑。
         # 自动补的这几步也要 _stage_begin/_stage_end：否则 manifest 里只有 stills 一条记录，
@@ -2862,7 +2858,7 @@ def main():
         _stage_end("stills", _t0)
         _LEDGER.add("stills", "母版静帧已产出", GT.OK if made else GT.FAIL,
                     "%d 张（要人看过才算过：--stage accept --gate stills）" % len(made or []))
-        # 0 张静帧 = fail 门禁：以前这里无条件 return 0，`--stills 写错 id` 会
+        # 0 张静帧 = fail 门禁：无条件 return 0 的话，`--stills 写错 id` 会
         # "全部跳过 + 退出码 0"，CI 看不出根本没出图。
         rc = _finish_gates(a)
         return 1 if (rc or _LEDGER.fails()) else 0
@@ -2880,7 +2876,7 @@ def main():
         return 1 if (errs or rc) else 0
 
     if stage in ("all", "frames", "mux"):
-        # ---- 提案闸（v1.0）：出片前必须先有已确认的设计 ----
+        # ---- 提案闸：出片前必须先有已确认的设计 ----
         # 放在最前面（before ensure_tl/preflight/st_frames）：渲完再拦等于白渲。
         if stage in ("all", "frames"):
             if not _proposal_gate(a):
@@ -2906,7 +2902,7 @@ def main():
             _stage_end("frames", _t0, frames=int(tl["frames"]))
             if stage == "frames":
                 _LEDGER.ok("frames", "逐帧渲染", "%d 帧（%s）" % (int(tl["frames"]), engine))
-                # 同上：strict-gates 下 skipped 也要反映到退出码（以前这里只看 fails()）。
+                # 同上：strict-gates 下 skipped 也要反映到退出码（只看 fails() 会漏掉它）。
                 rc = _finish_gates(a)
                 return 1 if (rc or _LEDGER.fails()) else 0
         if stage in ("all", "mux"):
@@ -2919,7 +2915,7 @@ def main():
             _check_signoff("mux")
             if stage == "mux":
                 _LEDGER.ok("mux", "合成（视频流 copy + loudnorm）", a.out)
-                # 同上：strict-gates 下 skipped 也要反映到退出码（以前这里只看 fails()）。
+                # 同上：strict-gates 下 skipped 也要反映到退出码（只看 fails() 会漏掉它）。
                 rc = _finish_gates(a)
                 return 1 if (rc or _LEDGER.fails()) else 0
             if stage == "all":
@@ -2933,8 +2929,8 @@ def main():
                     return 1
                 return 0
     # 所有 stage 统一收尾：落 gates.json + QC-REPORT.md，并按门禁结果给退出码。
-    # v0.7.2 修：以前只有 style/frames/mux/qa 这几条分支自己调 _finish_gates，其余
-    # （tts/layout/cues/score/sfx/audio/stills）落在这行 return 0——于是 ledger 里
+    # 只有 style/frames/mux/qa 这几条分支自己调 _finish_gates 时，其余
+    # （tts/layout/cues/score/sfx/audio/stills）会落在这行 return 0——于是 ledger 里
     # 记的 fail 传不到退出码，"门禁失败 -> 非 0"这个承诺按 stage 不同行为不一样。
     # 默认路径不受影响：没有 fail（且没开 --strict-gates）时 _finish_gates 返回 0。
     rc = _finish_gates(a, persist=(stage in _PERSIST_STAGES))

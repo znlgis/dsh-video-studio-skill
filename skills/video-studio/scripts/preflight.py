@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""preflight.py — 渲染前资源闸门（v0.8.0）。
+"""preflight.py — 渲染前资源闸门。
 
 为什么要有它：缺字形（✓ / emoji / 生僻字）和坏 TTS 音频都是「渲染完才报」的问题——
 filmkit.glyph_missing_chars() 检测本身是准的（正常中文 []，✓/↵/emoji 检出），
@@ -12,7 +12,7 @@ preflight 不新写检测器，只把现成检测前移，并把结论整理成�
   2 glyphs      所有上屏文本逐字过 filmkit.glyph_missing_chars；
                 字段：text / sub / big / kicker / lead / note / title / end_text /
                 chapter / items[].text（含 timeline.scenes 里的同名字段）
-                按模板实际绘制权重检测：big/kicker=bold、lead=light、sub=reg+light、
+                按夹具实际绘制权重检测：big/kicker=bold、lead=light、sub=reg+light、
                 items=reg、title/chapter=reg、text=bold+reg
   3 tts         work/tts/*.mp3 若存在，必须能被 ffprobe 解析出音频流；
                 文件名要能对上行 id，时长要与台词长度相符（过短=截断/坏缓存）
@@ -40,7 +40,7 @@ ffmpeg/ffprobe 探测口径与 filmkit 一致：FILMKIT_FFMPEG 优先，找不�
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "1.0.4"
 
 import argparse
 import json
@@ -70,7 +70,7 @@ FIELD_WEIGHTS = {
     "big": ("bold",),
     "kicker": ("bold",),
     "lead": ("light",),
-    "note": ("bold",),              # 模板未用；按 QA 的 check_glyphs 口径（bold）兜底
+    "note": ("bold",),              # 夹具未用；按 QA 的 check_glyphs 口径（bold）兜底
     "title": ("reg", "bold"),       # 右下角 brand 画 reg；hook 缺 big 时画 bold
     "end_text": ("bold",),
     "chapter": ("reg",),
@@ -635,7 +635,7 @@ def _check_web_page(script, engine, errors, warnings, checks):
     entry = _web_entry(script)
     if not os.path.isfile(entry):
         tpl = _skill_web_template()
-        # v1.0.2 wording: assets/web is a demo page for smoke-testing the web path, not a template.
+        # assets/web is a demo page for smoke-testing the web path, not a template.
         # This skill ships no templates: web-path films need the user own page (PIL path is zero-copy).
         if tpl:
             hint = ("（web 引擎需要**你自己的页面**：把技能自带的**示例页**拷到 %s 只能跑通链路，"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""silhouette_qa.py — 跨设计剪影可区分门禁（G13，v2.0.0）。
+"""silhouette_qa.py — 跨设计剪影可区分门禁（G13）。
 
 解决什么问题
 ------------
@@ -8,13 +8,12 @@
 灰度三值化后的**构图骨架**（前景占比、重心、边缘占用、左右对称、纵向明暗剖面）是否真的
 变了？本工具把"骨架到底有没有变"变成可复核的数字，而不是审美口水。
 
-v2.0.0 为什么换输入
--------------------
-v1.0.1 删除了全部内置风格表（stylekit.STYLE_IDS == ()），旧版按"同一剧本换 style"两两比
-的输入已经不存在，直接报"至少需要 2 套风格"。零模板时代的"多部片"来自 **designkit 现场
-采样**：同一 brief 不同 seed（或不同 brief）得到 N 个设计，每个设计是一整条独立外观
-（配色/母题/版式/HUD/字体族/字号比例/字距/行距/重心偏移/转场/缓动/编号写法…）。
-因此本工具改成：**N 个设计之间两两比较**——这才对应"不同视频会不会长得一样"。
+输入从哪来
+----------
+技能里没有内置风格表（stylekit.STYLE_IDS == ()），"同一剧本换 style"这种输入不存在。
+"多部片"来自 **designkit 现场采样**：同一 brief 不同 seed（或不同 brief）得到 N 个设计，
+每个设计是一整条独立外观（配色/母题/版式/HUD/字体族/字号比例/字距/行距/重心偏移/转场/缓动/编号写法…）。
+所以本工具比的是 **N 个设计之间两两比较**——这才对应"不同视频会不会长得一样"。
 
 算法（验收口径；改阈值 / 改指标之前先读这一节）
 ----------------------------------------------
@@ -71,7 +70,7 @@ B 的基准是四角中位数：浅色主题整屏 bg→bg2 渐变本身就可�
     跳过 = 帧渲不出来 / 指标缺值，**skipped != 通过**：它只说明这次没证据，不说明
     骨架相同；--strict 用于 CI 里把"没跑成"也当红。
 
-CLI（v2.0.0；旧的 --styles 已删除——STYLE_IDS 在 v1.0.1 是空元组，按风格 ID 选已经无意义）
+CLI（没有 --styles：STYLE_IDS 是空元组，按风格 ID 选已经无意义）
 ------------------------------------------------------------------------------------------
     python tools/silhouette_qa.py [--designs 3] [--seed 1] [--brief "题材/要求"]
                                   [--design-json PATH]
@@ -102,7 +101,7 @@ CLI（v2.0.0；旧的 --styles 已删除——STYLE_IDS 在 v1.0.1 是空元组�
 """
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "1.0.4"
 
 import argparse
 import copy
@@ -147,7 +146,7 @@ TIER_BG_MAX = 15          # d < 15 -> 背景档 0
 TIER_FG_MIN = 60          # d >= 60 -> 前景档 2
 EDGE_BAND = 0.06          # 四边各 6% 带宽
 METRIC_ORDER = ("F", "Cx", "Cy", "B", "S", "P")
-# 达标线：**沿用 v0.9 的验收口径**（F>=6pp / Cx,Cy>=8 / B>=14 / S>=0.20 / P>=6.0）。
+# 达标线：F>=6pp / Cx,Cy>=8 / B>=14 / S>=0.20 / P>=6.0。
 # 改这里等于改验收口径，需说明理由；v2.0.0 只换输入（设计而不是风格），不放宽任何一条。
 THRESHOLDS = {"F": 6.0, "Cx": 8.0, "Cy": 8.0, "B": 14.0, "S": 0.20, "P": 6.0}
 METRIC_LABELS = {
@@ -346,7 +345,7 @@ def load_designkits(scripts_dir=SCRIPTS):
 def sample_designs(DK, n, seed, brief=None):
     """现场采样 n 个设计（不同 brief 或同 brief 不同 seed，跨设计两两比较）。
 
-    为什么要"现场采样"而不是读一份写死的清单：v1.0.1 起没有任何内置外观表，
+    为什么要"现场采样"而不是读一份写死的清单：技能里没有任何内置外观表，
     多部片的差异全部来自 designkit 的连续采样；门禁必须量**采样器真的会产出的东西**。
     seed=None 表示每次新设计（采样器的默认语义）；本工具缺省固定 seed 以保结论可复现。
     """
@@ -416,7 +415,7 @@ def _family_of(ST, plan):
 def build_script(design_id, scene_types):
     """造一份"只有设计不同"的合成剧本（title/lines 固定，dur 固定 4.0s）。
 
-    style 字段不再写任何风格 id（v1.0.1 没有内置风格表）；渲染用的计划由
+    style 字段不写任何风格 id（没有内置风格表）；渲染用的计划由
     run_gate 塞进 script["_style"]，scenes.draw_frame 优先读它。
     """
     lines = []
@@ -1156,7 +1155,7 @@ def main(argv=None):
     _setup_stdio()
     ap = argparse.ArgumentParser(
         description="跨设计剪影可区分门禁 G13：同一内容换设计（designkit 现场采样）渲帧，"
-                    "三值化后比结构指标。v2.0.0 起不再有 --styles：v1.0.1 已删除全部内置"
+                    "三值化后比结构指标。没有 --styles：技能不提供内置"
                     "风格表（stylekit.STYLE_IDS 为空），输入改为现场采样的设计。",
         epilog="例：python tools/silhouette_qa.py --designs 4 --json；"
                "python tools/silhouette_qa.py --selftest")

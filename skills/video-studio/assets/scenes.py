@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""scenes.py — 技能内置的场景渲染器（v1.0.2：默认渲染路径 + 自定义场景的范例）。
+"""scenes.py — 技能内置的场景渲染器（默认渲染路径 + 自定义场景的范例）。
 
-⚠ 这**不是**给用户拷走改的模板：v1.0.2 起 render.py 不写 --scenes 时会自动回落到本文件，
+⚠ 这**不是**给用户拷走改的模板：render.py 不写 --scenes 时会自动回落到本文件，
 用户工程目录里只需要一个 film.json。想改画面时，在剧本同目录放一个自己的 scenes.py
 （或 --scenes 显式指定），它会被优先发现；本文件就是那份自写场景的**参考实现**：
 10 类构图 / 8 种母题 / 6 种转场 / 35 字段主题 / 版式轮换 / 字幕参数全部从计划里读。
@@ -19,7 +19,7 @@
 ----------
 render.py 把 designkit.design_to_plan() 的计划塞进 script["_style"]（主题 / 视觉语言 /
 版式轮换 / 配乐 / 声线 / 节奏 / 字幕样式）。本文件从这份计划里取配色、材质、字体族、
-版式、缓动、HUD、镜头缓推——**没有任何内置风格表**（v1.0.1 已全部删除）：
+版式、缓动、HUD、镜头缓推——**没有任何内置风格表**：
 同一份代码画出来是什么样，完全由现场采样并确认过的 design.json 决定。
 
 铁律（决定画质与可复现性）：
@@ -62,10 +62,10 @@ import filmkit as K
 from filmkit import W, H, clamp, smooth, ease_out, rng
 
 # ============================================================================
-# 零、v0.4 兼容层（legacy 逐字节基线，别动这里的任何一行）
+# 零、legacy 绘制器（逐字节基线，别动这里的任何一行）
 # ============================================================================
 #
-# legacy = 老项目（film.json 没有 style 字段）。这组函数是 v0.4 的原文，
+# legacy = 老项目（film.json 没有 style 字段）。这组函数是逐字节基线，
 # 一个字符都不许改：Lead 的基线三帧 sha256 直接对拍这里的输出。
 # 新主题化代码只在 _legacy_* 之外生长，互不影响。
 
@@ -243,7 +243,7 @@ _LEGACY_DRAWERS = {
 
 
 # ============================================================================
-# 一、风格计划 / 主题（v0.5）
+# 一、风格计划 / 主题
 # ============================================================================
 
 _PLAN_CACHE = {}
@@ -358,14 +358,14 @@ def _ease(name):
 _EASES = {}
 
 
-# ---------------- 字体：family 是 v0.5 新加的参数（旧 filmkit 没有，自动回退） ----------------
+# ---------------- 字体：family 参数（旧 filmkit 没有就自动回退） ----------------
 
 _FONT_CACHE = {}
 _FAMILY_OK = None
 
 
 def _family_ok():
-    """filmkit.font 是否支持 family=...（Lead 在 v0.5 加；老版本没有就回退旧签名）。"""
+    """filmkit.font 是否支持 family=...（老版本没有就回退旧签名）。"""
     global _FAMILY_OK
     if _FAMILY_OK is None:
         try:
@@ -610,7 +610,7 @@ def _zoom_tag(th, extra=None):
 
 
 def _plate_zoom(src, s, th, tag):
-    """按镜头缓推取景：端点预烘 + 逐帧 blend（v1.0.3）。
+    """按镜头缓推取景：端点预烘 + 逐帧 blend。
 
     为什么不再用 NEAREST 直采：底图把颗粒（`_grain_layer`）一起烘了进去，颗粒是
     逐像素的高频图案；NEAREST 在缓慢缩放时采样网格会整像素跳变，颗粒图案随之整体
@@ -678,7 +678,7 @@ def _panel_x(lay):
 def _panel_boxes(lay, th, n, y_floor, v):
     """条目卡片布局：选列数 + 压缩卡片高度，保证①不压标题②不越字幕带（856）。
 
-    panel_gap 在 stylekit 里是**行距（pitch）**不是间隙：v0.4 用 240 + i*118 排卡片，
+    panel_gap 在 stylekit 里是**行距（pitch）**不是间隙：按 240 + i*118 排卡片时，
     所以 pitch 至少得比卡片高度多 6px，否则卡片会叠在一起。条目多时先加列，再压高度，
     最后才截断——静默重叠或画到字幕带下面比少画两条更糟。
     """
@@ -822,14 +822,14 @@ def _hud(img, th, chapter, progress, title):
 
 
 # ============================================================================
-# 三、场景语法（v0.9：10 类构图 × 8 套视觉语言）
+# 三、场景语法（10 类构图 × 8 套视觉语言）
 # ============================================================================
 #
 # 为什么重写这一节
 # ---------------
-# v0.5 的 _draw_hook / _draw_body / _draw_outro 是"一套骨架 + 换色"：背景板 → 眉标 →
+# 旧的 _draw_hook / _draw_body / _draw_outro 是"一套骨架 + 换色"：背景板 → 眉标 →
 # 大字 → 副标题 → 强调线 → HUD，三种 kind 只差字号与位置。于是 8 套风格换完只剩配色不同。
-# v0.9 把"画什么"（scene type，由 grammar.py 按内容选）与"怎么画"（视觉语言，由 stylekit
+# 现在把"画什么"（scene type，由 grammar.py 按内容选）与"怎么画"（视觉语言，由 stylekit
 # 的 VISUAL_LANGUAGES 给）拆开：
 #   · 10 类构图各自有独立的视觉重心与留白（hero 偏左上 / statement 正中 / compare 强制对称 …）
 #   · 每套风格有自己的装饰母题（括角 / 手绘内框 / letterbox / 信号条 …）与转场签名
@@ -963,9 +963,9 @@ def _motif_layer(th, lang):
     """把该风格独有的装饰图形烘焙成一张全屏 RGBA 图层（不含动态）。
 
     为什么烘焙：这些图形是静态的（括角、页眉线、letterbox、信号条），
-    逐帧重画一次就是 3–8ms。注意：v0.9.0 这里写的是"paste 只要 0.3ms"，
-    实测全屏 RGBA paste 是 **5.6ms**（Pillow 13 / 1080p），所以 v0.9.1 起
-    装饰直接烘焙进底版（见 _plate），逐帧只 copy 底版，不再单独 paste。
+    逐帧重画一次就是 3–8ms。注意：全屏 RGBA paste 实测是 **5.6ms**
+    （Pillow 13 / 1080p），所以装饰直接烘焙进底版（见 _plate），
+    逐帧只 copy 底版，不再单独 paste。
     """
     mf = lang.get("motif") or _DEFAULT_LANG["motif"]
     key = _motif_key(th, lang)
@@ -1092,7 +1092,7 @@ _PLATE_ORDER = []
 
 
 def _plate(th, lang, scene, s_bg):
-    """背景板 + 装饰母题合成后的整帧底版（v0.9.1）。
+    """背景板 + 装饰母题合成后的整帧底版。
 
     这是单帧预算里最大的一处优化：装饰是静态的，逐帧单独 paste 一张全屏 RGBA 要 5.6ms，
     合成进底版后逐帧只剩 copy（1.3ms）或端点 blend 取景（约 4.4ms，见 _plate_zoom）。
@@ -1138,7 +1138,7 @@ def _apply_veil(img, th, lang, scene, t_local, s_bg):
     """段首从背景"长出来"的过场。不做跨场景 cross-dissolve（draw_frame 拿不到上一段帧），
     只做"从本段背景板渐显 / 擦入"，观感是 dip 而不是 dissolve。
 
-    为什么必须做：v0.9 起相邻两段可能是完全不同的构图（数字卡 → 左右对比），
+    为什么必须做：相邻两段可能是完全不同的构图（数字卡 → 左右对比），
     整屏瞬切会精确触发 qa_frames 的单帧闪烁门禁（8x8 分块灰度差 ≥6.0），
     观众看着也像"换了一部片"。
     """
@@ -1284,7 +1284,7 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
 
     sub = scene.get("lead") or scene.get("sub") or ""
     # 副标题与大字重复时不要画第二遍：模板片里 big 与 sub 都是"零素材，全代码生成"，
-    # 照抄会让画面出现两行一样的字（v0.9 实测第一版就是这样）。
+    # 照抄会让画面出现两行一样的字（实测踩到过）。
     if sub and (str(sub).strip() == str(big).strip()
                 or (len(str(sub)) >= 6 and str(sub).strip() in str(big).strip())):
         sub = ""
@@ -1461,7 +1461,7 @@ def _draw_list(scene, t, dur, tg, script, frame, plan, th):
     body = max(22, int(th["scale"]["body"][0]) - 1)
     # 行高：优先"每条 96–118px"，条目多时往下压，硬下限 56px（再低中文就糊成一片）。
     # 为什么不是固定行高：模板片 5 条要点在 9.3s 的段里，固定 118px 会溢出 856 硬边界，
-    # 于是第 5 条被静默截断（v0.9 第一版实测），观众看到"五步"只列出四步。
+    # 于是第 5 条被静默截断（实测踩到过），观众看到"五步"只列出四步。
     avail = 856.0 - top
     row_h = avail / max(1, len(items)) if items else 118.0
     row_h = min(118.0, max(56.0, row_h - 6.0))
@@ -1589,7 +1589,7 @@ def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
                      v.y(768)], fill=_rgba(th["accent"] if on else th["rule"],
                                            int((150 if on else 34))))
     # 次要统计：**数值 + 单位 + 标签**都要画出来。
-    # v1.0 修：早先这里只画了 s["label"]，于是 stats[] 里的第 2、3 项（例如
+    # 这里必须把数值也画出来：只画 s["label"] 时 stats[] 里的第 2、3 项（例如
     # "338207 次 / 工具调用"、"22.62 B / Token 重放"）在画面上只剩两个光秃秃的词，
     # 并且行距 30px < 字号，两行直接叠在一起 —— 观众看到的是"工具调用/Token 重放"两行字
     # 糊在一块、数字完全消失。数字卡的价值就在数字，丢数字等于这段白做。
@@ -1658,7 +1658,7 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
 
     # 两栏内容垂直居中（上界 360，下界 800）：只有一两条时不会全挤在顶部留一大片空白。
     # 栏头：优先 sides 里作者写的 head；没有就**不要**写"左/右"这种零信息标签
-    # （v0.9 第一版实测：观众看到"左 / 右"会以为画面坏了），改画一个 VS 徽标在中缝上方。
+    # （实测：观众看到"左 / 右"会以为画面坏了），改画一个 VS 徽标在中缝上方。
     cols = [("left", 150.0, 700.0, -1), ("right", W - 850.0, 700.0, 1)]
     max_rows = max(len((sides.get("left") or {}).get("items") or []),
                    len((sides.get("right") or {}).get("items") or []), 1)
@@ -1805,7 +1805,7 @@ def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
     by = str(by or "")
 
     # 巨型引号：**用字形**，不用矢量线。
-    # v0.9 第一版画的是两条短线拼成的「《」，实测看起来像播放器的"快退"图标，
+    # 用两条短线拼「《」实测看起来像播放器的"快退"图标，
     # 观众会以为点错了什么。雅黑粗体的 U+201C 是有字形的（preflight 查过不缺口），
     # 直接放大 150px 就是最标准的引语符号。
     pq = ease(rng(t, 0.0, 0.45))
@@ -2012,7 +2012,7 @@ def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
     gap = _gap(th, lang)
     ph = _phase(scene)
 
-    # 光点环：数量随视觉语言母题走（epic 18 / cinema 12 / mono 0），且比 v0.5 更少
+    # 光点环：数量随视觉语言母题走（epic 18 / cinema 12 / mono 0）
     mf = str((lang.get("motif") or {}).get("kind") or "minimal")
     ring_n = {"rays": 18, "letterbox": 12, "brackets": 10, "signal": 8,
               "handdrawn": 6, "slabs": 12, "hairlines": 6, "minimal": 0}.get(mf, 8)
@@ -2091,10 +2091,10 @@ _KIND_TO_TYPE = {
 def draw_frame(scene, t_local, dur, t_global, script, frame):
     """按帧画一张 1920x1080 RGB 图。
 
-    v1.0 / D3 起只有一条路：按 scene_type（grammar.py 选好、render.py 写进 timeline）
+    只有一条路：按 scene_type（grammar.py 选好、render.py 写进 timeline）
     派发到 10 类构图之一；没有 scene_type 的旧 timeline 按 kind 映射到兼容类型。
 
-    原来的第 1 条分支（legacy —— film.json 不写 style 就走 v0.4 三个老绘制器）**已删除**：
+    原来的第 1 条分支（legacy —— film.json 不写 style 就走三个老绘制器）**已删除**：
     stylekit 不再产出 legacy 计划（不写设计会直接报错），那条分支永远走不到。
     留着死分支比删掉更危险——它会让"legacy 还能用"的错觉一直存在。
 
@@ -2116,7 +2116,7 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
     return fn(scene, t_local, dur, t_global, script, frame, plan, th)
 
 
-# ---------------- 提示点（v0.3.0 起可选；v0.7 按 kind 与内容生成） ----------------
+# ---------------- 提示点（按 kind 与内容生成） ----------------
 def _sha1_int(*parts):
     """把若干文本片段拼起来取 sha1 前 8 位（提示点"内容派生"的稳定来源）。"""
     raw = "|".join(str(p) for p in parts).encode("utf-8")
@@ -2126,8 +2126,8 @@ def _sha1_int(*parts):
 def _item_pitch(text, base=1760.0):
     """条目文本 -> ui_blip 音高（sha1 派生，不用序号）。
 
-    v0.7 契约 §3.4：body 条目的 pitch 必须由**条目文本**派生，不再按序号
-    （旧实现 1760+110*i 每片都一样）——同一句文案换到别的片子里仍是同一个音高，
+    契约 §3.4：body 条目的 pitch 必须由**条目文本**派生，不再按序号
+    （1760+110*i 每片都一样）——同一句文案换到别的片子里仍是同一个音高，
     不同文案落到 -5~+7 半音的不同音级；万一两条碰撞，_dedupe_segment 会再升半音。
     """
     off = _sha1_int("pitch", text) % 13 - 5
@@ -2137,7 +2137,7 @@ def _item_pitch(text, base=1760.0):
 def _cue_gain_decay(gain, repeat):
     """同段内同类型 cue 第 repeat 次重复（0 起）时的增益：每次再低 2 dB（-2/-4/-6/…）。
 
-    v0.7 契约 §3.4：不许再出现"每段都一模一样的三连击"——同类型重复必须**严格递减**
+    契约 §3.4：不许出现"每段都一模一样的三连击"——同类型重复必须**严格递减**
     （第 2 次 -2、第 3 次 -4、第 4 次 -6……），且 pitch 必须不同。
     """
     return round(float(gain) - 2.0 * int(repeat), 2)
@@ -2173,11 +2173,11 @@ def cues(tl, script):
     好处是"声音跟着画面的像素走"：这里算的是卡片落位、数字滚完的时刻，
     画面一改，声音自动跟着改，不用回来手工对时间。
 
-    v0.5：条目落位步长与场景绘制共用 plan["pacing"]["item_stagger"]，
-    两边读同一个数，否则音效会错位（这是 v0.4 写死 0.32 留下的坑）。
+    条目落位步长与场景绘制共用 plan["pacing"]["item_stagger"]，
+    两边读同一个数，否则音效会错位（写死 0.32 时踩过这个坑）。
 
-    v0.7（references/audio-variation.md §3.4）：提示点改为按**场景 kind 与内容**生成，
-    不再是"每段 ui_blip 三连 + 结尾 answer_chime"的同质化固定套路（跨片音效雷同的
+    见 references/audio-variation.md §3.3：提示点按**场景 kind 与内容**生成，
+    不是"每段 ui_blip 三连 + 结尾 answer_chime"的同质化固定套路（跨片音效雷同的
     来源之一）：
       hook  : 段首 impact（size 按字数 0.9~1.3）+ 落定 riser
       body  : 条目落位 ui_blip（pitch 由条目文本 sha1 派生）+ items>=3 补 answer_chime

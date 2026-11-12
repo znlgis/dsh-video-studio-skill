@@ -9,15 +9,15 @@
 
 四组对照（阈值来自 skills/video-studio/references/audio-variation.md §5）：
 
-    A 跨片配乐（v1.0.1 起用 musicgen 参数化编排）：
+    A 跨片配乐（musicgen 参数化编排）：
                 同参数/同 bpm/同调、只换内容指纹 -> 相关性（目标 <= 0.85）；
                 换编排参数（mood + 音色） -> 相关性（目标 <= 0.52）
-    B 跨片音效（v0.7）：同 cue 序列，legacy（不传 style/content_fp）必须逐样本相同；
+    B 跨片音效：同 cue 序列，legacy（不传 style/content_fp）必须逐样本相同；
                 不同 content_fp 必须不同（否则"跨片音效都一样"没被修掉）
-    C 片内分离（v0.7）：duck 默认深度（目标 >= 3.5 dB）与配乐/音效的频谱质心对照
-    D 旁白优先（v0.7.1）：人声段 旁白/背景 响度差（目标 >= 12 dB）+ 侧链让位 >= 4 dB
+    C 片内分离：duck 默认深度（目标 >= 3.5 dB）与配乐/音效的频谱质心对照
+    D 旁白优先：人声段 旁白/背景 响度差（目标 >= 12 dB）+ 侧链让位 >= 4 dB
 
-本脚本在改造前是"诊断工具"，改造后是"验收工具"：--strict 会逐条对阈值判定。
+两种用法：不带 --strict 是诊断（打印对照数值），--strict 是验收（逐条对阈值判定，失败 exit 1）。
 """
 from __future__ import annotations
 
@@ -35,9 +35,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 # 契约 §5 的阈值（改契约时两边一起改）
 THRESH_A_SAME_STYLE_MAX = 0.85      # 同参数、只换内容指纹的相关性上限
-THRESH_A_CROSS_STYLE_MAX = 0.52     # 换编排参数的相关性上限（v0.7 改造前的 0.534）
-# v1.0.1：配乐改由 musicgen 参数化编排（scorekit 的 9 套风格表已删除），这两条阈值
-# 仍是「跨片不能太像」的验收线：同参数换指纹要 <=0.85，换编排参数要 <=0.52。
+THRESH_A_CROSS_STYLE_MAX = 0.52     # 换编排参数的相关性上限（改造前实测 0.534，抬到 0.53 门禁就没意义了）
+# 配乐由 musicgen 参数化编排，这两条阈值是「跨片不能太像」的验收线：
+# 同参数换指纹要 <=0.85，换编排参数要 <=0.52。
 # 生成链是确定性的，换平台/换 numpy 若把实测值推过线，先查 musicgen 的参数有没有
 # 变成死旋钮，别第一反应去抬阈值。
 THRESH_C_DUCK_MIN = 3.5             # duck 默认深度下限（dB）
@@ -104,7 +104,7 @@ def _utf8_stdio():
 
 
 def _music(dur, profile, fp):
-    """用参数化编排器现场生成一条配乐（v1.0.1：scorekit 的 9 套风格表已删除）。
+    """用参数化编排器现场生成一条配乐。
 
     profile 是「一套编排参数」，对应旧版的一个 style id —— 换成 mood + 音色 + 和弦进行：
       * "steady"    -> 稳重：pad=saw / bass=sine / arp=pluck / lead=bell
@@ -192,7 +192,7 @@ def _duck_default():
 
 def main(argv=None):
     _utf8_stdio()
-    ap = argparse.ArgumentParser(description="配乐/音效相似度诊断（v0.7 验收）")
+    ap = argparse.ArgumentParser(description="配乐/音效相似度诊断与验收")
     ap.add_argument("--out", default="", help="把对照样本写成 wav 到这个目录")
     ap.add_argument("--dur", type=float, default=20.0, help="配乐对照时长（秒）")
     ap.add_argument("--strict", action="store_true", help="按契约 §5 阈值判定，失败 exit 1")
@@ -238,7 +238,7 @@ def main(argv=None):
     legacy_same = bool(np.array_equal(b_legacy1, b_legacy2))
     cross_diff = not bool(np.array_equal(b_new_a, b_new_b))
     repeat_same = bool(np.array_equal(b_new_a, b_new_a2))
-    print("  legacy（不传 style/fp）两次相同 : %s  （必须 True，v0.4 兼容）" % legacy_same)
+    print("  legacy（不传 style/fp）两次相同 : %s  （必须 True，逐样本兼容）" % legacy_same)
     print("  不同内容指纹 -> 音效轨不同      : %s  （必须 True）" % cross_diff)
     print("  同内容指纹两次相同              : %s  （必须 True，可复现）" % repeat_same)
     if args.strict:
@@ -264,7 +264,7 @@ def main(argv=None):
 
     print()
     print("=" * 72)
-    print("D. 旁白优先：人声与背景的响度差（v0.7.1）")
+    print("D. 旁白优先：人声与背景的响度差")
     print("=" * 72)
     snr_db, base_db, _duck_with_guard = _voice_priority_snr()
     # 侧链让位单独量一次（guard_snr_db=0）：兜底的整体补压也是"背景变低"，

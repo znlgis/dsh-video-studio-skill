@@ -1,27 +1,20 @@
 # 场景语法（Scene Grammar）：内容决定构图
 
-> v0.9.0 新增。配套文件：`skills/video-studio/scripts/grammar.py`（纯标准库）、
+> 配套文件：`skills/video-studio/scripts/grammar.py`（纯标准库）、
 > `skills/video-studio/assets/scenes.py` 第三节（10 类绘制器）、`tools/silhouette_qa.py`（剪影门禁 G13）。
 > 一句话：**这一段内容该长成什么构图，由内容自己决定；风格只决定"长成什么样"。**
 
 ## 0. 为什么需要它
 
-v0.5 的"风格包"解决了"每部片的画风/配乐/旁白都差不多"，但它只覆盖**皮肤**：
-配色、字体族、纹理、颗粒、字距、缓动、HUD 三档、3 种版式几何。
+设计层只覆盖**皮肤**：配色、字体族、纹理、颗粒、字距、缓动、HUD 三档、3 种版式几何。
+皮肤换完，画面骨架并不会跟着变——同一套骨架（背景板 → 眉标 → 大字标题 → 副标题 → 强调线 → HUD）
+只换颜色、字号、位移，**剪影（灰度三值化后的前景占比 / 重心 / 边缘占用 / 对称度）几乎不动**。
 
-画面骨架没有跟着变。证据在代码里：
+这不是审美判断，是可以量化的：用 `tools/silhouette_qa.py` 的判据两两对比 28 对同题材设计，
+同明暗族 12 对里有 4 对五项指标一项都不达标——换皮肤真的只是换色。
+用户的原话是"每个视频都差不多，只是主题和颜色不同"。
 
-- `assets/scenes.py` 的 v0.5 绘制器只有 3 个（`_DRAWERS` 三项：hook / body / outro）；
-- 叙事 kind 里的 quote / emphasis / calm 全部回落到 body 绘制器（`_DRAWERS.get(kind) or _draw_body`）；
-- 三个绘制器共用同一套骨架：背景板 → 眉标 → 大字标题 → 副标题 → 强调线 → HUD，
-  差异只在颜色、字号、位移；
-- 于是 8 套风格换完，**剪影（灰度三值化后的前景占比 / 重心 / 边缘占用 / 对称度）几乎不动**。
-
-用户的原话是"每个视频都差不多，只是主题和颜色不同"。这不是审美判断，是可以量化的：
-改造前用 `tools/silhouette_qa.py` 的判据跑 8 套风格两两对比（28 对），
-同明暗族 12 对里有 4 对五项指标一项都不达标——也就是说换风格真的只是换色。
-
-v0.9 的做法不是"再加几套风格"，而是把"内容 → 构图"这条选择逻辑独立成一层。
+所以缺的那一层不是"更多风格"，而是把"内容 → 构图"这条选择逻辑独立出来。
 
 ## 1. 三层正交
 
@@ -169,7 +162,7 @@ python render.py --script film.json --scenes scenes.py --work work --stage layou
 |---|---|
 | `version` | 目前恒为 1 |
 | `generator` | `"grammar 0.9.0"`（改版本号时同步，便于区分不同版本的分镜表） |
-| `style` / `legacy` | 本片风格 id / 是否走 v0.4 兼容路径。**legacy 不落 storyboard**（见 §7） |
+| `style` / `legacy` | 本片设计标识（`design:<hash>`）/ 兼容位（恒 `false`，见 §7） |
 | `scenes[]` | 每段一行：`id`、`kind`、`type`、`variant`(0–2)、`decor`(0–2)、`layout`、`dur`、`reason[]` |
 | `type_counts` | `{"hero": 1, "list": 2, ...}`，给了哪些类型用过几次 |
 
@@ -217,15 +210,15 @@ timeline 顶层再加一个 `storyboard: {"type_counts": ...}` 摘要。
 变体号、密度档、相位都**不按时间/帧号/随机数**派生——同一稿子同一结果，
 这是"可复现"的一部分。改 `chapter` 字段会改变 `variant_of` 的输入，进而改变变体号。
 
-## 7. 没有 design 就没有画面（v1.0.1 起没有 legacy 路径）
+## 7. 没有 design 就没有画面（没有 legacy 路径）
 
-v1.0.1 删掉了 legacy 外观：不写 `style` 不再「走 v0.4 三个老绘制器」，而是**直接报错**并给两步迁移指引。
-现在整条链路只认 `work/design.json`：
+不写 `style` 不会「走老绘制器」，而是**直接报错**，并给出两步指引（先提案、再确认）。
+整条链路只认 `work/design.json`：
 
 - `render.st_layout` 调 `grammar.plan_scenes`，按 `design.visual.layout_cycle` 做**按章节的版式轮换**，
   写 `work/storyboard.json`（每段的 type / variant / decor / layout / reason 都可审计）；
 - `scenes.draw_frame` 只走 10 类构图绘制器（`_DRAWERS`），没有 legacy 分支；
-- 字幕样式来自 `design.visual.subtitle`（v1.0.2），字号/位置/背板/圆角不再写死；
+- 字幕样式来自 `design.visual.subtitle`，字号/位置/背板/圆角由设计决定；
 - 金帧基线 `assets/golden_frames.json` 绑的是固定 fixture 设计（`assets/design_fixture.json`），
   不是「某套内置风格」——改绘制代码后按 `tools/golden_frames.py --write` 重录。
 
@@ -254,7 +247,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
    - 坐标过 `_view`（视差），文字用 `_draw_text`（字号不重采样）；
    - 持续动效至少一个（相位用 `_phase(scene)`），否则 3–6 s 的静态画面会撞"画面静止"判据；
    - 重的东西预烘焙并合成进底版（参考 `_motif_layer` + `_plate`：一次烘焙，逐帧只 copy/EXTENT
-     约 1.3–2.0 ms）。**不要逐帧全屏 RGBA paste**（实测 5.6 ms，v0.9.0 踩过）；
+     约 1.3–2.0 ms）。**不要逐帧全屏 RGBA paste**（实测 5.6 ms，直接撑爆单帧预算）；
      也不要每帧全屏 GaussianBlur / 全屏双线性 resize（预算 25 ms）。
 5. **`assets/scenes.py` 的 `_DRAWERS` 加键**。缺了会在渲染时回落 list 并 warn 一次。
 6. **`filmcheck.SCENE_TYPES` 加值**（这份只做成员校验，顺序无所谓），
@@ -265,7 +258,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
    再跑一次剪影门禁（`--selftest` / `--designs N`）确认新类型在不同现场设计下也"看得出来"。这一步不做，等于新加的构图
    没有进入 G13 的覆盖范围。
 
-跑完的验证顺序：`python selfcheck.py`（**67 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影）
+跑完的验证顺序：`python selfcheck.py`（**69 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影）
 → `python <REPO>/tools/ci_check.py`（语法/包内容/文档路径）→ `python <REPO>/tools/silhouette_qa.py`（不同设计两两仍可区分）。
 
 ## 9. 常见误用
@@ -286,7 +279,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
 ## 10. 已知限制（本版没做，写下来别装看不见）
 
 - **web 引擎不跟随场景语法**：`--engine web` 的页面由用户自己写（`assets/web/film.js`），
-  本次不改造。web 路线的画风仍只有主题色，没有 10 类构图；
+  web 路线不经过 grammar。画风仍只有主题色，没有 10 类构图；
   剪影门禁也只覆盖 PIL 渲染器。
 - **同一部片仍锁一个明暗族**：段界跨明暗族会整屏换底，精确触发闪烁门禁，观感也像换片。
   主题覆盖（`scene["theme"]`）只允许同族。
@@ -302,7 +295,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
 - **部分视觉语言字段"已声明、已体检、但绘制器没读"**：`motion.enter`、`motion.push`、
   `typography.align`、`typography.ratio`由 `designkit.validate_design` 校验范围，
   但 `assets/scenes.py` 当前不读它们——写了不会报错，也不会改变画面。
-  详见 [style-packs.md](style-packs.md) 的"视觉语言包"一节。
+  详见 [appearance.md](appearance.md) 的 §2 visual 字段表。
 - **场景数据超容量会被截断**：`stats` >3 / `series` >6 / `steps` >5 / `sides` 每侧 >3
   的条目不会出现在画面上。filmcheck 报 `scene_capacity` WARN（容量表在
   `skills/video-studio/scripts/filmcheck.py:652`），但**不阻断渲染**——

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""stagewatch.py — 阶段新鲜度（stale）守卫（v0.6.0）。
+"""stagewatch.py — 阶段新鲜度（stale）守卫。
 
 解决的是"改了一句台词，旧产物还在用，但不报错"这一类事故。
 
@@ -38,12 +38,12 @@ BIG_BYTES = 8 << 20          # > 8 MB 走 size+mtime 快路径
 # 而那正是最需要它报警的场景（旧 tts 配新剧本 = 配音和字幕全错位）。
 STAGE_IO = {
     # voice_plan.json 是 **tts** 阶段写的（render.py 的 st_tts：非 legacy 才写），
-    # 不是 style 写的——v0.7.2 前它被挂在 style.outputs 下，于是单跑 `--stage style`
+    # 不是 style 写的——挂错到 style.outputs 下，单跑 `--stage style`
     # 之后每次重跑都报「产物 voice_plan.json 不见了」（其实从来没写过），
     # 开了 --strict-stale 就直接失败，而 --stage style 是全新项目的第一条生产命令。
     # legacy 剧本本来就不写这个文件：check() 只在「上次记录的是具体指纹、现在没了」
     # 时才报 output-missing，所以 legacy 下记为 missing 不会被当成永久过时。
-    # v1.0 提案层：proposal.json / design.json 由 propose.py 写（不经 render.py），
+    # 提案层：proposal.json / design.json 由 propose.py 写（不经 render.py），
     # 但**style 与 frames 都必须读它**——所以挂在 style 的 sources 里当"源头输入"，
     # 并在 frames 的 inputs 里再要一次 design.json（改设计 = 画面必须重渲）。
     # 为什么放 sources 而不是 inputs：它不是 render.py 的任何 stage 产出的，
@@ -214,7 +214,7 @@ def check(work, stage, sources=None, self_built=False, pending=(), _seen=None):
 
     self_built: 这些输入是**本次运行自己刚写出来的**（render.py --stage all 跑在
     一个刚建的 work/ 上）。此时"manifest 没有本阶段记录"只是因为我们还没跑到它，
-    不是旧产物；报 no-manifest 等于让全新目录的首跑刷一屏假警报（v0.7.2 修）。
+    不是旧产物；报 no-manifest 等于让全新目录的首跑刷一屏假警报。
     """
     io = STAGE_IO.get(str(stage))
     if io is None:

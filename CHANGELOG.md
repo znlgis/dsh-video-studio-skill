@@ -6,6 +6,24 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.0.4 — 全项目去历史化：文档与注释只描述当前版本（2026-11-12）
+
+> 依据：一次全项目审查。v1.0.3 之前每个版本都在文档里留了一层"我以前怎么错、现在怎么对"的叙述，
+> 累积结果是**读文档的人要自己判断哪句是现状、哪句是考古**——SKILL.md 1317 行里 125 处版本标记，
+> 15 篇 references 里 92 处，19 个脚本里 496 处。本版不动任何行为，只做一件事：
+> **把「当前怎么工作」和「历史上曾经怎样」切开，前者留下，后者交给这份 CHANGELOG。**
+
+| 项 | 内容 |
+|---|---|
+| 范围 | SKILL.md / README.md / 15 篇 references / scripts 注释与 docstring / tools |
+| 删掉的四类 | ① 标题与正文里的版本标签 ② "以前…现在…／旧版／早期实现"的考古句 ③ 迁移表与"已删除的东西"章节 ④ 过时计数与已删目录引用 |
+| 保留的 | 全部阈值、判据、命令、字段名、实测数字、坑与验收口径；代码里的因果解释改成现在时 |
+| 删掉的死代码 | `stylekit` 的 `style_ids / get / theme_of / is_legacy / visual_lint_all / lint_all / fingerprint / _digest / _text_of / _pick_from_pool / _as_bool / _persona_to_voice_id / _warn_auto_style_once / blend_theme` 与 `_PERSONA_VOICE`（无调用者；其中 `lint_all` 引用的 `THEMES` 已空，调用即 NameError） |
+| 结构性调整 | SKILL.md 的「升级须知」整节删除，原 §14「换机自检」升为 §13；README 去掉"历史快照图片"段落与版本演进口径；ci.yml 的断言计数对齐为 69 |
+| 兼容性 | `resolve_script_style` 的 fail-closed 报错、`STYLE_IDS == ()` 契约、三张空表（`STYLES`/`THEMES`/`VISUAL_LANGUAGES`）全部保留——它们是"没有模板"这一契约的执行点，selfcheck 第 57/64 条守着 |
+
+自检 **69 条全绿**，`tools/ci_check.py` **12 项全绿**。
+
 ## 1.0.3 — 真实会话复盘：从 46 个视频会话里修掉"用户说得出、门禁查不到"的两类缺陷（2026-11-12）
 
 > 依据：本机 46 个未归档视频会话（2026-11-08 ~ 11-11）逐条回放，统计了 8308 次工具调用、

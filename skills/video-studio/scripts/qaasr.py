@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""qaasr.py — ASR 回读校验（v0.8.0）。
+"""qaasr.py — ASR 回读校验。
 
-v0.7 及以前的质检只看"容器 / 响度 / 帧 / 音画同步"，都建立在一个假设上：
+容器 / 响度 / 帧 / 音画同步这几层质检，都建立在一个假设上：
 **成片音轨里念的就是剧本那几句话**。可是 TTS 缓存串了、换声线时漏了某句、
 混音把某一段压没了、重新渲了但音轨是旧的——这些从容器和波形上都看不出来。
 本模块把成片音轨转回文字，和剧本逐句对账：
@@ -66,7 +66,7 @@ tiny 只适合快速冒烟（错字多、时间戳只到整秒）。默认 model
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "1.0.4"
 
 import argparse
 import json
@@ -101,7 +101,7 @@ AUDIO_SR = 16000
 OFFSET_WARN_S = 0.35
 # 召回率的 pass / fail 线。**权威值在 render.py**（QA_ASR_RECALL_PASS / QA_ASR_RECALL_WARN，
 # G12 门禁从这里读），本模块只是把默认值对齐，避免"同一部片、CLI 判 fail、门禁判 pass"：
-# 同一事实只能有一个权威值（CHANGELOG v0.4 D 节）。
+# 同一事实只能有一个权威值。
 # 为什么是 0.85 / 0.72 而不是 0.95 / 0.90：中文旁白实测（模板片，faster-whisper small）
 # 干净成片召回只有 0.81–0.83 —— 中英混排专名（"DeepSeek 4.1 Flash"→DIXX 变体）是 ASR 的
 # 正常误差，不是片子坏了；低于 0.72 才说明"整句丢了 / 音轨跟剧本不是一套"。
@@ -1511,8 +1511,7 @@ def _utf8_stdout() -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="qaasr.py",
-        description="ASR 回读校验：把成片音轨转回文字，与 timeline/剧本做字符级召回与偏移检查"
-                    "（v0.8.0）")
+        description="ASR 回读校验：把成片音轨转回文字，与 timeline/剧本做字符级召回与偏移检查")
     ap.add_argument("film", nargs="?", help="成片路径（有音轨即可，视频轨不参与）")
     ap.add_argument("--timeline", default=None,
                     help="work/timeline.json（scenes[].id/start/end，可选 voice_start/voice_end/text）")

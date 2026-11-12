@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gates.py — 门禁账本 / 机读交付报告 / 人工签核（v0.6.0）。
+"""gates.py — 门禁账本 / 机读交付报告 / 人工签核。
 
 解决三件事（都是"文档承诺了、代码没做"）：
 
@@ -117,7 +117,7 @@ class GateLedger:
         self.work = str(work or "work")
         self.items = []
         self.t0 = time.time()
-        # v0.8：run_id 是"这一版"的标签（--run-id）。没给就按时间戳生成，
+        # run_id 是"这一版"的标签（--run-id）。没给就按时间戳生成，
         # 保证每次运行在 work/runs/<runId>/ 下都有独立记录，而不是互相覆盖。
         self.run_id = str(run_id or "").strip() or time.strftime("r%Y%m%d-%H%M%S")
         self.script = script or {}
@@ -194,7 +194,7 @@ class GateLedger:
         return d
 
     def input_fingerprints(self):
-        """输入指纹快照（v0.8）：剧本 / scenes / 词级 / 本脚本。
+        """输入指纹快照：剧本 / scenes / 词级 / 本脚本。
 
         为什么要单独记：contentHash 是"一个 16 位 hex"，能判"变了没"，但**说不出
         变了哪个**。批量出片时最常见的问题是"这条用的还是上一版的词级时间戳"，
@@ -219,7 +219,7 @@ class GateLedger:
 
 
 def archive_run(work, ledger, artifacts=None, report_path=None):
-    """把"这一版"的账本快照归档到 work/runs/<runId>/（v0.8）。
+    """把"这一版"的账本快照归档到 work/runs/<runId>/。
 
     只归档**小文件**（gates.json / QC-REPORT.md / run.json）。视频/音频/分块体积大，
     就地保留即可——这里要解决的是"跑了几版之后，谁都说不清上一版的门禁结论是什么"，

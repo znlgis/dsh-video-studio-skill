@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""sfxkit — 物理建模程序化音效库（v0.3.0）。
+"""sfxkit — 物理建模程序化音效库。
 
 参考项目：ai-history-film（MIT）的 sfx/ 包。本文件为**单文件重写**，API 按
-v0.3.0 协作契约 §5.1 冻结；算法思想（模态合成、泊松/Cox 纹理、镜像声源混响、
+协作契约 §5.1 冻结；算法思想（模态合成、泊松/Cox 纹理、镜像声源混响、
 BS.1770 响度、块级动态处理）改编自 ai-history-film（MIT），实现细节针对本项目
 "确定性、无 scipy 也能跑、长片也能跑"三条约束重写，未整目录拷贝。
 
@@ -35,7 +35,7 @@ try:                                   # scipy 可选：没装就走 FFT 卷积�
 except Exception:                      # pragma: no cover - 兜底路径
     _sig = None
 
-__version__ = "0.3.0"
+__version__ = "1.0.4"
 
 SR = 48000
 LN1000 = 6.907755278982137            # ln(1000)：幅度衰减 60 dB 对应的自然对数
@@ -788,10 +788,10 @@ def _resonator_ir(f: float, t60: float, amp: float, n_max: int,
 
     为什么不复用通用的 _iir_ir()：无 scipy 时 resonator 也要走 FFT 卷积，而金属/
     玻璃模态的 t60 可达 5~7 s（见 MATERIALS 的 eta 量级），-80 dB 衰减长度约
-    1.33·t60·sr ≈ 40 万采样。旧的 _iir_ir(cap=20000) 在 0.42 s 处把 IR 砍成 0：
+    1.33·t60·sr ≈ 40 万采样。固定 cap=20000 的通用 IR 在 0.42 s 处就把 IR 砍成 0：
     截断点在 -25 dB 上直接跳变，听感是长尾里多一下“咔”，且与 scipy 路径的
     产物长度/尾音全不同（references/sfx-design.md §12 要求静态滤波与 scipy
-    相对误差 ≤ 2e-4，实测旧兜底最差 -8 dB）。这个二阶系统的 IR 有闭式解，
+    相对误差 ≤ 2e-4，实测这类截断最差 -8 dB）。这个二阶系统的 IR 有闭式解，
     一次向量化算完，比逐样本 Python 递推快两三个数量级。
     长度取 min(n_max, -80 dB 衰减长度)：输出只取前 n_max 个采样，h 超过 n_max
     的部分不可能影响这些采样，所以这个截断是精确的、不是近似。
@@ -801,7 +801,7 @@ def _resonator_ir(f: float, t60: float, amp: float, n_max: int,
         return np.zeros(0)
     a1 = math.exp(-LN1000 / (max(float(t60), 1e-5) * float(sr)))
     w = 2.0 * np.pi * float(f) / float(sr)
-    # 借 _ir_len() 的极点半径估计（它已处理不衰减/数值退化），保证与旧路径同口径
+    # 借 _ir_len() 的极点半径估计（它已处理不衰减/数值退化），保证与通用 IR 同口径
     a = np.array([1.0, -2.0 * a1 * math.cos(w), a1 * a1])
     b = np.array([0.0, float(amp) * a1 * math.sin(w)])
     L = int(_ir_len(b, a, cap=n_max))
@@ -1028,7 +1028,7 @@ class Body:
         if not events:
             return y
         if _sig is not None:
-            # 有 scipy：逐模态 lfilter（保持 v0.7 及以前的产物逐样本不变——用户成片不出新声音）
+            # 有 scipy：逐模态 lfilter（产物逐样本不变——换实现不改用户成片的声音）
             exc = np.zeros(n)
             for i, (f, t60) in enumerate(zip(self.freqs, self.t60s)):
                 exc[:] = 0.0
@@ -2064,10 +2064,10 @@ CUE_ALIASES = {
 }
 
 # ============================================================================
-# 调性跟随 / 内容派生 seed（v0.7，references/audio-variation.md §3.1）
+# 调性跟随 / 内容派生 seed（references/audio-variation.md §3.1）
 # ============================================================================
-# 提示音以前硬编码 D 小调五声：配乐一旦选到 C / Am 等调，提示音就"跑调"。
-# 这里给 in_key() 加可选的 key 参数，key=None 时逐音保持 v0.6 的 D 小调五声
+# 提示音必须能跟随配乐调性：配乐选到 C / Am 等调时，硬编码 D 小调五声会"跑调"。
+# 这里给 in_key() 可选的 key 参数，key=None 时逐音保持 D 小调五声
 # （自检/legacy 逐样本兼容），C 路（CueBus.build_audio）再把配乐调性透传下来。
 #
 # 调名表与 scorekit.KEYS_ALL 对齐（4 个小调 + 6 个大调），不另发明一套写法：
@@ -2086,7 +2086,7 @@ def _penta(key="Dm"):
     """把某一调的五声音阶算成 [Hz, ...]（从小到大，MIDI 24~107）。
 
     小调用自然小调五声、大调用大调五声；结果按调名缓存（纯 numpy，无随机）。
-    key 缺省 / None 仍是 D 小调五声：与 v0.6 的数组逐音一致，legacy 逐样本不变。
+    key 缺省 / None 仍是 D 小调五声：与硬编码表逐音一致，legacy 逐样本不变。
     """
     name = "Dm" if key is None else str(key)
     got = _PENTA_CACHE.get(name)
@@ -2107,7 +2107,7 @@ def _penta(key="Dm"):
 def in_key(freq: float, key: str | None = None) -> float:
     """把任意频率吸附到最近的五声音阶音（与配乐同调）。
 
-    key=None -> v0.6 的旧行为：硬编码 D 小调五声（D F G A C），逐样本兼容。
+    key=None -> 硬编码 D 小调五声（D F G A C），逐样本兼容。
     key 给 "Dm"/"Am"/"Cm"/"Em"（自然小调五声）或 "C"/"G"/"D"/"F"/"A"/"Bb"
     （大调五声）-> 吸附到该调；未知调名 raise ValueError，不静默降级（与 _enum 同口径）。
     """
@@ -2119,11 +2119,12 @@ def in_key(freq: float, key: str | None = None) -> float:
 
 
 def content_seed(base: int, style: str, content_fp: str, recipe: str, t: float) -> int:
-    """内容派生 seed（v0.7 契约 §3.1）：同片同 cue 稳定，换片同一位置也换种子。
+    """内容派生 seed（契约 §3.1）：同片同 cue 稳定，换片同一位置也换种子。
 
     公式（与 filmkit.content_seed 逐字一致，两边同参必须同值）：
         sha1("v0.7|<base>|<style>|<content_fp>|<recipe>|<t 三位小数>") -> 前 8 位 hex
         -> int(h[:8], 16) % 9000 + 1000（32 位非负 int，落在 1000~9999）。
+        （盐里的 "v0.7|" 是冻结字面量：改它等于给全部音效换种子，也与 filmkit 对不上。）
 
     纯 stdlib（hashlib）：同进程/跨进程/跨机器同参数同结果，不受 numpy 随机源影响。
     为什么不用 seed_base + i：那样只跟 cue 的**出现顺序**有关，两部内容完全不同的片子
@@ -2139,9 +2140,9 @@ def content_seed(base: int, style: str, content_fp: str, recipe: str, t: float) 
 def _enum(value, allowed, where: str, name: str = "值") -> str:
     """严格校验语义枚举参数：未知值立刻报错并列出可用值，不静默落到默认分支。
 
-    历史上 rain(surface=) 严格报错，wind(env=)/ui_blip(kind=)/text_stream(voice=)
-    却把写错的值悄悄当成默认分支——同一个"看起来像开关"的参数，行为却一个炸一个
-    不吭声。统一成严格报错（本仓库的规矩：可以保守，但不能静默降级）。
+    同一个"看起来像开关"的参数不能有的一炸一个不吭声：rain(surface=) / wind(env=) /
+    ui_blip(kind=) / text_stream(voice=) 一律严格报错，写错的值绝不悄悄当成默认分支
+    （本仓库的规矩：可以保守，但不能静默降级）。
     """
     v = str(value)
     if v not in allowed:
@@ -2326,7 +2327,7 @@ def recipe(name=None, *, tags=(), master=None):
 def ui_blip(seed=0, pitch=2200.0, kind="tick", dur=0.22, **kw):
     """极短的"嘀"：玻璃/金属的敲击，音高吸附五声音阶。
 
-    v0.7：key 从 **kw 透传（C 路把配乐调性放进来）——None/缺省 = 旧行为（D 小调五声），
+    key 从 **kw 透传（C 路把配乐调性放进来）——None/缺省 = D 小调五声，
     给 "Dm"/"C"/"Am" 等则吸附到该调，未知调名 raise ValueError（见 in_key）。
     """
     kind = _enum(kind, ("tick", "ping"), "ui_blip", "kind")
@@ -2378,7 +2379,7 @@ def relay_click(seed=0, count=1, gap=0.18, **kw):
 def roulette_tick(seed=0, last=False, **kw):
     """转盘抽签的木质"咔嗒"：硬接触的木块，last=True 时更重、更低。
 
-    v0.7：给了 key 时把木块基频吸附到该调（提示音跟配乐同调）；key=None 走旧公式，
+    给了 key 时把木块基频吸附到该调（提示音跟配乐同调）；key=None 走不吸附的公式，
     随机序列与取样点都不变 -> legacy 逐样本兼容。
     """
     g = rng(seed)
@@ -2398,7 +2399,7 @@ def roulette_tick(seed=0, last=False, **kw):
 def answer_chime(seed=0, note=1174.66, grace=880.0, grace_lead=0.07, **kw):
     """"猜中了"的钟琴：一个装饰音 + 一个主音，都在五声音阶上。
 
-    v0.7：key 从 **kw 透传（None = 旧行为 D 小调五声；给调名则整条钟琴跟随配乐调性）。
+    key 从 **kw 透传（None = D 小调五声；给调名则整条钟琴跟随配乐调性）。
     """
     key = kw.get("key")
     x = _bus(1.6, stereo=False)
@@ -2454,7 +2455,7 @@ def typing_at(seed=0, times=(0.0, 0.12, 0.25, 0.4), spaces=(), **kw):
 def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone", **kw):
     """AI 逐字输出：比打字更连贯。voice="tone" 是带音高的五声颗粒；"soft" 是不带音高的沙沙。
 
-    v0.7：voice="tone" 的音高跟随 **kw 里的 key（None = 旧行为 D 小调五声）。
+    voice="tone" 的音高跟随 **kw 里的 key（None = D 小调五声）。
     """
     voice = _enum(voice, ("tone", "soft"), "text_stream", "voice")
     ts = _times(times, "text_stream")
@@ -2478,7 +2479,7 @@ def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone"
 def data_chirp(seed=0, dur=0.8, rate=28.0, base=1800.0, **kw):
     """数据流：一串很快的、带音高的短脉冲，频率在五声上随机跳动。
 
-    v0.7：音高跟随 **kw 里的 key（None = 旧行为 D 小调五声）。
+    音高跟随 **kw 里的 key（None = D 小调五声）。
     """
     r = float(rate)
     # rate 是"每秒脉冲数"，必须为正：rate=0 会在下面 i / r 抛 ZeroDivisionError（内部
@@ -3105,7 +3106,7 @@ def selftest() -> int:
             b = render(k, seed=11, dur=3.0) if k == "rain" else render(k, seed=11)
             if not np.array_equal(np.asarray(a), np.asarray(b)):
                 raise ValueError("%s 同 seed 两次渲染不一致" % k)
-        # v0.7 契约 §3.1：key=None 与 key="Dm" 必须逐样本一致（旧路径兼容）；
+        # 契约 §3.1：key=None 与 key="Dm" 必须逐样本一致（legacy 路径兼容）；
         # key 给别的调必须真的换音（用 F4：Dm 五声里有 F、C 大调五声里没有，一定吸附到 E4）。
         old = np.asarray(render("ui_blip", seed=11))
         dm = np.asarray(render("ui_blip", seed=11, key="Dm"))
@@ -3205,7 +3206,7 @@ def selftest() -> int:
                ("metal_hit", dict(obj="bogus")),
                ("relay_click", dict(gap=-1.0, count=3)),
                ("typing_at", dict(times=[-1.0])),
-               ("ui_blip", dict(key="bogus")),          # v0.7：未知调名必须响亮报错
+               ("ui_blip", dict(key="bogus")),          # 未知调名必须响亮报错
                ("answer_chime", dict(key="bogus")))
         for rname, kw in bad:
             try:
@@ -3289,9 +3290,9 @@ def selftest() -> int:
         return "环境声响度贴合 master（±1.5 LU）"
 
     def t_fallback():
-        # v0.8：这条以前只查"输出是有限值"——等于只验了"没崩"，兜底路径的幅度
-        # 正确性完全没查（references/sfx-design.md §12 承诺静态滤波与 scipy 相对
-        # 误差 ≤ 2e-4）。现在按当前环境选参照：
+        # 这条不能只查"输出是有限值"——那等于只验了"没崩"，兜底路径的幅度正确性
+        # 完全没查（references/sfx-design.md §12 承诺静态滤波与 scipy 相对误差 ≤ 2e-4）。
+        # 所以按当前环境选参照：
         #   有 scipy：同一函数跑两遍（scipy 路径 vs 兜底路径）逐样本比 —— 直接验"等价"；
         #   无 scipy：没有 scipy 路径可比，改用**解析参照**（双二阶的阶跃稳态/频响、
         #            谐振器的闭式冲激响应 amp·r^n·sin(ωn)），这样 CI 的 noscipy 任务

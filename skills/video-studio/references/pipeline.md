@@ -45,7 +45,7 @@ BPM 96, 4/4 → 1 小节 = 2.5 s = 75 帧 @30fps
 2. 单独一节"不能上屏"黑名单：写清为什么不行、实际是什么
 3. 口径表：同一数字在报告/字幕/画面里表述完全一致
 
-真实收益（来自会话考古）：75 条主张 + 25 条黑名单，抓出 8 处硬伤，其中"疫情在拆把手后很快平息"这类因果讲反的错误会被评论区第一条指出。
+真实收益（一次实际核查的账）：75 条主张 + 25 条黑名单，抓出 8 处硬伤，其中"疫情在拆把手后很快平息"这类因果讲反的错误会被评论区第一条指出。
 
 ## P3 TTS（唯一正确的时长来源）
 
@@ -73,10 +73,10 @@ tl = K.build_timeline(lines, lead=0.55, tail=0.85, min_dur=3.0)
 字幕窗口规则（防交叠，来自实战）：
 ```
 t0 = voice_start - 0.12
-t1 = voice_end + 0.45                     # v0.2 起不再有 5.2 s 硬钳；要钳短显式传 max_hold
+t1 = voice_end + 0.45                     # 没有 5.2 s 硬钳；要钳短显式传 max_hold
 t1 = min(t1, next.voice_start - 0.12)   # 绝不压住下一句
 ```
-停留时长参考 `0.5 + 字数/9` 秒。**没有默认上限**（v0.2 移除了 5.2 s 硬钳）——
+停留时长参考 `0.5 + 字数/9` 秒。**没有默认上限**——
 真要缩短就显式传 `max_hold` / `sub_max_hold`。按字符比例平均分配会产生大量交叠。
 
 ## P5 混音（numpy 总线）
@@ -109,7 +109,7 @@ python render.py ... --stage qa                          # 只读质检，不重
 ```python
 sink = K.FrameSink("work/silent.mp4", crf=18, preset="medium")   # rawvideo 直通
 ...
-# 视频流默认 -c:v copy（不再二次编码）；需要改分辨率时 reencode_video=True
+# 视频流默认 -c:v copy（不二次编码）；需要改分辨率时 reencode_video=True
 K.mux("work/silent.mp4", "work/audio.wav", "out/film.mp4")
 ```
 

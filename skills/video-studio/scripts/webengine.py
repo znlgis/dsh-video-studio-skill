@@ -1,27 +1,27 @@
 # -*- coding: utf-8 -*-
-"""webengine.py — 浏览器逐帧渲染引擎（v0.8.0）。
+"""webengine.py — 浏览器逐帧渲染引擎。
 
 用无头浏览器（优先 Microsoft Edge，失败回落 Playwright Chromium）打开 Canvas 页面，
 把时间精确跳到「帧号 / FPS」后经 CDP 截 PNG，喂给 ffmpeg 的 image2pipe 编成视频。
 分块并行 + 断点续跑 + 显式缺口检测 + 崩溃重开；同一帧号渲染出的画面完全一致。
 
-v0.8.0：**跟随风格包**。公开入口都多了一组可选参数（style / width / height / fps）：
+**跟随风格包**。公开入口都有一组可选参数（style / width / height / fps）：
     style       stylekit 的 style plan（dict，含 "theme"）或裸主题 dict；None = 不注入
     width/height 画布尺寸，只接受 16:9 横屏偶数尺寸（竖屏 / 4:3 / 奇数直接 raise）
     fps         写进注入 payload 的帧率；None = 不约束（页面自己的 window.FPS 为准）
 注入方式：add_init_script 在**页面加载前**写 window.__STYLE__（主题色板 / 版式 / 字体栈 /
-画布 w·h·fps）。assets/web/engine.js 与 film.js 优先读它，取不到就退回 v0.7 深蓝橙常量。
+画布 w·h·fps）。assets/web/engine.js 与 film.js 优先读它，取不到就退回深蓝橙常量。
 
 三条硬约束（改这块必须先读）：
 1. **style=None 时一个字节都不注入**：open_page 连 add_init_script 都不调，页面里不存在
-   window.__STYLE__，渲染像素与 v0.7 逐字节一致（自检里有「无 style 页面无 __STYLE__」断言，
-   外部还有拿 git HEAD 老版本渲同一帧比 SHA-256 的证据）。
+   window.__STYLE__，渲染像素与默认外观逐字节一致（自检里有「无 style 页面无 __STYLE__」断言，
+   外部还有逐帧 SHA-256 对照）。
 2. 注入内容只来自入参：不读环境变量/时间/随机数，JSON 用 sort_keys 序列化，同输入同输出。
 3. 尺寸与帧率 fail-closed：不符合 16:9 横屏偶数就 raise，绝不静默缩放或改帧率
    （静默改帧率会让分块帧号整体错位，成片音画不同步且门禁看不出来）。
 
 算法改编自 ai-history-film（MIT）video/render.py（逐帧 seek / 分块并行 / 崩溃重开 / 断点续跑），
-代码按本项目 v0.3.0 契约重写；拼接复用 filmkit.concat_segments（绝对路径，v0.2 修过的坑）。
+代码按本项目契约重写；拼接复用 filmkit.concat_segments（必须传绝对路径，别改成相对路径）。
 
 设计要点：
 1. 逐帧渲染是无状态的：崩溃后重开浏览器从同一帧继续即可，不需要回滚。
@@ -38,13 +38,13 @@ CLI：
     python webengine.py full <html> --out x.mp4 [--workers 2] [--resume]
     python webengine.py textqa <html> [--from 0 --to 12 --step 0.2]
     python webengine.py selftest                          # 等价于 --selftest
-    # 以上命令都可加风格参数（缺省 = 旧行为）：
-    #   --style magazine | --style work/style.json | --style '{"theme":{...}}'
+    # 以上命令都可加风格参数（缺省 = 不注入）：
+    #   --style work/style.json | --style '{"theme":{...}}'
     #   --width 1920 --height 1080 [--fps 30]
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "1.0.4"
 
 import argparse
 import asyncio
@@ -87,7 +87,7 @@ BROWSER_ARGS = [
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
 ]
-# 确定性模式（v0.4.0）：关掉 GPU 光栅，2D canvas 全部走软件光栅。
+# 确定性模式：关掉 GPU 光栅，2D canvas 全部走软件光栅。
 # 为什么需要：默认参数下**同一页面会话内**截图 byte 完全一致，但**跨浏览器会话**
 # （崩溃重开 / 多 worker / 续跑重渲）不完全一致——GPU 抗锯齿光栅化会有极小的非确定性。
 # 实测（assets/web 模板，f=179/180，8 个独立会话）：
@@ -132,10 +132,10 @@ _K = _load_filmkit()
 FFMPEG = _K.FFMPEG
 
 
-# ---------------------------------------------------------------- 风格注入（v0.8.0 契约）
+# ---------------------------------------------------------------- 风格注入（契约）
 # style 的两种合法写法：
 #   ① stylekit 的 style plan（dict，至少含 "theme" 字典；render.py --stage style 落的 work/style.json 就是它）
-#   ② 裸主题字典（stylekit.THEMES[...] / stylekit.theme_of(id)，扁平字段，颜色是 (r,g,b) 元组）
+#   ② 裸主题字典（扁平字段，颜色是 (r,g,b) 元组；设计的 theme 就是这种形状）
 # 归一化后是**纯数据** payload，经 add_init_script 写成 window.__STYLE__。
 # 这里不做任何"猜"：缺键 / 颜色非法 / 字体族未知一律 raise，不做静默回落（回落等于换个画风还不告诉人）。
 STYLE_VERSION = 1
@@ -149,7 +149,7 @@ FONT_STACKS = {
     "round": 'DengXian, "Microsoft YaHei", sans-serif',
 }
 
-# 主题里必须齐全的色板键（stylekit 的 8 套主题全都有；少一个就说明传错东西了）
+# 主题里必须齐全的色板键（designkit 构造的主题都有；少一个就说明传错东西了）
 THEME_COLOR_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
                     "accent", "accent2", "good", "bad", "rule")
 
@@ -243,7 +243,7 @@ def _style_theme_dict(style):
                        "legacy": None, "layout_default": None, "chapter_layout": None}
     raise ValueError(
         "style 既不是 style plan（没有 \"theme\" 字典）也不是裸主题 dict（没有 bg / ink）。"
-        "可用写法：stylekit 的 plan（work/style.json）或 stylekit.THEMES[...]。收到键：%s"
+        "可用写法：已解析的计划（work/style.json）或裸主题 dict。收到键：%s"
         % (sorted(style)[:12],))
 
 
@@ -467,10 +467,10 @@ def _format_contract(contract: dict) -> str:
 async def page_number(page, key: str, *, default=None) -> float:
     """读页面上的数值契约（window.DURATION / window.FPS），缺了或不是正数就给可操作报错。
 
-    v0.5 以前直接 float(await page.evaluate("window.DURATION"))：页面忘了导出 DURATION
+    直接 float(await page.evaluate("window.DURATION")) 不够：页面忘了导出 DURATION
     时得到的是 None，报错只剩一句 "float() argument must be ... 'NoneType'"，看不出
     是页面契约缺字段（实测 page_meta / export_cues 都会这样）。
-    default 传 None 表示必填（DURATION）；传数字表示缺省值（FPS 历史口径是 30）。
+    default 传 None 表示必填（DURATION）；传数字表示缺省值（FPS 缺省口径是 30）。
     """
     raw = await page.evaluate("k => window[k]", key)
     if raw is None:
@@ -496,15 +496,15 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
     浏览器优先 Microsoft Edge（channel="msedge"），启动失败回落 Playwright 自带的 Chromium；
     视口按 width x height（devicePixelRatio=1），截图与画布 1:1 像素。
 
-    v0.4.0 起多了两道**可操作**的契约检查（以前缺 window.ready / renderFrame 时只会
-    抛 Playwright 的裸超时异常，看不出是页面脚本挂了还是没调 FK.boot()）：
+    两道**可操作**的契约检查（否则缺 window.ready / renderFrame 时只会抛 Playwright 的
+    裸超时异常，看不出是页面脚本挂了还是没调 FK.boot()）：
       1. 等到 window.ready === true 超时 → 报错里带上页面异常/控制台错误和契约快照；
-      2. window.renderFrame 不是函数 → 直接报错（不再逐帧重试 5 次才发现）。
+      2. window.renderFrame 不是函数 → 直接报错（不要靠逐帧重试 5 次才发现）。
     确定性：deterministic=True（或环境变量 WEBENGINE_DETERMINISTIC=1）走软件光栅，
     跨浏览器会话 byte 级可复现；缺省走 GPU，快约 22%。
 
-    v0.8.0 风格：style 非 None 时在 page.goto **之前** add_init_script 注入 window.__STYLE__；
-    style=None 时**不调用 add_init_script**，页面里不存在 __STYLE__（旧行为逐字节不变）。
+    风格注入：style 非 None 时在 page.goto **之前** add_init_script 注入 window.__STYLE__；
+    style=None 时**不调用 add_init_script**，页面里不存在 __STYLE__（默认外观逐字节不变）。
     width/height 一律先过 _validate_canvas（16:9 横屏偶数，否则 raise）；fps 只用于写进
     payload（None = 不让 payload 约束帧率，页面 window.FPS 才是真值）。
     """
@@ -603,7 +603,7 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
             if not got.get("hasStyle") or not got.get("applied"):
                 raise RuntimeError(
                     "页面 %s 的 engine.js 不认 window.__STYLE__（FK.style 为空；注入后画风不会变）。"
-                    "风格注入要 engine.js v0.8.0 起才认；把新版 assets/web/ 一起拷过去，"
+                    "风格注入要新版 engine.js 才认；把新版 assets/web/ 一起拷过去，"
                     "或确认页面脚本顺序是 engine.js → film.js → qa_text.js。" % url)
             if got.get("w") != want_w or got.get("h") != want_h:
                 raise RuntimeError(
@@ -617,7 +617,7 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
                         "帧率必须来自同一份 timeline，不能靠 style 猜。"
                         % (page_fps, payload["canvas"]["fps"]))
         # 截图 = 视口（device_scale_factor=1），所以页面画布的可视区域必须正好铺满视口。
-        # 以前不查这一条，于是 style=None + --width 1280 --height 720 会"成功"输出 1280x720：
+        # 不查这一条的话，style=None + --width 1280 --height 720 会"成功"输出 1280x720：
         # 页面画布仍是 1920x1080（没有 __STYLE__ 就没人改它），截出来的是原画左上角一块
         # ——实测与 1920 帧左上角的 1280x720 裁切逐像素完全相同（422 KB PNG，0 像素差异），
         # 标题 / HUD / 时间码全被裁掉，而 CLI 照旧 exit 0。画布比视口小则是四边留黑边，
@@ -648,7 +648,7 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
                 % (left, top, cw, ch, int(width), int(height)))
     except BaseException:
         # 用 BaseException 而不是 Exception：worker 被取消（task.cancel）抛的是
-        # CancelledError，它不继承 Exception —— 以前这条路径会把刚启动的浏览器丢下不管。
+        # CancelledError，它不继承 Exception —— 用 Exception 会把刚启动的浏览器丢下不管。
         try:
             await browser.close()
         except Exception:
@@ -691,7 +691,7 @@ async def _page_meta_async(html_path, deterministic=None, style=None, width=W, h
 def page_meta(html_path, *, style=None, width=W, height=H, fps=None):
     """打开一次页面，读回 (DURATION, FPS)。
 
-    v0.8.0：style 非 None 时按注入后的页面读（注入可能改画布尺寸，帧率仍以页面为准，
+    style 非 None 时按注入后的页面读（注入可能改画布尺寸，帧率仍以页面为准，
     除非调用方显式传 fps 并在 payload 里断言）。
     """
     _setup_stdout()
@@ -703,7 +703,7 @@ def snap(html_path, times, out_dir, tag="", deterministic=None, *, style=None,
          width=W, height=H, fps=None) -> list:
     """截取指定时刻的静帧（PNG）；多帧时额外拼一张联系表。返回帧 PNG 路径列表。
 
-    v0.8.0：style/width/height/fps 透传给 open_page（缺省 = 旧行为：1920x1080、不注入）。
+    style/width/height/fps 透传给 open_page（缺省 = 1920x1080、不注入）。
     """
     _setup_stdout()
     tlist = [float(t) for t in times]
@@ -806,7 +806,7 @@ def _norm_events(raw) -> list:
 def export_cues(html_path, deterministic=None, *, style=None, width=W, height=H, fps=None) -> dict:
     """导出页面登记的 cue / 视觉事件，返回可直接写 work/cues.json 的字典（契约 §4.2）。
 
-    v0.8.0：width/height 写进返回头（打完 style 注入后画布可能不是 1080p），其余照旧。
+    width/height 写进返回头（打完 style 注入后画布可能不是 1080p），其余照旧。
     """
     _setup_stdout()
     return asyncio.run(_export_cues_async(html_path, deterministic,
@@ -823,7 +823,7 @@ async def _export_cues_async(html_path, deterministic=None, *, style=None,
         try:
             duration = await page_number(page, "DURATION")
             fps = await page_number(page, "FPS", default=FPS)
-            # 页面没导出 getCues/getEvents 时，以前 `? : []` 会静默返回空数组：cues.json 里
+            # 页面没导出 getCues/getEvents 时，`? : []` 兜底会静默返回空数组：cues.json 里
             # 0 条提示点，配乐/音效阶段照样跑完，只是整片悄悄变哑、音画同步也没有可配的事件
             # ——「静默丢一整个约定」比报错难查得多。engine.js 本身就导出这两个函数（没有提示
             # 点时返回空数组也算导出），所以 fail-closed 不会误伤正常页面。
@@ -882,7 +882,7 @@ def _chunk_dir(out_mp4, from_s: float, to_s: float, token: str = "") -> Path:
     """块目录：<stem>_<from>-<to>[_<token>]。
 
     token 只在"画布尺寸不是 1920x1080 或注入了 style"时非空——不同画风/尺寸的块不能混用，
-    否则断点续跑会把旧画风的块拼进新片（花片）。token 为空时目录名与 v0.7 完全一致。
+    否则断点续跑会把旧画风的块拼进新片（花片）。token 为空时目录名保持不变，续跑才能命中。
     """
     out = Path(out_mp4)
     name = "%s_%g-%g" % (out.stem, float(from_s), float(to_s))
@@ -892,7 +892,7 @@ def _chunk_dir(out_mp4, from_s: float, to_s: float, token: str = "") -> Path:
 
 
 def _style_token(payload, width: int, height: int) -> str:
-    """分块目录的风格后缀；默认尺寸 + 无 style 时返回空串（保持 v0.7 的目录名）。"""
+    """分块目录的风格后缀；默认尺寸 + 无 style 时返回空串（保持既有目录名，续跑才能命中）。"""
     if payload is None and (int(width), int(height)) == (W, H):
         return ""
     parts = ["w%dh%d" % (int(width), int(height))]
@@ -941,8 +941,8 @@ def _probe_duration(path):
 def _check_chunk_durations(chunks, fps: float) -> None:
     """块时长校验：块损坏 / 旧参数残留都会在拼接前被拦下。
 
-    v0.4.0：探测不出时长的块（空文件 / 非视频 / ffprobe 失败）以前是 continue 静默放过，
-    结果 concat 时才发现；现在一并算异常——"读不出时长"本身就说明块是坏的。
+    探测不出时长的块（空文件 / 非视频 / ffprobe 失败）不许 continue 静默放过——那要等到
+    concat 才发现；一并算异常："读不出时长"本身就说明块是坏的。
     """
     bad = []
     for f0, f1, path in chunks:
@@ -1098,7 +1098,7 @@ def render_full(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
     duration 传 None 时读页面 window.DURATION；传数字时与页面对不上会直接 raise。
     deterministic=True（或 WEBENGINE_DETERMINISTIC=1）→ 软件光栅，跨会话 byte 可复现。
 
-    v0.8.0：style 非 None 时整片跟随风格包（每个 worker 都在页面加载前注入同一份
+    style 非 None 时整片跟随风格包（每个 worker 都在页面加载前注入同一份
     __STYLE__），块目录名会带尺寸 + style 指纹后缀，**换风格不会复用旧块**；
     width/height 只收 16:9 横屏偶数（_validate_canvas），fps 非 None 时要求页面帧率一致。
     """
@@ -1121,7 +1121,7 @@ async def _render_full_async(html_path, out_mp4, duration, *, workers=2, chunk_s
     width, height = _validate_canvas(width, height)
     payload = normalize_style(style, width=width, height=height, fps=fps) if style is not None else None
 
-    # chunk_s <= 0 以前会被后面的 max(1, ...) 静默夹成「1 帧/块」：360 帧的 12 s 片会拆出
+    # chunk_s <= 0 会被后面的 max(1, ...) 静默夹成「1 帧/块」：360 帧的 12 s 片会拆出
     # 360 个块，每块单独起一个 ffmpeg 进程再拼接，慢到没法用，而且日志里只看得出"块很多"，
     # 看不出是自己传错了参数。放在开浏览器之前校验，参数错了不用白等一次页面加载。
     chunk_s = float(chunk_s)
@@ -1223,10 +1223,10 @@ QA_BRIEF_S = 0.6
 
 
 def _check_qa_window(t0, t1, step):
-    """文字质检扫描参数校验；非法 raise ValueError（以前非法参数会被静默吞成空结果 + exit 0）。
+    """文字质检扫描参数校验；非法 raise ValueError（否则非法参数会被静默吞成空结果 + exit 0）。
 
-    历史坑：qa_text.js 用 `if (end < start) return empty` 与 `dt = max(step, 1/fps)` 兜底，
-    于是 --from 2 --to 1 打印"重叠 0、出画 0…"并 exit 0；--step 1 因为采不到 0.5 s 的闪
+    qa_text.js 用 `if (end < start) return empty` 与 `dt = max(step, 1/fps)` 兜底，于是
+    --from 2 --to 1 会打印"重叠 0、出画 0…"并 exit 0；--step 1 因为采不到 0.5 s 的闪
     字而永远报 brief=0。空扫描 / 扫不到的扫描都不能算"没有缺陷"。
     """
     try:
@@ -1260,7 +1260,7 @@ _QA_LIST_KEYS = ("overlaps", "offscreen", "brief", "never")
 def _check_qa_result(result):
     """校验页面 qaText 的返回值形状；形状不对 raise RuntimeError（不能让缺字段=全 0=PASS）。
 
-    历史坑：以前只判 `isinstance(result, dict)`，页面 `qaText=()=>({})` 时 CLI 把四类缺陷
+    只判 `isinstance(result, dict)` 不够：页面 `qaText=()=>({})` 时 CLI 会把四类缺陷
     都打印成 0 并 exit 0——**假通过**。契约要求四个数组 + frames（实际采样点数），
     这里连 frames<=0 也拦（扫描 0 帧等于没查）。
     """
@@ -1287,11 +1287,11 @@ def qa_text(html_path, t0=0.0, t1=None, step=0.2, deterministic=None, *,
             style=None, width=W, height=H, fps=None) -> dict:
     """浏览器端文字质检：重叠 / 出画 / 一闪而过 / 从没露面（渲染期间会临时改页面状态）。
 
-    v0.8.0：跟着 style 一起检查——换了浅色主题/非 1080p 画布后，出画与重叠的判据必须用
+    跟着 style 一起检查——换了浅色主题/非 1080p 画布后，出画与重叠的判据必须用
     同一份画布尺寸（qa_text.js 读 FK.W / FK.H），否则"检查通过"只是没在检查新尺寸。
 
-    深审修复：参数与返回值 fail-closed（之前空扫描 / 扫不到的扫描 / 页面返回 {} 都是
-    exit 0，门禁看着是绿的，其实什么都没查）。见 _check_qa_window / _check_qa_result。
+    参数与返回值 fail-closed（空扫描 / 扫不到的扫描 / 页面返回 {} 如果都 exit 0，
+    门禁看着是绿的，其实什么都没查）。见 _check_qa_window / _check_qa_result。
     """
     _setup_stdout()
     t0, t1, step = _check_qa_window(t0, t1, step)
@@ -1319,14 +1319,14 @@ async def _qa_text_async(html_path, t0, t1, step, deterministic=None, *,
     return _check_qa_result(result)
 
 
-# ---------------------------------------------------------------- 指定帧号截 PNG（v0.8.0）
+# ---------------------------------------------------------------- 指定帧号截 PNG
 def render_frames(html_path, frames, out_dir=None, *, tag="", style=None, width=W, height=H,
                   fps=None, deterministic=None) -> list:
     """把**指定帧号**渲成 PNG，返回 [{"f","path","sha256","bytes","fps"}]（不编码视频）。
 
-    这是 v0.8.0 给 render.py / 自检 / 人工验收用的最小确定性入口：
+    这是给 render.py / 自检 / 人工验收用的最小确定性入口：
     帧号 → 时间 = f / FPS（与 render_full 同一口径），不存在"按播放时间截屏"。
-    style=None 时不注入 __STYLE__（像素与 v0.7 一致）；传 style 时整页跟随风格包。
+    style=None 时不注入 __STYLE__（像素与默认外观一致）；传 style 时整页跟随风格包。
     out_dir 缺省 ./frames；文件名 <tag>f<帧号:05d>.png。
     """
     _setup_stdout()
@@ -1466,7 +1466,7 @@ async def _selftest_probe() -> dict:
     return out
 
 
-# ---------------------------------------------------------------- 自检辅助（v0.4.0）
+# ---------------------------------------------------------------- 自检辅助
 _NONDET_JS = re.compile(r"(Math\.random|Date\.now|performance\.now|new\s+Date\s*\()")
 
 
@@ -1513,7 +1513,7 @@ async def _open_page_expect_error(html_path, ready_timeout=3000) -> str:
         raise RuntimeError("坏页面居然没有报错：%s" % html_path)
 
 
-# ---------------------------------------------------------------- 自检：风格注入（v0.8.0）
+# ---------------------------------------------------------------- 自检：风格注入
 # 自检用的主题故意选"浅色 + 衬线 + 右对齐 + 四角线框"：与模板默认的深蓝橙 + 居中 + 无框
 # 在每一次可观测维度上都不同，任何一处没跟着 __STYLE__ 走都会暴露成"两张图一样"。
 _SELFTEST_STYLE = {
@@ -1605,7 +1605,7 @@ def selftest() -> int:
         print(("[PASS] " if ok else "[FAIL] ") + title + (("  —— " + detail) if detail else ""), flush=True)
 
     print("=" * 78)
-    print("webengine.py --selftest（v0.8.0）：无头浏览器逐帧渲染 / 确定性 / cue / 文字质检 / 风格注入")
+    print("webengine.py --selftest：无头浏览器逐帧渲染 / 确定性 / cue / 文字质检 / 风格注入")
     print("=" * 78)
 
     names = ("index.html", "engine.js", "film.js", "style.css", "qa_text.js")
@@ -1792,7 +1792,7 @@ def selftest() -> int:
         check("不同帧渲染结果不同", bool(probe.get("diff_frames")),
               "f=45 与 f=46 的 PNG 不同" if probe.get("diff_frames") else (perr or "相邻帧截图相同（时间码没变？）"))
 
-        # ---- v0.8.0：画布尺寸 / 风格注入 ----
+        # ---- 画布尺寸 / 风格注入 ----
         good_sizes, bad_sizes, portrait_msg = [], [], ""
         for w_, h_ in ((1920, 1080), (1280, 720), (3840, 2160)):
             try:
@@ -1820,7 +1820,7 @@ def selftest() -> int:
               "；".join(bad_sizes) or ("合法：%s；竖屏报错点名竖屏" % "、".join(good_sizes)))
 
         # ---- 深审：确定性开关三态 / 文字质检参数与返回值 fail-closed ----
-        # 这三条都是纯函数校验（不开浏览器），专门守"门禁看着干净、其实没在查"的三条历史路径：
+        # 这三条都是纯函数校验（不开浏览器），专门守"门禁看着干净、其实没在查"的三条路径：
         #   · CLI --deterministic 用 store_true 时默认 False 会压掉 WEBENGINE_DETERMINISTIC；
         #   · textqa 空扫描（t1<t0）/ 步长 >= brief 阈值时返回全 0 并 exit 0；
         #   · 页面 qaText 返回 {} / frames=0 时同样被当成"零缺陷"。
@@ -2060,7 +2060,7 @@ def selftest() -> int:
                       % (len(bad_qa.get("overlaps") or []), len(bad_qa.get("offscreen") or []),
                          len(bad_qa.get("brief") or []), len(bad_qa.get("never") or []))))
 
-        # 坏页面 3b：CLI textqa 遇到这四类必须 exit 1（以前只把重叠/出画算失败）
+        # 坏页面 3b：CLI textqa 遇到这四类必须 exit 1（只把重叠/出画算失败就漏了后两类）
         cli_bad = None
         try:
             cp = subprocess.run(
@@ -2162,13 +2162,11 @@ def _parse_frames(text: str) -> list:
 def _resolve_style_spec(text):
     """解析 --style 的**两种**写法：内联 JSON / JSON 文件路径。
 
-    返回 normalize_style 能吃的 dict；空字符串返回 None（= 不注入，旧行为）。
+    返回 normalize_style 能吃的 dict；空字符串返回 None（= 不注入）。
     解析失败一律 SystemExit（CLI 场景，带可操作提示），不做静默回落。
 
-    v1.0.1：**不再接受"stylekit 风格 id"这种写法**。内置风格表已删除，
-    `--style magazine` 这种用法没有对象了。早先这里会调 ST.get()/ST.theme_of()，
-    而那两个函数现在只会抛 KeyError —— 与其让它抛一个"没有风格 X"的错，
-    不如直接把写法和替代方案说清楚。
+    不接受"风格 id"这种写法：没有内置外观表，`--style magazine` 没有对象可指。
+    与其抛一个"没有风格 X"的错，不如直接把两种合法写法和替代方案说清楚。
     """
     s = str(text or "").strip()
     if not s:
@@ -2186,7 +2184,7 @@ def _resolve_style_spec(text):
             raise SystemExit("[错误] --style 的 JSON 文件 %s 解析失败：%s" % (p, exc))
     raise SystemExit(
         "[错误] --style %r 不是 JSON、也不是存在的文件——而**按内置风格 id 取外观这条路已经没有了**。\n"
-        "  v1.0.1 删除了全部内置风格/主题表（本技能不提供模板）。现在注入外观只有两种写法：\n"
+        "  本技能不提供内置风格/主题表。现在注入外观只有两种写法：\n"
         "    ① --style '{\"theme\": {...}, \"canvas\": {...}}'        # 内联 JSON\n"
         "    ② --style work/style.json                             # 由 render.py --stage style 落盘\n"
         "  想生成一套新外观：python propose.py --brief \"题材\" --script film.json\n"
@@ -2194,10 +2192,10 @@ def _resolve_style_spec(text):
 
 
 def _add_style_args(p, *, fps=True):
-    """给子命令加风格参数（缺省 = v0.7 旧行为：不注入、1920x1080）。"""
+    """给子命令加风格参数（缺省 = 不注入、1920x1080）。"""
     p.add_argument("--style", default="",
                    help="外观载荷：work/style.json / 内联 JSON；缺省不注入"
-                        "（v1.0.1 起不接受风格 id：内置风格表已删除）")
+                        "（不接受风格 id：内置风格表已删除）")
     p.add_argument("--width", type=int, default=W, help="画布宽（只收 16:9 横屏偶数，默认 %d）" % W)
     p.add_argument("--height", type=int, default=H, help="画布高（默认 %d）" % H)
     if fps:
@@ -2208,7 +2206,7 @@ def _add_style_args(p, *, fps=True):
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="webengine.py",
-        description="浏览器逐帧渲染引擎（v0.8.0）：Canvas 页面 → CDP 截图 → ffmpeg → mp4（支持风格包注入）",
+        description="浏览器逐帧渲染引擎：Canvas 页面 → CDP 截图 → ffmpeg → mp4（支持风格包注入）",
     )
     ap.add_argument("--selftest", action="store_true", help="跑自检（不联网，≤60 秒）")
     sub = ap.add_subparsers(dest="cmd")
@@ -2288,7 +2286,7 @@ def main(argv=None) -> int:
         return 2
 
     # --style 统一在分支之前解析：内联 JSON / JSON 文件 / 风格 id 三种写法，解析失败算用法
-    # 错误（exit 2）。以前每个分支各自解析，坏 id 会抛 SystemExit 变成 exit 1，脚本里分不清
+    # 错误（exit 2）。每个分支各自解析时，坏 id 会抛 SystemExit 变成 exit 1，脚本里分不清
     # "参数写错"和"渲染失败"。
     try:
         style_spec = _resolve_style_spec(getattr(args, "style", ""))
@@ -2305,7 +2303,7 @@ def main(argv=None) -> int:
                   % (args.times,), flush=True)
             return 2
         if args.every is not None and float(args.every) <= 0:
-            # 以前 --every 0 被当成"没写"、--every -1 则是死循环：先 page_meta 开一次浏览器，
+            # --every 0 会被当成"没写"、--every -1 则是死循环：先 page_meta 开一次浏览器，
             # 之后 while k <= end 永远成立，times 一路追加到内存爆掉（实测 40 s 都出不来）。
             print("[错误] --every 必须是正数秒（当前 %r）；不想等间隔采样就别传 --every" % (args.every,),
                   flush=True)
@@ -2361,7 +2359,7 @@ def main(argv=None) -> int:
             return 2
         except RuntimeError as exc:
             # 页面契约 / 浏览器起不来这类错误（缺 getCues、ready 超时、缺 playwright…）：
-            # 以前直接抛 traceback（exit 1，且报错淹没在栈里）。这是"要改页面/环境"的用法
+            # 直接抛 traceback 会变成 exit 1，且报错淹没在栈里。这是"要改页面/环境"的用法
             # 错误，和 --style 写坏一样给 exit 2 + 一行可读原因。
             print("[错误] %s" % exc, flush=True)
             return 2
@@ -2398,7 +2396,7 @@ def main(argv=None) -> int:
             return 2
         except RuntimeError as exc:
             # 同 cues：页面 qaText 返回值形状不对 / 契约缺失 / 浏览器起不来都属于"要改页面
-            # 或环境"，给 exit 2 + 可读原因；不再让一个 traceback 决定门禁红绿。
+            # 或环境"，给 exit 2 + 可读原因；别让一个 traceback 决定门禁红绿。
             print("[错误] %s" % exc, flush=True)
             return 2
         print("[textqa] 重叠 %d、出画 %d、一闪而过 %d、从没露面 %d"
@@ -2413,7 +2411,7 @@ def main(argv=None) -> int:
         if args.out:
             print("[textqa] 详情 → %s" % _json_dump(result, args.out), flush=True)
         # 四类缺陷都算没通过：重叠/出画是布局错，一闪而过/从没露面同样会让成片看起来"漏字"。
-        # v0.4.0 之前只看前两类，后两类会被打印出来却 exit 0 —— 门禁形同建议。
+        # 只看前两类的话，后两类会被打印出来却 exit 0 —— 门禁形同建议。
         bad = (bool(result.get("overlaps")) or bool(result.get("offscreen"))
                or bool(result.get("brief")) or bool(result.get("never")))
         return 1 if bad else 0

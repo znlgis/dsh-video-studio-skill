@@ -4,7 +4,7 @@
 跑法：python tools/ci_check.py [-v]
 
 它检查的是**这个仓库作为"可分发的技能插件"的完整性**，而不是视频能不能出片
-（出片要靠 selfcheck.py + 真跑一遍 render.py，见 SKILL.md §14）：
+（出片要靠 selfcheck.py + 真跑一遍 render.py，见 SKILL.md §13）：
 
   1  语法：scripts/ + assets/ + tools/ 下的 .py 全部能编译（SyntaxWarning 也算失败）
   2  JS 语法：根目录与 assets/web/ 的 .js 通过 node --check
@@ -21,7 +21,7 @@
   10  CI workflow：step 名的裸冒号（会让整份 workflow 静默不跑），
      以及 run 里 python <路径>.py 指向的文件必须存在
   11  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
-  12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验模板（规则只留一份）
+  12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验夹具（规则只留一份）
 
 三档结论（与技能自己的门禁账本同口径）：PASS = 这次真的查了且通过；FAIL = 查了没过；
 SKIP = **这次没执行**（比如本地没装 node / npm），**不等于通过**。
@@ -49,22 +49,22 @@ REFS = SKILL / "references"
 
 # 技能允许的三方依赖（与 README「环境前提」一一对应；加东西必须先改文档）
 ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright",
-                       # v0.8：ASR 回读门禁（可选，缺了 qaasr 自动降级到 ffmpeg whisper / skipped）
+                       # ASR 回读门禁（可选，缺了 qaasr 自动降级到 ffmpeg whisper / skipped）
                        "faster_whisper"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
                  "stylekit", "voicekit", "scenes", "scenes_demo",
-                 # v0.6.0：门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
+                 # 门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
                  "gates", "stagewatch", "filmcheck",
-                 # v0.8.0：渲染前资源闸门、全片 VMAF/SSIM 门禁、ASR 回读门禁
+                 # 渲染前资源闸门、全片 VMAF/SSIM 门禁、ASR 回读门禁
                  "preflight", "qavmaf", "qaasr",
-                 # v0.9.0：场景语法（内容 -> 构图选型）。纯标准库，可被 scenes.py 反向 import
+                 # 场景语法（内容 -> 构图选型）。纯标准库，可被 scenes.py 反向 import
                  "grammar",
-                 # v1.0：设计 DSL / 离线预览 / 提案器（D3 改造的第一期）
+                 # 设计 DSL / 离线预览 / 提案器
                  "designkit", "previewkit", "propose",
-                 # v1.0.1：presetkit 已删除（连同 presets/ 一起）；这里不能再列它，
+                 # 没有 presetkit（随预设目录一起移除）；这里不能再列它，
                  # 否则 ci_check 会去 import 一个不存在的模块
-                 # v1.0 / P2：参数化配乐编排器（替代 9 套 MUSIC_STYLES 表）
+                 # 参数化配乐编排器（不提供曲风表，按参数现场编排）
                  "musicgen"}
 MAX_FILE_BYTES = 400 * 1024
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
@@ -176,7 +176,7 @@ def t_json():
     assert not bad_badges, ("README 徽章版本 %s 与 package.json version %s 不一致"
                             % ("/".join(bad_badges), ver))
     # CHANGELOG 的第一条标题也必须是当前版本：以前只查 README 徽章，于是"发了新版本但
-    # CHANGELOG 顶部还是上一版"没人发现（历史真发生过，见 v0.7.2 的修复记录）。
+    # CHANGELOG 顶部还是上一版"没人发现（真发生过）。
     changelog = ROOT / "CHANGELOG.md"
     assert changelog.is_file(), "缺 CHANGELOG.md"
     m = re.search(r"^##\s+(\d+\.\d+\.\d+)", changelog.read_text(encoding="utf-8"), re.M)
@@ -260,8 +260,8 @@ def t_pack():
     missing = [m for m in must if m not in files]
     assert not missing, "包内缺文件：%s" % ", ".join(missing)
     # 目录部分改成**派生式**：skills/ schemas/ locale/ tools/ docs/ 下磁盘上有的（除缓存/字节码）
-    # 必须全部进包。以前这里是手写 must 列表，于是 v0.6 新增的 gates.py / stagewatch.py、
-    # v0.8 新增的 preflight.py / qavmaf.py / qaasr.py / tools/golden_frames.py 都不在列表里——
+    # 必须全部进包。手写 must 列表对新增文件天然免疫：gates.py / stagewatch.py /
+    # preflight.py / qavmaf.py / qaasr.py / tools/golden_frames.py 都曾被漏在列表外——
     # "必需文件必须在包里"这条检查对**新增文件天然免疫**，等于只保护了第一版写下的那些路径。
     shipped_dirs = ("skills", "schemas", "locale", "tools", "docs")
     on_disk = []
@@ -334,7 +334,7 @@ def t_doc_refs():
     # 第三种：带占位符的路径（<SKILL_DIR>/... 与 <REPO>/...）。ci_check 之前只认 scripts/|assets/|references/
     # 前缀，SKILL.md 里 <SKILL_DIR>/../../../tools/estimate.py 这种写错两级相对层级的命令一直没人查——
     # 实测它指向仓库上一级，是条**跑不通的命令**。语义：<SKILL_DIR> = skills/video-studio/，
-    # <REPO> = 包根（仓库根）。注意**不能**把它们当成"当前工作目录"：quickstart 把技能拷进 myfilm/ 后，
+    # <REPO> = 包根（仓库根）。注意**不能**把它们当成"当前工作目录"：把技能解到 myfilm/ 下面后，
     # 那里的 skills 与 tools 都不存在，但文档里的占位符指的是包内位置，仍然应当成立。
     ph_bad = []
     ph_re = re.compile(r"(<SKILL_DIR>|<REPO>)/([A-Za-z0-9_.\-/{}*]+)")
@@ -447,7 +447,7 @@ def t_py39():
 def t_md_fences():
     """每篇 .md 的代码围栏必须成对（按围栏状态机判，不是数出现次数）。
 
-    v0.7.1 之前这里写的是 startswith("\\`\\`\\`")——那是一个无效转义，Python 把反斜杠原样保留，
+    早期这里写的是 startswith("\\`\\`\\`")——那是一个无效转义，Python 把反斜杠原样保留，
     于是永远匹配不到真实的 ``` 行，检查恒过（"看着在查，其实查不出"，正是本仓库最怕的形态）。
     现在改成状态机：开围栏记下字符与长度，闭合围栏必须同字符、长度不小于开口、且不带信息串。
     """
@@ -538,9 +538,9 @@ def t_film_contract():
                        cwd=str(scripts), capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=120)
     out = (p.stdout or "") + (p.stderr or "")
-    assert p.returncode == 0, ("模板 film.json 没过契约校验（exit=%d）：\n%s"
+    assert p.returncode == 0, ("夹具 film.json 没过契约校验（exit=%d）：\n%s"
                                % (p.returncode, out.strip()[-600:]))
-    return "模板 film.json 通过契约校验；schema %d 字节" % len(schema.read_text(encoding="utf-8"))
+    return "夹具 film.json 通过契约校验；schema %d 字节" % len(schema.read_text(encoding="utf-8"))
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")

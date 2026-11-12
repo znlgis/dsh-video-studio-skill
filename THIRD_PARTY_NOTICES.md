@@ -4,13 +4,13 @@
 
 ## 1. 算法思想改编（非代码拷贝）
 
-`skills/video-studio/scripts/` 下四个 v0.3.0 新增模块的**算法思想**改编自开源项目
+`skills/video-studio/scripts/` 下四个模块（sfxkit / scorekit / webengine / qa_frames）的**算法思想**改编自开源项目
 [ai-history-film](https://github.com/Re-Summer75/ai-history-film)（**MIT**，作者 Re-Summer75）：
 
 | 本项目的文件 | 改编自 | 改编内容 |
 |---|---|---|
 | `sfxkit.py` | `sfx/`（core, synth, filters, modal, texture, space, dynamics, analysis, master, recipes） | 模态合成的物理模型（材质损耗因子、形状模态比、接触力脉冲）、泊松/Cox 事件纹理、镜像声源混响、BS.1770 响度与块级动态处理 |
-| `scorekit.py` | `video/audio/film_score.py`、`inst.py` | 一张和弦表贯穿全片的编排思路、分段能量与律动层、重击前"吸气"、段落边界对齐小节线（v1.0.1 起只保留这些合成原语；9 套配乐风格表已删除） |
+| `scorekit.py` | `video/audio/film_score.py`、`inst.py` | 一张和弦表贯穿全片的编排思路、分段能量与律动层、重击前"吸气"、段落边界对齐小节线（只保留这些合成原语，不提供曲风表） |
 | `webengine.py` + `assets/web/` | `video/render.py`、`video/web/js/engine.js` | 无头浏览器逐帧 seek + CDP 截图的确定性渲染流程、分块并行与断点续跑、音效提示点（cue）导出 |
 | `qa_frames.py` | `video/qa_sync.js`、`video/qa_text.js`、`docs/开发日志.md` | 单帧闪烁的分块判据、画面空窗检测、音画事件同步对照、页面文字重叠/出画/一闪而过检查 |
 

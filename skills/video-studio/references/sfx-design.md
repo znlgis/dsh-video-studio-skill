@@ -1,6 +1,6 @@
 # 音效设计（sfxkit）— 物理建模程序化音效库
 
-> 版本 v0.3.0 ｜ 实现 `skills/video-studio/scripts/sfxkit.py` ｜ 契约 CONTRACT.md §5.1
+> 实现 `skills/video-studio/scripts/sfxkit.py` ｜ 契约 CONTRACT.md §5.1
 >
 > 算法思想参考 **ai-history-film（MIT）** 的 `sfx/` 包（模态合成、泊松/Cox 纹理、镜像声源混响、
 > BS.1770 响度、块级动态处理）。本版本为**单文件重写**：为“确定性 / 无 scipy 也能跑 / 长片也能跑”
@@ -156,7 +156,7 @@ CUE_ALIASES                       # 语义别名表
 
 | 类别 | 配方 | 主要参数 | 物理依据 |
 |---|---|---|---|
-| 界面 | `ui_blip` | pitch=2200, kind=tick | FM 微音 + 塑料/玻璃接触瞬态，音高吸附 D 小调五声 |
+| 界面 | `ui_blip` | pitch=2200, kind=tick | FM 微音 + 塑料/玻璃接触瞬态，音高吸附五声音阶（随配乐调性；未给 key 时 D 小调五声） |
 | 界面 | `ui_click` | press, release | 塑料外壳模态 + 接触噪声，按下/松开两声 |
 | 界面 | `relay_click` | count, gap | 衔铁金属模态 + 外壳闷响 + 触点回弹 |
 | 界面 | `roulette_tick` | last=False | 硬木舌拨木钉，两次接触；last 更低更重 |
@@ -197,7 +197,7 @@ CUE_ALIASES                       # 语义别名表
 | 389 s campfire | ≤ 8 s | **6.3–6.7 s** | — |
 | `--selftest` 全量 | ≤ 60 s | 约 11 s（无 scipy 时更久，含性能复核一次重试） | — |
 
-> 表格里的区间是**两次不同负载**的实测（v0.3 首测 / v0.4 复测），不是抖动范围猜测。
+> 表格里的区间是**两次不同负载**下的实测，不是抖动范围猜测。
 > 所有数字都是"作者机器、空载或已知负载"口径，换机请用 `--bench-long` 重测。
 
 **长环境声的成本控制**（`_sustain`）：短于 ~32 s 直接整段渲染；更长则渲染一段 24 s
@@ -214,8 +214,10 @@ CUE_ALIASES                       # 语义别名表
 ## 10. 集成方式
 
 1. **pil 引擎（filmkit.CueBus）**：`film.json` 的 `sfx.cues` → `CueBus` →
-   `build_audio()` 逐条 `SX.render(type, seed=1000+i, **params)`，按 `pan` 展开立体声、
-   按 `CUE_BASE_DB` 与 `gain` 落位到音频总线；未知 type 告警一次并跳过。
+   `build_audio()` 逐条 `SX.render(type, seed=..., key=..., **params)`：seed 由
+   `content_seed(base, style, content_fp, recipe, t)` 内容派生（`sfx.content_seed=false` 时退回
+   `seed_base + i`），`key` 是配乐调性；按 `pan` 展开立体声、按 `CUE_BASE_DB` 与 `gain`
+   落位到音频总线；未知 type 告警一次并跳过。
 2. **web 引擎**：页面 `window.getCues()` 导出同 schema 的 `work/cues.json`（CONTRACT §4.2）。
 3. **配乐（musicgen）**：和自己写音效一样，直接用 sfxkit 原语；`import sfxkit as S`，有 `sine/saw/supersaw/fm/pluck/adsr`、
    `lowpass/highpass/tv_filter`、`white/burst/exp_decay/attack_decay`、`smooth_random`、`Mix`。
