@@ -49,7 +49,7 @@ import numpy as np
 
 import sfxkit as S                      # 唯一音频依赖：numpy + sfxkit
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 SR = 48000                             # 采样率（与 filmkit / sfxkit 一致）
 BEATS_PER_BAR = 4                      # 4/4

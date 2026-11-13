@@ -60,8 +60,8 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  "preflight", "qavmaf", "qaasr",
                  # 场景语法（内容 -> 构图选型）。纯标准库，可被 scenes.py 反向 import
                  "grammar",
-                 # 设计 DSL / 离线预览 / 提案器
-                 "designkit", "previewkit", "propose",
+                 # 设计 DSL / 离线预览 / 提案器 / 出片前问诊
+                 "designkit", "previewkit", "propose", "intake",
                  # 没有 presetkit（随预设目录一起移除）；这里不能再列它，
                  # 否则 ci_check 会去 import 一个不存在的模块
                  # 参数化配乐编排器（不提供曲风表，按参数现场编排）

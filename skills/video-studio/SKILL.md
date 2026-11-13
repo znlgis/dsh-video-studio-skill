@@ -1,6 +1,6 @@
 ---
 name: video-studio
-description: 用代码从零生成中文视频（科普片/纪录片/宣传片/动画短片）：写剧本→edge-tts 旁白→实测时长排时间轴→PIL 或 Canvas 逐帧渲染→ffmpeg 编码→numpy 采样级混音→自动质检。当用户要"做一个视频 / 生成宣传片 / 把报告变成视频 / 做动画 / 配音配字幕 / 出成片 / 修视频音画不同步 / 视频画质糊"，或提到 ffmpeg、edge-tts、逐帧渲染、字幕、分镜、配乐、混音时使用。 | Code-generated video production (Chinese narration, deterministic frame rendering, ffmpeg, edge-tts, QA gates). Use when asked to make a video, turn a report into a video, animate a story, fix A/V sync or blurry text in a generated video.
+description: 用代码从零生成中文视频（科普片/纪录片/宣传片/动画短片）：写剧本→edge-tts 旁白→实测时长排时间轴→PIL 或 Canvas 逐帧渲染→ffmpeg 编码→numpy 采样级混音→自动质检。当用户要"做一个视频 / 生成宣传片 / 把报告变成视频 / 做动画 / 配音配字幕 / 出成片 / 修视频音画不同步 / 视频画质糊"，或提到 ffmpeg、edge-tts、逐帧渲染、字幕、分镜、配乐、混音时使用。每个新成片任务开工前先用 `intake.py` 把题材/时长/主题气质/画幅/声线/配乐/补充要求一次问完（气质默认推荐明亮活泼），再出候选方案让用户挑。 | Code-generated video production (Chinese narration, deterministic frame rendering, ffmpeg, edge-tts, QA gates). Before proposing, run the one-shot intake questionnaire (topic, duration, mood, aspect, voice, music, extras) so the user makes every decision up front; the default recommendation is a bright, lively look. Use when asked to make a video, turn a report into a video, animate a story, fix A/V sync or blurry text in a generated video.
 ---
 
 # 视频工作室（video-studio）
@@ -21,13 +21,48 @@ description: 用代码从零生成中文视频（科普片/纪录片/宣传片/�
 8. **没看清就加停留，别整片放慢**：`film.json` 的 `hold`（全局）或 `lines[].hold`（单句）
    在语音结束后加停留；配乐用 `bpm` 对齐小节。
 
+## 0.4 【铁律】先问诊，再提案（每个新成片任务的第一步）
+
+> **先把只有用户能决定的事一次问完，再去出方案。** 这条是为了消掉"有时一个问题不问就一路跑完、
+> 有时只问一两个"的随机性：`propose.py` 只负责"外观由谁来拍板"，而题材/时长/气质/声线/配乐
+> 这些**输入**不在它里面；输入由 agent 当场猜，用户就得到成片才第一次看到自己的片子长什么样，
+> 返工全在渲染之后。
+
+**固定动作（排在 §0.5 提案之前）**：
+
+```bash
+# 1) 生成问诊单：固定 7 题（题材 / 时长 / 主题气质 / 画幅 / 旁白声线 / 配乐 / 补充硬要求）
+python <SKILL_DIR>/scripts/intake.py --work work --questions --json
+
+# 2) 把 questions 里的每一题用 ask_user_question **一次问完**（不要一句一轮），再写回：
+python <SKILL_DIR>/scripts/intake.py --work work \
+       --set "topic:AI 大模型的三年，讲给普通观众" --set duration:45s \
+       --set tone:bright-lively --set voice:female-bright --set music:upbeat \
+       --set "note:不要放射线，结尾放二维码"
+
+# 3) 定稿：校验必答题并合成 --brief 文本（work/intake.brief.txt）
+python <SKILL_DIR>/scripts/intake.py --work work --finalize
+```
+
+| 规则 | 说明 |
+|---|---|
+| **一次问完** | 7 题在同一次 ask_user_question 里给出，每题都带推荐项；用户只需勾选/一句话补充 |
+| **明亮活泼是默认** | 任何题材（科普、纪录片、宣传片、动画短片、复盘汇报）的气质题推荐项都是「明亮活泼」，且它排在第一位 |
+| **首个候选必亮** | 没点名气质时，提案的候选 A 固定落到明亮活泼档；其余候选保留完整空间（含暗色）——"优先明亮"不等于"只有一种口味" |
+| **没答完不许出方案** | 首次 `propose.py` 会因问诊未完成而失败，并打印"怎么问 / 怎么答 / 怎么定稿"三步 |
+| **逃生口留痕** | 确实不需要问（批量补渲、已在别处答过）用 `propose.py --no-intake`，提案里会记 `intake.status = bypassed`，事后查得到 |
+| **回答进 brief** | 答案合成 `intake.brief.txt`，再喂给 `--brief`：气质→tone、声线→voice、时长→duration_target，`不要 X` 进 avoid |
+
+有用户直接说"你替我定"时：**仍然先问诊**（用推荐项作为各题默认，只让用户确认一次），
+再出提案；不要因为"用户没意见"就把 7 个决策全部改成程序默认值。
+
 ## 0.5 【铁律】先提案，再出片（不论用户是否要求）
 
 > **用户没要求，也必须先给方案。** 这是本技能最重要的一条产品行为，不是建议。
 > 理由：外观一旦由程序替用户选，用户就从头到尾没参与决策，结果必然是"每个视频都差不多"。
 > 所以流程固定为：**现场采样出几个方案 → 用户挑一个 → 冻结成设计 → 再出片**。
 
-**固定动作（任何新成片任务的第一件事）**：
+**固定动作（问诊答完后的第一件事）**：
 
 ```bash
 python propose.py --brief "<题材/受众/时长/语气>" --script film.json --n 3
@@ -51,7 +86,9 @@ python propose.py --brief "<题材/受众/时长/语气>" --script film.json --n
 4. **没有内置模板可套**：`design.json` 的所有字段都开放（35 字段主题 + 五组视觉语言签名 +
    声音/配乐/节奏），配色是**连续色相空间**里的任意一点，不是从若干套现成外观里挑。
    每次提案都是现场生成——同一个 brief 连拍两次会得到不同设计（要复现就传 `--seed`）。
-5. **片间去重台账（默认开启）**：`--confirm` 会把冻结的设计记进
+5. **首个候选默认明亮活泼**：没点名气质时候选 A 走浅底带色（"明色"标签），
+   其余候选在完整空间里取（含暗色）。任何题材的气质题推荐项都是「明亮活泼」。
+6. **片间去重台账（默认开启）**：`--confirm` 会把冻结的设计记进
    `~/.dsh/video-studio/design-ledger.json`（最多 500 条），下次提案主动避开最近交付过的外观——
    候选与台账里任一部片的**设计距离 < 2 维**时自动换 nonce 重采并告警。
    这是"不同片不重复"从"靠随机"变成"有记忆"的落地机制。`--show-ledger` 查台账、
@@ -117,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；69 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；70 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -723,7 +760,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（69 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（70 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1054,6 +1091,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 | 文件 | 作用 |
 |---|---|
+| `scripts/intake.py` | **出片前问诊**：固定 7 题（题材/时长/气质/画幅/声线/配乐/补充）→ `work/intake.json` + `work/intake.brief.txt`。任何题材的气质推荐项都是「明亮活泼」；首次 `propose.py` 会因它没答完而拒绝 |
 | `scripts/propose.py` | **提案器**：`--brief` 出 N 个候选（各带静帧联系表 + 设计距离）/ `--revise` 重出 / `--diff` 对比 / `--confirm` 冻结 `work/design.json` / `--show` 查看；片间去重台账（`--no-ledger` / `--show-ledger` / `VIDEO_STUDIO_LEDGER`） |
 | `scripts/designkit.py` | **设计 DSL**：`sample_designs`（确定性采样、两两 ≥2 维不同、配色色相分叉）/ `validate_design`（fail-closed）/ `design_to_plan` / `design_distance` / `subtitle_of`；CLI：`--sample` / `--lint` / `--list-palettes` |
 | `scripts/previewkit.py` | **离线预览**：合成时间轴 + `grammar.plan_scenes` + 场景绘制 + 联系表，不联网、不合成旁白 |
@@ -1064,7 +1102,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/gates.py` | **门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
-| `scripts/selfcheck.py` | 回归自检：**69 条**针对真实缺陷的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）** |
+| `scripts/selfcheck.py` | 回归自检：**70 条**针对真实缺陷的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）** |
 | `scripts/preflight.py` | **渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
@@ -1192,7 +1230,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 69 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 70 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

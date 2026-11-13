@@ -4,7 +4,7 @@
 #   repo     —— tools/ci_check.py 的 12 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
 #               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
 #               film.json 契约）。不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：69 条针对真实缺陷的回归断言
+#   skill    —— skills/video-studio/scripts/selfcheck.py：70 条针对真实缺陷的回归断言
 #               （数为准的是 CASES 列表，不是文档里的任何数字）。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。

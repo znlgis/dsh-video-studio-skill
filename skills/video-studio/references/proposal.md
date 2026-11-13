@@ -18,6 +18,23 @@
 | `work/design.json` | `propose.py --confirm` | **冻结**后的那一份设计（唯一真源，渲染只认它） |
 | `work/proposals/revN/proposal.json` | `propose.py` | 每一版的快照（rev 不覆盖，可 diff、可回滚） |
 
+## 1.5 先问诊，再提案（首次提案的硬前置）
+
+`propose.py` 只决定「外观谁来拍板」；素材 / 时长 / 气质 / 声线 / 配乐这些**输入**来自问诊：
+
+```bash
+python <SKILL_DIR>/scripts/intake.py --work work --questions --json   # 7 题，一次性问完
+python <SKILL_DIR>/scripts/intake.py --work work --set tone:bright-lively ...
+python <SKILL_DIR>/scripts/intake.py --work work --finalize           # -> intake.brief.txt
+```
+
+| 项 | 行为 |
+|---|---|
+| 没答完 | 首次 `propose.py` 退 1，并打印「怎么问 / 怎么答 / 怎么定稿」三步 |
+| 答完了 | 提案读 `work/intake.json`，答案合成 brief；`proposal.intake` 记 complete + 答案 |
+| `--no-intake` | 显式放行，`proposal.intake.status = bypassed`（事后可查） |
+| 气质默认 | 任何题材的推荐项都是「明亮活泼」；没点名气质时**首个候选固定 bright** |
+
 ## 2. 流程（零拷贝：脚本留在技能目录里直接跑）
 
 ```bash

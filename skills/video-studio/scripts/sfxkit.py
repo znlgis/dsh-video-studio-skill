@@ -35,7 +35,7 @@ try:                                   # scipy 可选：没装就走 FFT 卷积�
 except Exception:                      # pragma: no cover - 兜底路径
     _sig = None
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 SR = 48000
 LN1000 = 6.907755278982137            # ln(1000)：幅度衰减 60 dB 对应的自然对数

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.0.4-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -101,20 +101,26 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，69 条断言，不联网）
+# 2) 环境自检（可选，70 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
-# 3) 先出方案：3 个候选，各带静帧联系表；2 秒级、全程离线
+# 3) 先问诊：固定 7 题一次问完（题材/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
+python <SKILL_DIR>/scripts/intake.py --work work --questions --json
+python <SKILL_DIR>/scripts/intake.py --work work --set "topic:AI 大模型的三年" \
+       --set duration:30s --set tone:bright-lively --set voice:female-bright --set music:upbeat
+python <SKILL_DIR>/scripts/intake.py --work work --finalize     # -> work/intake.brief.txt
+
+# 4) 再出方案：3 个候选，各带静帧联系表；2 秒级、全程离线（问诊没答完会被拒）
 python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科普" --script film.json --work work
 
-# 4) 确认候选，冻结设计 -> work/design.json（此后渲染只认这份设计）
+# 5) 确认候选，冻结设计 -> work/design.json（此后渲染只认这份设计）
 python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work
 
-# 5) 先看静帧，再出全片。--scenes 不写 = 剧本同目录 scenes.py -> 技能内置 assets/scenes.py
+# 6) 先看静帧，再出全片。--scenes 不写 = 剧本同目录 scenes.py -> 技能内置 assets/scenes.py
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage stills --stills "l01:3,l02:5"
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage all
 
-# 6) 交付凭据 + 人工签核
+# 7) 交付凭据 + 人工签核
 cat out/QC-REPORT.md
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage accept --gate release
 ```
@@ -169,6 +175,7 @@ skills/video-studio/
   references/                proposal · scene-grammar · pipeline · scene-authoring · audio · audio-variation
                              sfx-design · web-engine · frame-qa · quality-gates · word-timeline · delivery-gates
                              change-impact · appearance · pitfalls
+  scripts/intake.py          出片前问诊（固定 7 题 -> work/intake.json -> brief）
   scripts/propose.py         提案器（--brief/--revise/--confirm/--diff + 片间去重台账）
   scripts/designkit.py       设计 DSL（采样/校验/转计划/设计距离/字幕参数）
   scripts/previewkit.py      离线预览（合成时间轴 + 联系表，不联网）
@@ -183,7 +190,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（69 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（70 条针对真实缺陷的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘）
   scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
@@ -254,7 +261,7 @@ python tools/ci_check.py -v     # 12 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**69 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**70 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 

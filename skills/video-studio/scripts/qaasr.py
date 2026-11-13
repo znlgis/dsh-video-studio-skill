@@ -66,7 +66,7 @@ tiny 只适合快速冒烟（错字多、时间戳只到整秒）。默认 model
 """
 from __future__ import annotations
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 import argparse
 import json

@@ -40,7 +40,7 @@ ffmpeg/ffprobe 探测口径与 filmkit 一致：FILMKIT_FFMPEG 优先，找不�
 """
 from __future__ import annotations
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 import argparse
 import json

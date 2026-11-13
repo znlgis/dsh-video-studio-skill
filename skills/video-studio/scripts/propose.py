@@ -301,6 +301,67 @@ def parse_duration(text):
     if best < 3.0 or best > 1800.0:
         return None            # 与 designkit 的契约范围一致（3–1800 秒）
     return round(best, 2)
+# ---------------------------------------------------------------- 出片前问诊
+# 一次问完的决策表由 intake.py 落盘（work/intake.json）。propose 读它的原因是：
+# 「先出方案」只解决"外观谁拍板"，素材/时长/声调这些输入仍然要靠问。实际会话里
+# 没人把关时，agent 会直接从半句话里猜出全部输入 —— 用户到成片才第一次看到自己的
+# 片子长什么样，返工全在渲染之后。所以**首次提案前必须先答完问诊**：
+# 不答就不许出方案（--no-intake 是明确的逃生口，且会记进提案里留痕）。
+INTAKE_FILE = "intake.json"
+
+
+def intake_path(work):
+    return os.path.join(str(work), INTAKE_FILE)
+
+
+def _intake_state(work):
+    """读问诊结果：返回 {"present", "status", "missing", "brief", "path"}。
+
+    读不出/不是 JSON 一律当"没有问诊"处理——问诊文件坏掉不该让上层看到一个
+    可疑的"已答完"，那会跳过提问直接出方案（正是这一刻要避免的事）。
+    """
+    p = intake_path(work)
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {"present": False, "status": "absent", "missing": [], "brief": "", "path": p}
+    if not isinstance(data, dict):
+        return {"present": False, "status": "broken", "missing": [], "brief": "", "path": p}
+    answers = data.get("answers") if isinstance(data.get("answers"), dict) else {}
+    missing = [str(x) for x in (data.get("missing") or [])]
+    status = str(data.get("status") or ("complete" if not missing else "draft"))
+    return {"present": True, "status": status, "missing": missing,
+            "brief": str(data.get("brief") or ""), "path": p,
+            "answers": dict(answers)}
+
+
+def _intake_gate(work, brief_text, no_intake):
+    """首次提案前的问诊闸：答完了才放行出方案。返回 (brief, state, bypassed)。"""
+    state = _intake_state(work)
+    if no_intake:
+        state = dict(state, status="bypassed")
+        if not str(brief_text or "").strip() and state.get("present"):
+            brief_text = state.get("brief") or ""
+        return brief_text, state, True
+    if state.get("status") == "complete":
+        # 用户答过问诊：以答案合成的 brief 为准（命令行 --brief 只当作额外补充）。
+        merged = [str(brief_text or "").strip(), str(state.get("brief") or "").strip()]
+        return "，".join([x for x in merged if x]), state, False
+    miss = " / ".join(state.get("missing") or []) or "题材"
+    raise SystemExit(
+        "[proposal] 还没完成出片前问诊（%s）。\n"
+        "  这是刻意的：素材/时长/气质/声线/配乐这些只有用户能定，先问完再出方案，"
+        "返工才不会落在渲染之后。\n"
+        "  怎么做：\n"
+        "    1) python intake.py --work %s --questions --json   # 拿去问用户（一次问完）\n"
+        "    2) python intake.py --work %s --set topic:\"...\" --set tone:bright-lively ...\n"
+        "    3) python intake.py --work %s --finalize          # 合成 brief\n"
+        "  确实不需要问（批量补渲 / 已在别处答过）：加 --no-intake，会记进提案留痕。\n"
+        "  当前状态：%s；还没答：%s" % (state.get("status"), work, work, work,
+                                        state.get("status"), miss))
+
+
 def _brief_of(text, script):
     """把用户一句话变成 brief dict。剧本的标题是隐含 topic（避免空 brief）。
 
@@ -390,10 +451,20 @@ def _fill_diversity(rows, designkit):
 
 
 def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out=False,
-                  with_audio=False, no_ledger=False):
+                  with_audio=False, no_ledger=False, no_intake=False):
     """生成一版提案（rev = 已有最大 rev + 1），落盘并打印人读摘要。"""
     designkit = _designkit()
     previewkit = _previewkit()
+    prev = _load_json(proposal_path(work), default=None) or {}
+    # 问诊闸只管**首次**提案：后续 rev 是在已答完的前提下改方案，再拦一次只是噪音。
+    if not prev:
+        brief_text, intake_state, intake_bypassed = _intake_gate(work, brief_text, no_intake)
+        if not json_out and intake_state.get("status") == "complete":
+            print("   问诊: 已答完（%s）" % intake_state.get("path"))
+        if not json_out and intake_bypassed:
+            print("   问诊: 已用 --no-intake 跳过（本次提案里会留痕）")
+    else:
+        intake_state, intake_bypassed = _intake_state(work), False
     brief = _brief_of(brief_text, script)
 
     prev = _load_json(proposal_path(work), default=None) or {}
@@ -483,6 +554,12 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
         "chosen": None,
         "seed": seed,
         "wall_s": wall,
+        # 问诊留痕：这版方案是不是在"问完用户"之后出的。问诊闸放行时 status=complete；
+        # 明确 --no-intake 时为 bypassed —— 事后能查清"这片子当初问过没有"。
+        "intake": {"path": intake_state.get("path"),
+                   "status": intake_state.get("status"),
+                   "bypassed": bool(intake_bypassed),
+                   "answers": intake_state.get("answers") or {}},
         # 片间去重证据：这批候选与"最近交付过的设计"的最小维度距离。
         # None = 没有台账（第一次出片 / 已用 --no-ledger 关闭）。
         "ledger": {"path": ledger_path() or None, "recent": len(recent),
@@ -614,7 +691,7 @@ def confirm(work, candidate, by="user", note="", json_out=False,
     return prev
 
 def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=False,
-           with_audio=False, no_ledger=False):
+           with_audio=False, no_ledger=False, no_intake=False):
     """不满意就重出：新 rev 不覆盖旧 rev，feedback 原文留存（这就是"迭代"的审计）。"""
     if not str(feedback or "").strip():
         raise SystemExit("[proposal] --revise 需要一段要求（例如：更冷一点、女声、节奏快些）")
@@ -624,7 +701,8 @@ def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=Fal
     script = _load_script(script_path)
     return make_proposal(str(feedback), script, work, n=n, seed=seed,
                          n_frames=n_frames, json_out=json_out,
-                         with_audio=with_audio, no_ledger=no_ledger)
+                         with_audio=with_audio, no_ledger=no_ledger,
+                         no_intake=no_intake)
 
 
 def diff(work, rev_a, rev_b, json_out=False):
@@ -765,6 +843,8 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON")
     ap.add_argument("--no-ledger", action="store_true",
                     help="忽略片间去重台账（不读也不写；默认开启，路径见 --show-ledger）")
+    ap.add_argument("--no-intake", action="store_true",
+                    help="跳过首次提案前的问诊闸（会记进 proposal.intake 留痕）")
     ap.add_argument("--show-ledger", action="store_true",
                     help="打印台账路径与最近几条已交付设计（排查为什么这次避开了某方向）")
     a = ap.parse_args(argv)
@@ -805,13 +885,15 @@ def main(argv=None):
         if a.revise is not None:
             revise(a.work, a.revise, a.script, n=a.n, seed=a.seed,
                    n_frames=a.n_frames, json_out=a.json,
-                   with_audio=a.with_audio, no_ledger=a.no_ledger)
+                   with_audio=a.with_audio, no_ledger=a.no_ledger,
+                   no_intake=a.no_intake)
             return 0
         if a.brief or os.path.exists(a.script):
             script = _load_script(a.script)
             make_proposal(a.brief, script, a.work, n=a.n, seed=a.seed,
                           n_frames=a.n_frames, json_out=a.json,
-                          with_audio=a.with_audio, no_ledger=a.no_ledger)
+                          with_audio=a.with_audio, no_ledger=a.no_ledger,
+                          no_intake=a.no_intake)
             return 0
         ap.print_help()
         return 0

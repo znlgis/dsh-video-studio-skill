@@ -128,7 +128,23 @@ SFX_DENSITIES = ("none", "sparse", "normal", "rich")
 _PALETTE_SPACE = {
     True:  {"v": (0.030, 0.075), "s": (0.10, 0.55)},   # 暗色片：底子压很暗
     False: {"v": (0.90, 0.985),  "s": (0.02, 0.28)},   # 亮色片：纸感底子
+    # 明亮活泼档：浅底，但底色自己带颜色（v 压在中高、s 拉到能看出偏色）。
+    #
+    # 为什么不把 False 的 s 上限直接调高：纸感浅底（s<=0.28）是"安静、克制"的表达，
+    # 在纪录片与报告类题材里是对的；整体调高等于让所有浅色片都变花。
+    # 所以"活泼"是**显式气质**（intake 的 tone / brief 的「明亮，活泼」），不是全局改口味。
+    # 实测（色相每 10° × 三个 (s,v) 采样，共 108 点）：v (0.90,0.96) + s (0.26,0.46)
+    # 的解出率 93.5%，不可解的 7 点全落在 0–20° 红橙带（浅底红橙上 ink 对比度到不了），
+    # 由 _solve_palette_retry 逐档横向让开色相兜底。
+    "vivid": {"v": (0.90, 0.96), "s": (0.26, 0.46)},
 }
+
+# 气质（tone）不是"配色族"（那会恢复一份可选外观清单），它只回答一个问题：
+# **底色该压暗还是提亮**。色相仍然在连续空间里自由取。
+_TONE_BRIGHT = "bright"      # 浅底、活泼（带色、有精神）——任何题材的推荐默认
+_TONE_LIGHT = "light"        # 浅底、纸感（安静、克制）
+_TONE_DARK = "dark"          # 暗底（发布会/技术向）
+_TONES = (_TONE_BRIGHT, _TONE_LIGHT, _TONE_DARK)
 
 
 def _palette_from_hue(hue, sat, val, dark):
@@ -425,6 +441,35 @@ def _solve_role(hue, s0, v0, need, refs):
             if best is None or d < best_d - 1e-12:
                 best, best_d = c, d
     return best
+
+
+def _solve_palette_retry(family, hue_shift=0.0, target_shift=0.0):
+    """求解失败时横向让开色相重试（最多 12 档、每档 7.5°），仍失败抛原错误。
+
+    为什么需要：明亮活泼档（浅底 + 带色）在 0–20° 红橙带上无解——浅底红橙上
+    ink 的对比度到不了门槛。这不是设计错误，是这一档的**局部不可行**；
+    让色相往旁边挪一点仍然落在"明亮活泼"的语义里（用户要的是气质，不是某个精确色相）。
+    失败档数是确定性的（按 k 递增、先正后负），所以同 seed 可复现。
+
+    返回 {"palette", "family", "shift"}：family 是**实际用到**的 (h,s,v,dark)——
+    调用方必须用它重算标签与色相差，否则 label 会与实际底色对不上。
+    """
+    hue, sat, val, dark = family[0], family[1], family[2], family[3]
+    last = None
+    for k in range(12):
+        if k == 0:
+            dh = 0.0
+        else:
+            step = 7.5 * ((k + 1) // 2)
+            dh = step if k % 2 else -step
+        try:
+            pal = _solve_palette((float(hue) + dh, sat, val, dark), hue_shift, target_shift)
+        except ValueError as e:
+            last = e
+            continue
+        return {"palette": pal, "shift": dh,
+                "family": (float(hue) + dh, sat, val, dark)}
+    raise last if last is not None else ValueError("配色求解失败：%r" % (family,))
 
 
 def _solve_palette(family, hue_shift=0.0, target_shift=0.0):
@@ -1350,6 +1395,11 @@ _CONSTRAINT_WORDS = (
     ("mood", "uplifting", ("上扬", "uplifting")),
     ("voice", "male", ("男声", "male")),
     ("voice", "female", ("女声", "female")),
+    # 气质（底色明暗/活泼度）——任何题材的推荐默认都是「明亮，活泼」。
+    # "明亮"必须比"深色"更短地排在前面：中文长词优先命中，用户只会点选，不会手写。
+    ("tone", "bright", ("明亮活泼", "活泼", "明快", "鲜艳", "bright")),
+    ("tone", "light", ("明亮", "浅色", "纸感", "干净", "light")),
+    ("tone", "dark", ("深色", "暗色", "深底", "近黑底", "dark")),
 )
 
 _CATEGORY_VALUES = {
@@ -1360,9 +1410,10 @@ _CATEGORY_VALUES = {
     "transition": tuple(TRANSITIONS),
     "mood": tuple(MOODS),
     "voice": ("male", "female"),
+    "tone": _TONES,
 }
 _CATEGORY_WORD = {"palette": "配色", "motif": "母题", "transition": "转场",
-                  "mood": "情绪", "voice": "声线"}
+                  "mood": "情绪", "voice": "声线", "tone": "气质"}
 # 英文按"整词"认：不加边界的话 "warm-paper" 会顺带命中"纸卷/paper"、"female" 会命中"male"。
 _ASCII_WORD = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
@@ -1596,7 +1647,27 @@ def _design_value(design, cat):
     if cat == "voice":
         kinds = {_voice_gender_of(v) for v in _voice_ids_of(design)}
         return kinds.pop() if len(kinds) == 1 else "mixed"
+    if cat == "tone":
+        return _tone_of(design)
     return None
+
+
+def _tone_of(design):
+    """design -> 气质档（bright / light / dark）；取不到返回 None。
+
+    判据只看底色的**明暗 + 饱和度**：这几项决定了"第一眼亮不亮、活不活泼"，
+    也正好是这类要求（"要亮一点""别太冷"）真正指的东西。阈值取了宽的档，
+    因为用户说的是"感觉"，不是某个精确 s 值。
+    """
+    try:
+        pal = _dig(design, ("visual", "palette"))
+        bg = ST._color_of(pal.get("bg"), "visual.palette.bg")
+    except Exception:                                     # noqa: BLE001
+        return None
+    if ST.is_dark({"bg": bg}):
+        return _TONE_DARK
+    _h, s, _v = ST.rgb_to_hsv(bg)
+    return _TONE_BRIGHT if float(s) >= 0.22 else _TONE_LIGHT
 
 
 def _constraint_problems(design, must, avoid):
@@ -1614,6 +1685,15 @@ def _constraint_problems(design, must, avoid):
                 bad.append("配色=%.1f° 不满足 must_have「%s」（要 %s 的色相，即 %.0f°±%.0f°）"
                            % (got_h, word, val, anchor[0], _HUE_WINDOW))
             continue
+        if cat == "tone":
+            # 「明亮活泼」在复核时接受 bright 与 light 两档：用户说的是"要亮"，
+            # 不是"要恰好这个饱和度"。hard _TONE_BRIGHT 留给采样器当推荐默认。
+            got_t = _design_value(design, cat)
+            ok = (got_t == val) or (val == _TONE_BRIGHT and got_t == _TONE_LIGHT)
+            if not ok:
+                bad.append("气质=%r 不满足 must_have「%s」（要 %s）"
+                           % (got_t, word, val))
+            continue
         got = _design_value(design, cat)
         if got != val:
             bad.append("%s=%r 不满足 must_have「%s」（%s 要 %r）"
@@ -1626,6 +1706,13 @@ def _constraint_problems(design, must, avoid):
                 if got_h is not None and anchor and _hue_gap(got_h, anchor[0]) <= _HUE_WINDOW:
                     bad.append("配色=%.1f° 违反了 avoid「%s」（落在 %s 的色相范围内）"
                                % (got_h, word, val))
+            continue
+        if cat == "tone":
+            got_t = _design_value(design, cat)
+            for val, word, _src in rows:
+                hit = (got_t == val) or (val == _TONE_BRIGHT and got_t == _TONE_LIGHT)
+                if hit:
+                    bad.append("气质=%r 违反了 avoid「%s」" % (got_t, word))
             continue
         got = _design_value(design, cat)
         for val, word, _src in rows:
@@ -1700,8 +1787,24 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     # 配色 = 连续色相空间里的一个点（不是若干命名外观之一）。
     # 色相按黄金角 137.5° 步进：相邻候选的色相必不接近（比固定步长更难撞色），
     # 且整体分布均匀 —— 这就是"每条片底色都不同"的来源。
+    # 气质：点名了就在允许集里取；没点名时**第一个候选固定明亮活泼**，
+    # 其余候选保持完整空间（含暗色）——"优先给明亮"不等于"全片只有一种口味"。
+    tone_dom = dom.get("tone")
+    if tone_dom:
+        tone = tone_dom[(h("tone")) % len(tone_dom)]
+    elif index == 0 and not dom.get("palette"):
+        tone = _TONE_BRIGHT
+    else:
+        tone = None
     dark = h("dark") % 100 < 62                       # 约 62% 暗色片（贴合"工程技术片"气质）
-    sp = _PALETTE_SPACE[dark]
+    vivid = False
+    if tone == _TONE_BRIGHT:
+        dark, vivid = False, True                     # 活泼 = 浅底 + 带色
+    elif tone == _TONE_LIGHT:
+        dark = False
+    elif tone == _TONE_DARK:
+        dark = True
+    sp = _PALETTE_SPACE["vivid" if vivid else dark]
     # 配色：连续色相空间取点。若 brief 给了配色约束，就落在它的色相窗口内
     # （窗口内仍是连续的，不是"锁定到某一个预设"）。
     pcon = dom.get("palette")
@@ -1709,6 +1812,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
         anchor = pcon.get("anchor")
         if anchor is not None:
             base_hue, dark = anchor
+            vivid = False                     # 配色锚点自带明暗，气质不再覆盖它
             # 窗口内按哈希散开，但**避开**用户明确排除的色相
             span = float(pcon.get("window") or _HUE_WINDOW)
             for k in range(24):                      # 最多试 24 个位置，全都撞 banned 才放弃
@@ -1723,9 +1827,8 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
                     break
                 hue = (hue + 37.0) % 360.0
     else:
-        dark = h("dark") % 100 < 62
         hue = (h("palette") + index * 137.508) % 360.0
-    sp = _PALETTE_SPACE[dark]
+    sp = _PALETTE_SPACE["vivid" if vivid else dark]
     sat = sp["s"][0] + (h("sat") % 100) / 100.0 * (sp["s"][1] - sp["s"][0])
     val = sp["v"][0] + (h("val") % 100) / 100.0 * (sp["v"][1] - sp["v"][0])
     family = (hue, sat, val, dark)
@@ -1781,7 +1884,10 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
 
     hue_shift = ((h("hue") % 161) - 80) / 10.0          # -8.0 .. +8.0 度
     target_shift = ((h("sv") % 9) - 4) / 100.0          # -0.04 .. +0.04
-    palette = _solve_palette(family, hue_shift, target_shift)
+    # 求解失败会横向让开色相重试；返回值带着**实际用到**的色相与调色板，
+    # 标签必须用实际色相，否则卡片上印的 h 与画面颜色对不上。
+    _pg = _solve_palette_retry(family, hue_shift, target_shift)
+    palette, hue = _pg["palette"], _pg["family"][0]
 
     density = _DENSITIES[(h("density") + index) % len(_DENSITIES)]
     push = _PUSHES[(h("push") + index) % len(_PUSHES)]
@@ -1823,7 +1929,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
         ("%s|%s|%s|%s" % (ctext, tag, index, attempt)).encode("utf-8")
     ).hexdigest()[:8]
     # 标签描述"这配色长什么样"，而不是"它属于哪一套"（没有套了）
-    fam_label = ("深" if dark else "浅") + "色 h%03d" % int(round(hue) % 360)
+    fam_label = ("深" if dark else ("明" if vivid else "浅")) + "色 h%03d" % int(round(hue) % 360)
     label = "%s·%s" % (fam_label, _MOTIF_WORD[motif])
     pitch = "%s×%s：%s，%s转场，%s声线，%d BPM %s。" % (
         fam_label, _MOTIF_WORD[motif], _MOOD_WORD[mood], _TRANS_WORD[trans],
@@ -1932,6 +2038,24 @@ def sample_designs(brief, n=3, seed=None):
             if too_close:
                 why_not.append("与前序候选不足 2 维差异：%s" % " / ".join(too_close))
                 continue
+            # 同批候选的**版式**不许撞车（n<=3 时）。
+            #
+            # 为什么单独管这一条：design_distance 在母题/转场/缓动/编号/配乐上很容易凑够
+            # 2 维，但剪影门禁（G13）量的是**构图骨架**——两个候选都用 left-stack、
+            # 只有母题与配色不同时，三值化后的前景占比/重心/边带基本同形，实测被判
+            # "换风格仍只是换色"。版式在 n<=3 时互斥是最省力的结构分叉（3 个候选正好
+            # 对应 3 种版式）。
+            #
+            # 但这是**优先级**不是硬约束：带"暖纸色 + 女声"这类窄约束时可选配色窗口只有
+            # 52°，3 个候选可能只放得下 1–2 种版式；硬拦会让 n=3 直接失败（实测）。
+            # 所以最后 8 次重采放宽这一条——宁可牺牲一次骨架分叉，也不让采样失败。
+            if len(out) < 3 and attempt < _MAX_RESAMPLE - 8:
+                clash_layout = [o["id"] for o in out
+                                if _dig(o, ("visual", "layout")) == cand["visual"]["layout"]]
+                if clash_layout:
+                    why_not.append("版式与前序候选 %s 相同（剪影会像同一张骨架）"
+                                   % " / ".join(clash_layout))
+                    continue
             # 底色必须和已接受候选**拉开色相**。为什么单独管这一条：
             # design_distance 会在"母题/转场/缓动/编号"上找到足够的差异，
             # 于是两个候选可能共用同一片底色却仍被判为"可区分"。

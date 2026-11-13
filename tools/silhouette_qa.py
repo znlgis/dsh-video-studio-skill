@@ -101,7 +101,7 @@ CLI（没有 --styles：STYLE_IDS 是空元组，按风格 ID 选已经无意义
 """
 from __future__ import annotations
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 import argparse
 import copy

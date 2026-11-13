@@ -39,7 +39,7 @@ FILMKIT_FFMPEG）。正常 import 不做重活、不打印。
 """
 from __future__ import annotations
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 import argparse
 import json

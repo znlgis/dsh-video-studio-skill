@@ -2079,7 +2079,8 @@ def t_design_ledger():
         assert r.returncode == 0, "propose.py %s 失败：%s" % (args[0], (r.stderr or r.stdout)[-300:])
         return r
 
-    _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3"])
+    # 台账这条例验的是"记账/避开"，不是问诊：问诊另有用例 70 守。
+    _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3", "--no-intake"])
     assert not os.path.exists(ledger), "还没 confirm 就写台账了（草稿不该记）"
     _run(["--confirm", "--candidate", "A"])
     assert os.path.exists(ledger), "confirm 之后没有写台账：%s" % ledger
@@ -2088,14 +2089,100 @@ def t_design_ledger():
     row = data["designs"][0]
     assert row.get("fingerprint") and isinstance(row.get("design"), dict), "台账记录缺字段"
     # 第二次提案：必须能读到台账（人读输出里有一行"片间去重"）
-    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3"])
+    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3", "--no-intake"])
     assert "片间去重" in r.stdout, "提案没有报告台账状态：%s" % r.stdout[-400:]
     # --show-ledger 能查；--no-ledger 能关
     r = _run(["--show-ledger"])
     assert row["fingerprint"] in r.stdout, "--show-ledger 没列出刚记的指纹"
-    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3", "--no-ledger"])
+    r = _run(["--brief", "深蓝科技解说", "--script", film, "--n", "3", "--no-ledger",
+              "--no-intake"])
     assert "--no-ledger" in r.stdout, "--no-ledger 没有给出关闭提示"
     return "草稿不记 / confirm 记账 / 提案读取并报告 / --show-ledger 可查 / --no-ledger 可关"
+
+
+def t_intake_gate():
+    """70 出片前问诊：一次问完 + 首次提案前必须答完（--no-intake 才放行且留痕）。
+
+    用户的真实抱怨是"有时一个问题不问就一路跑完，有时只问一两个"——根因是"问不问"
+    全靠 agent 当场发挥。这条把它变成可执行的门：
+      ① 问诊单是固定的 7 题，每一项都有推荐默认值，且**任何题材的推荐默认都是明亮活泼**；
+      ② 没答完时首次提案直接失败，并给出"怎么问、怎么答、怎么定稿"三步；
+      ③ 答完后提案里必须留痕（intake.status = complete，答案随提案落盘）；
+      ④ --no-intake 是显式逃生口，用掉时留 bypassed 痕迹（事后能查"这片子问没问过"）。
+    """
+    import subprocess as _sp
+    tmp = tempfile.mkdtemp(prefix="vs_intake_selfcheck_")
+    scripts = HERE
+    intake_py = os.path.join(scripts, "intake.py")
+    propose_py = os.path.join(scripts, "propose.py")
+    assert os.path.exists(intake_py), "缺 intake.py（出片前问诊脚本）"
+    film = os.path.join(tmp, "film.json")
+    with open(film, "w", encoding="utf-8") as fh:
+        json.dump({"title": "问诊自检", "lines": [
+            {"id": "l01", "kind": "hook", "text": "第一句话。"},
+            {"id": "l02", "kind": "body", "text": "第二句话，讲一件具体的事。"},
+            {"id": "l03", "kind": "outro", "text": "结束。"}]}, fh, ensure_ascii=False)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+
+    def _run(args, cwd):
+        return _sp.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env, timeout=300)
+
+    # ① 题目包：固定 7 题、每题带默认值、气质题默认明亮活泼且排第一
+    r = _run([intake_py, "--work", "work", "--questions", "--json"], tmp)
+    assert r.returncode == 0, "intake.py --questions 失败：%s" % (r.stderr or r.stdout)[-300:]
+    payload = json.loads(r.stdout[r.stdout.find("{"):])
+    qs = payload.get("questions") or []
+    assert len(qs) == 7, "问诊单应有 7 题（题材/时长/气质/画幅/声线/配乐/补充），实际 %d" % len(qs)
+    byid = {q["id"]: q for q in qs}
+    for qid in ("topic", "duration", "tone", "voice", "music"):
+        assert byid.get(qid) and byid[qid].get("required"), "必答题缺 %r" % qid
+    assert byid["tone"].get("default") == "bright-lively", "气质题默认必须是 bright-lively"
+    assert byid["tone"]["options"][0]["value"] == "bright-lively", \
+        "气质题第一项必须是明亮活泼（推荐项排最前）"
+
+    # ② 没答完：首次提案必须失败，并且说清三步怎么做
+    work1 = os.path.join(tmp, "work1")
+    r = _run([propose_py, "--brief", "明亮活泼的科普片", "--script", film,
+              "--work", work1, "--n", "2"], tmp)
+    assert r.returncode != 0, "没答问诊竟然直接出方案了（问诊闸失效）"
+    msg = (r.stderr or "") + (r.stdout or "")
+    assert "intake.py" in msg and "还没" in msg, "拦截时要给出 intake.py 指引：%r" % msg[-300:]
+
+    # ③ 答完 + 定稿：提案放行，并留 complete 痕迹
+    r = _run([intake_py, "--work", work1,
+              "--set", "topic:AI 大模型的三年", "--set", "duration:45s",
+              "--set", "tone:bright-lively", "--set", "voice:female-bright",
+              "--set", "music:upbeat"], tmp)
+    assert r.returncode == 0, "写答答案失败：%s" % (r.stderr or r.stdout)[-300:]
+    r = _run([intake_py, "--work", work1, "--finalize"], tmp)
+    assert r.returncode == 0, "--finalize 失败：%s" % (r.stderr or r.stdout)[-300:]
+    brief_txt = open(os.path.join(work1, "intake.brief.txt"), encoding="utf-8").read()
+    assert "明亮活泼" in brief_txt, "气质答案没进 brief：%r" % brief_txt
+    r = _run([propose_py, "--work", work1, "--n", "2", "--json"], tmp)
+    assert r.returncode == 0, "答完问诊后提案失败：%s" % (r.stderr or r.stdout)[-300:]
+    data = json.loads(r.stdout[r.stdout.find("{"):])
+    intake = data.get("intake") or {}
+    assert intake.get("status") == "complete" and not intake.get("bypassed"), \
+        "提案里没记下问诊状态：%r" % (intake,)
+    assert intake.get("answers", {}).get("tone") == "bright-lively", "答案没随提案落盘"
+    must = (data.get("brief") or {}).get("must_have") or []
+    assert any("明亮" in str(x) for x in must), "气质答案没变成 brief 约束：%r" % (must,)
+    # 首个候选应该是明亮活泼档（用户要"亮一点、有精神"）
+    import designkit as DK
+    first = data["candidates"][0]["design"]
+    assert DK._tone_of(first) == DK._TONE_BRIGHT, \
+        "首个候选不是明亮活泼：%r" % (DK._tone_of(first),)
+
+    # ④ --no-intake 放行且留痕
+    work2 = os.path.join(tmp, "work2")
+    r = _run([propose_py, "--brief", "补渲测试", "--script", film,
+              "--work", work2, "--n", "2", "--no-intake", "--json"], tmp)
+    assert r.returncode == 0, "--no-intake 应放行：%s" % (r.stderr or r.stdout)[-300:]
+    data2 = json.loads(r.stdout[r.stdout.find("{"):])
+    assert (data2.get("intake") or {}).get("status") == "bypassed", \
+        "--no-intake 没留 bypassed 痕迹：%r" % (data2.get("intake"),)
+    return "7 题固定 / 没答完必拦 / 答完留痕且首候选明亮活泼 / --no-intake 留痕"
 
 
 def t_duration_target():
@@ -2268,6 +2355,7 @@ CASES = [
     ("67 时长要求真的被接住（brief -> design -> 渲染对账）", t_duration_target),
     ("68 缩放取景的帧间稳定性（抖动回归）", t_zoom_stability),
     ("69 ASR 掉分可定位（lost_top / 最差段落）", t_asr_lost_diagnostics),
+    ("70 出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）", t_intake_gate),
 ]
 
 
