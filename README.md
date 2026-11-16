@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -31,7 +31,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 
 ## 效果：同一个 brief，两次就是两部不同的片（可复现）
 
-向同一个 brief 连续提案两次，配色、母题、转场、配乐、声线、版式轮换、字幕样式都会不同：
+向同一个 brief 连续提案两次，配色、转场、配乐、版式轮换、字幕样式都会不同（母题与声线默认锁定为素净 + 单声线，点名才会变）：
 
 ```bash
 # 第一轮：看 3 个候选并排（每个候选 = 一份完整设计 + 静帧联系表 + 与其它候选的设计距离）
@@ -58,7 +58,7 @@ python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科
 | 版式与字幕可变 | `render.py --stage layout` / `--stage style` | `storyboard.json` 每段的 `layout` 字段；`--stage style` 打印的「版式轮换」与「字幕」行 |
 
 **画面长什么样，由设计决定而不是由"第几套模板"决定**：10 类构图（hero / statement / list / stat /
-compare / process / quote / chapter / chart / outro）× 8 种装饰母题 × 6 种转场 × 连续色相配色 ×
+compare / process / quote / chapter / chart / outro）× 9 种装饰母题（默认素净、不带细线）× 6 种转场 × 连续色相配色 ×
 字幕样式 × 按章节轮换的版式——而且每个候选都要过 `theme_lint` 对比度体检和 G13 剪影可区分门禁。
 
 > 证据是**命令 + 你机器上的实测输出**，不是截图：这份仓库里没有"参考成片"，
@@ -101,7 +101,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，70 条断言，不联网）
+# 2) 环境自检（可选，72 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 7 题一次问完（题材/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -190,7 +190,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（70 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（72 条针对真实缺陷的断言）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘）
   scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
@@ -261,7 +261,7 @@ python tools/ci_check.py -v     # 12 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**70 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**72 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 

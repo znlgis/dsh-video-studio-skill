@@ -146,10 +146,17 @@ trimmed = K.trim_silence(pcm, thresh_db=-42.0, keep_ms=80)   # 不是 trim_tail�
 > tone 的 6 档（hook/body/quote/outro/emphasis/calm）照旧。
 
 ```json
+// 默认（采样器产出的样子）：整片一个旁白，map 的四个 kind 都指向同一个 id
 {"voice": {"id": "zh-CN-YunxiNeural",
-           "map": {"hook": "zh-CN-YunxiaNeural", "body": "zh-CN-YunxiNeural",
-                   "quote": "zh-CN-YunyangNeural", "outro": "zh-CN-YunxiNeural"},
-           "jitter": 0.35, "max_distinct": 3}}
+           "map": {"hook": "zh-CN-YunxiNeural", "body": "zh-CN-YunxiNeural",
+                   "quote": "zh-CN-YunxiNeural", "outro": "zh-CN-YunxiNeural"},
+           "jitter": 0.35, "max_distinct": 1}}
+
+// 用户点名「多人对话 / 访谈 / 广播剧」时的多声线档（仍受 max_distinct 约束）
+// {"id": "zh-CN-YunxiNeural",
+//  "map": {"hook": "zh-CN-YunxiaNeural", "body": "zh-CN-YunxiNeural",
+//          "quote": "zh-CN-YunyangNeural", "outro": "zh-CN-YunxiNeural"},
+//  "jitter": 0.35, "max_distinct": 3}
 ```
 
 ```bash
@@ -163,8 +170,8 @@ python <SKILL_DIR>/scripts/voicekit.py --plan film.json   # 打印逐句声线�
   （`body` 是基准档：lead 0.62 / tail 0.92 / 所有 delta=0）。
 - **内容规则**会自动升级语气：引号句 → quote（并换到 quote 声线）、数字密集 → emphasis、
   问句/感叹 → 稍快稍亮、长句 → 降速加尾部留白；显式 `lines[].voice/tone` 优先级最高。
-- **jitter**（默认 0.35）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感。
-- **governor** 限制全片最多 `max_distinct` 把声音、相邻句不换人 —— 超过就变成广播剧，不是旁白。
+- **jitter**（由设计采样，范围 0.10–0.30；不写则 voicekit 按 0.0 = 无抖动）用 sha1 派生 ±1.5% / ±1Hz / ±0.04s 的微扰，去掉"每句等距等音量"的机械感。
+- **单声线是默认**：采样器只在你明确要求「多人对话 / 访谈 / 广播剧 / 分角色」时才产 `max_distinct >= 2`；其余情况四个 kind 都映射同一个 id，整片只有一个旁白（更不会出现"换个 kind 就换人"）。手改 `voice.map` 永远优先，`lines[].voice` 最高。
 
 **缓存键**：`sha1(v2|text|voice|rate|pitch|volume|trim|trim_db)`。key 必须含 trim——
 不含 trim 时把 `trim_silence` 改成 false 仍会命中裁剪版，"关了裁剪其实没关"。
@@ -475,6 +482,6 @@ D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何
 ### 13.4 改音频代码后的自检清单
 
 1. `python <REPO>/tools/audio_similarity.py --strict` —— A/B/C/D 四组达标（在包根执行）。
-2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **70 条**全 PASS（第 33 条盯内容派生 seed、第 35–38 条盯旁白优先，第 39 条盯音频边界）。
+2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **72 条**全 PASS（第 33 条盯内容派生 seed、第 35–38 条盯旁白优先，第 39 条盯音频边界）。
 3. `python musicgen.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS（musicgen 的 26 项覆盖编排与确定性）。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。

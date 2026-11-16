@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""selfcheck.py — 技能自检 / 回归测试（不联网，10~20 秒内出结论）。
+"""selfcheck.py — 技能自检 / 回归测试（不联网，10~25 秒内出结论）。
 
 跑法：python selfcheck.py [-v]
 
@@ -32,7 +32,8 @@
   26  legacy 已移除：不写 style 必须**报错并给迁移指引**（守的是"旧外观路径真的
       没了"，而不是"精确落回某套老默认值"）
   27  内容指纹：同剧本稳定、改标点不换风格、换题材才换
-  28  声线计划：4 句样片 >=2 把声音，legacy 仍是单声线
+  28  声线计划：默认 4 句样片只用 1 把声音（max_distinct=1）、tone 仍分档；
+      题目点名「多人对话」时必须采到并使用 >= 2 把声音（显式要求才换人）
   29  字体族与主题字幕：换族换缓存键，浅色主题不画黑背板
   30  门禁账本与签核：pass/fail/skipped 三档不许混，签核必须绑内容指纹
   31  阶段新鲜度：改了输入必须报"过时"，不许用旧产物静默出片
@@ -57,7 +58,8 @@
   50  web 风格载荷：style=None 时不得注入 __STYLE__（legacy 必须回落）
   51  金帧回归：与 assets/golden_frames.json 的像素基线比对
   52  场景语法：10 类构图分流、选型确定性、段长降级门
-  53  视觉语言包：8 套结构签名齐全、过体检、彼此不是同一套
+  53  视觉语言包：默认采样必须是 plain + 无 HUD + 不推镜；12 个设计的结构签名互不相同；
+      点名「括角」必须能采到 brackets（素净是默认，不是唯一）
   54  场景类型单真值：grammar / filmcheck / scenes / schema 四处集合相等
   55  剪影可区分（G13）：8 套风格两两之间构图骨架必须能区分
   56  设计 DSL：采样->校验->转计划全通；缺必填块必须报错（fail-closed）；
@@ -69,6 +71,20 @@
       （只跑 --stage frames / --stage sfx 时缺参数会报"找不到设计"，all 被缓存掩盖）
   60  brief 里的要求真的生效：自然语言要解析成 must_have/avoid，
       配色约束按色相窗口生效（早先整句被塞进 topic，"深蓝"采出来是橙色）
+  61  字幕样式可定制（design.visual.subtitle 真的生效）
+  62  片内版式轮换（layout_cycle：换章即换骨架）
+  63  带约束的 brief 不会高概率采样失败
+  64  已删除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）
+  65  design.audio 的音量/音效参数真的落进 script
+  66  片间去重台账（确认记账 / 提案避开 / 可关可查）
+  67  时长要求真的被接住（brief -> duration_target -> 渲染对账）
+  68  缩放取景的帧间稳定性（NEAREST 回归：grain 图案不许整屏错位）
+  69  ASR 掉分可定位（lost_top / 最差段落）
+  70  出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）
+  71  默认设计不画装饰细线：母题层全透明、纹理 none、HUD none；
+      10 类构图的绘制调用里没有 width<4 的 line、没有「长>=40 且厚<=3」的色条
+  72  前景不随镜头位移：`_view` 与 s 无关、push=0 时缩放恒 1.0、
+      标题带连续 30 帧逐字节一致（慢速亚像素位移 -> 1px 台阶的回归护栏）
 
 说明：本文件里 CASES 的**实际条数**是唯一真理，上面的编号表要与它同步。
 这张表落后过两次：停在 43 条而 CASES 已有 51 条、停在 51 条而 CASES 已有 58 条。
@@ -702,12 +718,28 @@ def t_voice_plan():
     assert len(vp) == 4, "计划行数应为 4，收到 %d" % len(vp)
     assert json.dumps(vp, sort_keys=True, default=str) == json.dumps(
         VK.voice_plan(s, plan), sort_keys=True, default=str), "voice_plan 不确定"
-    # persona 身份表已删，声音身份的唯一表示是 edge voice id。
-    # 这里断言"至少 2 个不同的 voice id"——语义与旧 persona 表一致，字段换了。
+    # 默认**单声线**：整片一个旁白（用户要的是播音员，不是广播剧）。
+    # 多声线只在 brief 点名（对话/多人/广播剧…）时采；手改 design.audio.voice.map 也能开。
     voices = {r["voice"] for r in vp}
-    assert len(voices) >= 2, "4 句样片只用了一个声线: %s" % voices
+    assert len(voices) == 1, "默认设计应只有一个旁白声线，实际 %d 个: %s" % (len(voices), voices)
+    assert plan["voice"]["policy"]["max_distinct"] == 1, \
+        "默认设计的 max_distinct 应为 1：%r" % (plan["voice"]["policy"],)
+    d_default = DK.sample_designs({"topic": "AI 大模型"}, n=1, seed=7)[0]
+    assert d_default["audio"]["voice"]["max_distinct"] == 1, \
+        "默认采样仍有多个声线：%r" % (d_default["audio"]["voice"],)
     tones = {r["tone"] for r in vp}
     assert len(tones) >= 2, "语气档没有变化: %s" % tones
+    # 点名要多人声时才允许多声线（且仍受 max_distinct 上限约束）。
+    multi = None
+    # 多声线要求写在题目原文里（must_have 只收五类可识别约束，「多人对话」不是其中一类）。
+    # 点名后**必须**是 2~3 把：不靠碰运气（曾用 1+h%3，点名也可能只采到 1 把）。
+    multi = DK.sample_designs({"topic": "多人对话：三个人聊同一件事"}, n=1, seed=1)[0]
+    assert 2 <= multi["audio"]["voice"]["max_distinct"] <= 3, \
+        "点名多人对话后 max_distinct 应在 2~3：%r" % (multi["audio"]["voice"],)
+    mplan = DK.design_to_plan(multi)
+    mvp = VK.voice_plan(s, mplan)
+    assert len({r["voice"] for r in mvp}) >= 2, \
+        "点名多声线，voice_plan 却只用了 1 把声音：%r" % (mvp,)
     for r in vp:
         for fld in ("voice", "rate", "pitch", "volume", "lead", "tail"):
             assert r.get(fld) not in (None, ""), "计划行缺 %s: %r" % (fld, r.get("id"))
@@ -718,7 +750,8 @@ def t_voice_plan():
     ovp = VK.voice_plan(one, op)
     assert len(ovp) == 1, "单句片应只给一行计划，收到 %d" % len(ovp)
     assert ovp[0]["voice"].endswith("Neural"), "声线应是 edge voice id：%r" % (ovp[0]["voice"],)
-    return "%d 句 / %d 把声音 / %d 档语气" % (len(vp), len(voices), len(tones))
+    return ("%d 句 / 默认 1 把声音（max_distinct=1）/ %d 档语气；点名多人对话 -> %d 把声音"
+            % (len(vp), len(tones), len({r["voice"] for r in mvp})))
 
 
 def t_font_family():
@@ -1596,9 +1629,11 @@ def t_visual_languages():
     import stylekit as ST
     # 没有 8 套内置语言了。验"现场生成的语言"，而且断言更强：
     # 12 个设计的两两结构签名必须互不相同（以前只要求 8 套里 >=6 种母题）。
-    sigs, motifs, transes = {}, set(), set()
+    sigs, motifs, transes, huds, pushes = {}, set(), set(), set(), set()
     designs = DK.sample_designs({"topic": "视觉语言多样性"}, n=12, seed=20260202)
     for d in designs:
+        huds.add(str(d["visual"]["hud"]))
+        pushes.add(float(d["visual"]["motion"]["push"]))
         plan = DK.design_to_plan(d)
         vl = plan["language"]
         bad = ST.visual_lint_language(vl)
@@ -1611,9 +1646,18 @@ def t_visual_languages():
         transes.add(str((vl.get("transition") or {}).get("kind")))
     dup = [v for v in sigs.values() if len(v) > 1]
     assert not dup, "这些设计语言签名完全相同（等于只在换色）: %s" % (dup[:2],)
-    assert len(motifs) >= 6, "12 个设计只用了 %d 种装饰母题：%r" % (len(motifs), sorted(motifs))
-    return "12 个设计 / %d 种母题 / %d 种转场 / 无重复签名" % (
-        len(motifs), len(transes))
+    # 默认必须是素净：默认设计带细线是用户实测反馈的缺陷，不是可选项。
+    assert motifs == {"plain"}, "默认采样出现了非素净母题：%r" % (sorted(motifs),)
+    assert huds == {"none"}, "默认采样又带上了 HUD（顶部细进度条）：%r" % (sorted(huds),)
+    assert pushes == {0.0}, "默认采样又在推镜（慢速亚像素位移 = 抖动）：%r" % (sorted(pushes),)
+    assert len(transes) >= 4, "12 个设计只用到 %d 种转场" % len(transes)
+    # 显式点名装饰母题时必须能采到（素净是默认，不是唯一）。
+    picked = DK.sample_designs({"topic": "视觉语言多样性", "must_have": ["括角"]},
+                               n=1, seed=20260203)[0]
+    assert picked["visual"]["motif"]["kind"] == "brackets", \
+        "点名「括角」却没采到 brackets：%r" % (picked["visual"]["motif"],)
+    return "12 个设计 / 默认 plain+none+不推镜 / %d 种转场 / 无重复签名 / 点名母题生效" % (
+        len(transes))
 
 
 def t_scene_types_single_truth():
@@ -2285,6 +2329,208 @@ def t_asr_lost_diagnostics():
         len(rep["lost_top"]), len(lost_lines), len(rep.get("warnings") or []))
 
 
+
+# ---------------------------------------------------------------- 细线 / 抖动护栏
+# 这两条守的是两条产品约束（不是「看着还行」）：
+#   ① 默认设计不画任何装饰细线（母题、底纹、HUD 顶栏都是细线来源）；
+#   ② 默认设计前景不动（相机只推背景，文字按整像素落位）。
+# 为什么用结构性记录而不是逐像素扫描：1px 线在压缩后只剩 1~2 灰阶，像素判据抓不稳；
+# 而「谁调了 line(width=1)」是确定的，回归时能直接点名是哪个构图。
+
+def _plain_scene(stype):
+    """一条覆盖 10 类构图所需字段的场景（自检专用，给定 seed 下可复现）。"""
+    return {
+        "id": "sc_" + stype, "kind": "body", "scene_type": stype,
+        "scene_variant": 0, "scene_decor": 2, "scene_layout": "left-stack",
+        "text": "这是一句用于验证的说明文字", "big": "零素材，全代码生成",
+        "sub": "确定性逐帧，可复现，可验收", "chapter": "02 · 正文", "kicker": "02 · 正文",
+        "start": 0.0, "end": 12.0, "dur": 12.0,
+        "items": [{"text": "第一条：时间基准先算死"}, {"text": "第二条：内容与风格解耦"},
+                  {"text": "第三条：音频实测反推时间"}],
+        "quote": "观众最先察觉的瑕疵是字幕漂移", "by": "复盘",
+        "_stats": [{"value": "338207", "unit": "次", "label": "工具调用"}],
+        "_series": [{"value": 38, "label": "写作"}, {"value": 27, "label": "渲染"},
+                    {"value": 19, "label": "质检"}, {"value": 16, "label": "其他"}],
+        "_steps": [{"label": "写"}, {"label": "测"}, {"label": "渲"}, {"label": "检"}],
+        "_sides": {"left": {"head": "旧", "items": ["按字数估时"]},
+                   "right": {"head": "新", "items": ["实测时长"]}},
+    }
+
+
+def _rect(xy):
+    """ImageDraw 的 xy 可能是扁平列表（[x0,y0,x1,y1]）也可能是点对列表。"""
+    if not xy:
+        return (0, 0, 0, 0)
+    if isinstance(xy[0], (int, float)):
+        pts = [(xy[i], xy[i + 1]) for i in range(0, len(xy) - 1, 2)]
+    else:
+        pts = list(xy)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _record_draws(mod, fn):
+    """在绘制调用层记录 line / rectangle（text / ellipse 原样透传）。"""
+    from PIL import ImageDraw
+    log = []
+    orig = ImageDraw.Draw
+
+    class _Rec(object):
+        def __init__(self, inner):
+            self._inner = inner
+
+        def line(self, xy, fill=None, width=1, joint=None):
+            log.append(("line", int(width), _rect(xy)))
+            return self._inner.line(xy, fill=fill, width=width, joint=joint)
+
+        def rectangle(self, xy, fill=None, outline=None, width=1):
+            log.append(("rect", int(width), _rect(xy), bool(outline)))
+            return self._inner.rectangle(xy, fill=fill, outline=outline, width=width)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def _make(img, mode=None):
+        return _Rec(orig(img, mode)) if mode else _Rec(orig(img))
+
+    mod.ImageDraw.Draw = _make
+    try:
+        fn()
+    finally:
+        mod.ImageDraw.Draw = orig
+    return log
+def _thin_strokes(mod, script, frame=180, stypes=None):
+    """扫 10 类构图的绘制调用，返回 (细线, 细长色条)。
+
+    细线 = line 的 width < 4；细长色条 = 无 outline 的填充矩形且「长 >= 40 且厚 <= 3」。
+    两档都按**调用参数**判，不靠像素扫描：1px 线压缩后只剩 1~2 灰阶，像素判据抓不稳。
+    """
+    bad_lines, bad_rects = [], []
+    for stype in (stypes or ("hero", "statement", "list", "stat", "compare",
+                             "process", "quote", "chapter", "chart", "outro")):
+        scene = _plain_scene(stype)
+        log = _record_draws(mod, lambda: mod.draw_frame(scene, 6.0, 12.0, 6.0, script, frame))
+        for rec in log:
+            if rec[0] == "line" and rec[1] < 4:
+                bad_lines.append((stype, rec[1], rec[2]))
+            elif rec[0] == "rect" and not rec[3]:
+                x0, y0, x1, y1 = rec[2]
+                w, h = abs(x1 - x0), abs(y1 - y0)
+                if (w >= 40 and h <= 3) or (h >= 40 and w <= 3):
+                    bad_rects.append((stype, (w, h), rec[2]))
+    return bad_lines, bad_rects
+
+
+def t_plain_design_has_no_hairlines():
+    """71 默认设计不画装饰细线（母题/底纹/HUD 顶栏三条来源全关）。
+
+    用户原话是「默认带着一些细线」：括角刻度 1px、hairlines 页眉、letterbox 内缘、
+    底纹 grid/scanlines、chip-left 的通栏进度条（3px 细线 / 现为 6px 块）。这条按**绘制调用**守：
+      a) 默认采样落 plain（母题层整层透明、纹理为 none、HUD 为 none）；
+      b) plain 下任何 line 的 width >= 4，且没有「长 >= 40 且厚 <= 3」的填充矩形；
+      c) 显式打开 HUD（chip-left / corner-line）时同样不许有细线；
+      d) 遮幅（letterbox）的黑边不随 push 缩放（push=0.12 下高度恒 40px）。
+    """
+    import numpy as np
+    import designkit as DK
+    mod = _load_scenes_mod()
+    if mod is None:
+        return "skip（没有 assets/scenes.py）"
+    d = DK.sample_designs({"topic": "细线护栏"}, n=1, seed=20261116)[0]
+    assert d["visual"]["motif"]["kind"] == "plain", \
+        "默认母题不是 plain：%r" % (d["visual"]["motif"],)
+    assert d["visual"]["hud"] == "none", "默认 HUD 不是 none：%r" % (d["visual"]["hud"],)
+    plan = DK.design_to_plan(d)
+    th = plan["theme"]
+    assert th["texture"] == "none" and not th["texture_alpha"], \
+        "默认设计仍叠了背景纹理：%r" % (th["texture"],)
+    lang = plan["language"]
+    assert mod._decor_scale(_plain_scene("hero"), lang) <= 0.02, \
+        "plain 的装饰强度不为 0：%r" % mod._decor_scale(_plain_scene("hero"), lang)
+    lay = mod._motif_layer(th, lang)
+    assert lay.getextrema()[3] == (0, 0), "plain 的装饰层不是全透明"
+    # 零密度对 plain 必须是合法默认（素净就是「不画装饰」），不能被 lint 当成配置错误。
+    import copy as _copy
+    zero = _copy.deepcopy(d)
+    zero["visual"]["motif"]["density"] = 0.0
+    probs = DK.validate_design(zero)
+    assert not probs, "plain + density=0 被判非法：%r" % (probs[:2],)
+
+    script = {"title": "细线护栏", "_style": plan, "_total": 12.0}
+    bad_lines, bad_rects = _thin_strokes(mod, script, 180)
+    assert not bad_lines, "默认设计画了 %d 条细线（width<4）：%s" % (
+        len(bad_lines), bad_lines[:3])
+    assert not bad_rects, "默认设计画了 %d 条细长色条（厚<=3px）：%s" % (
+        len(bad_rects), bad_rects[:3])
+
+    # HUD 不是"默认关了就没人用"的例外：显式打开 corner-line 时，它的 2px 角线也必须
+    # 过 _lw（素净下抬到 6px）。这条曾经漏掉——_hud 不接 lang，corner-line 仍是 2px。
+    import copy as _copy2
+    for hud in ("chip-left", "corner-line"):
+        d2 = _copy2.deepcopy(d)
+        d2["visual"]["hud"] = hud
+        p2 = DK.design_to_plan(d2)
+        s2 = {"title": "细线护栏", "_style": p2, "_total": 12.0}
+        bl2, br2 = _thin_strokes(mod, s2, 180)
+        assert not bl2 and not br2, \
+            "素净 + hud=%s 仍有细线：%r %r" % (hud, bl2[:2], br2[:2])
+
+    # 遮幅黑边是"画幅"，不许跟着 push 缩放（实测 40px 会被放大成 0px）。
+    d3 = _copy2.deepcopy(d)
+    d3["visual"]["motif"] = {"kind": "letterbox", "density": 0.85, "detail": {}}
+    d3["visual"]["motion"]["push"] = 0.12
+    p3 = DK.design_to_plan(d3)
+    s3 = {"title": "遮幅", "_style": p3, "_total": 12.0}
+    bars = []
+    for t in (1.0, 6.0, 11.0):
+        img = mod.draw_frame(_plain_scene("hero"), t, 12.0, t, s3, int(t * 30))
+        arr = np.asarray(img, dtype=np.uint8)[:, 960, :].mean(axis=1)
+        bars.append(int((arr[:200] < 6).sum()))
+    assert bars == [40, 40, 40], "push 时遮幅高度漂了：%r（应恒为 40）" % (bars,)
+    return ("10 类构图：plain 无装饰层 / 无底纹 / 无线宽<4 / 无细长色条；"
+            "corner-line 也无线；遮幅在 push=0.12 下恒 40px")
+
+
+def t_foreground_pinned():
+    """72 前景不随镜头位移（抖动的根因是慢速亚像素位移 + 整数取整，不是运动本身）。
+
+    实测：push=0.14 的 4 秒段里文字锚点每秒跳 12 次，一次跳跃 5000+ 像素差 >40 灰阶；
+    push=0.02 也有 0.67 次/秒 —— 观众感知到的就是「画面在抖」。
+    修法不是把相机调慢（越慢越糟），而是让**前景不跟相机**：文字按整像素落位，
+    只有背景板做端点预烘 + blend 的平滑缩放。这条守三件事：
+      a) `_view` 对任何 s 都返回同一组前景坐标（结构级）；
+      b) push=0 时 `_push_scale` 恒为 1.0（默认不推镜）；
+      c) 光栅级：statement 标题带连续 30 帧逐字节一致（取整台阶的最终护栏）。
+    """
+    import numpy as np
+    import designkit as DK
+    mod = _load_scenes_mod()
+    if mod is None:
+        return "skip（没有 assets/scenes.py）"
+    d = DK.sample_designs({"topic": "抖动护栏"}, n=1, seed=20261116)[0]
+    plan = DK.design_to_plan(d)
+    th = plan["theme"]
+    coords = {(mod._view(th, s).x(300.0), mod._view(th, s).y(241.0))
+              for s in (1.0, 1.02, 1.06, 1.10, 1.14)}
+    assert len(coords) == 1, "前景坐标仍随镜头缩放变化：%r" % (sorted(coords),)
+    assert mod._push_scale(th, 0.0, 10.0) == 1.0, "push=0 时缩放不是 1.0"
+    script = {"title": "抖动护栏", "_style": plan, "_total": 12.0}
+    scene = _plain_scene("statement")
+    ref = None
+    for i in range(30):
+        t = 5.0 + i / 30.0
+        img = mod.draw_frame(scene, t, 12.0, t, script, int(t * 30))
+        band = np.asarray(img, dtype=np.uint8)[430:600, 120:1500]
+        if ref is None:
+            ref = band
+        elif not np.array_equal(ref, band):
+            diff = np.abs(ref.astype(np.int16) - band.astype(np.int16))
+            raise AssertionError(
+                "同一段静止画面前景在动：第 %d 帧标题带最大差 %d 灰阶（>0）"
+                % (i, int(diff.max())))
+    return "前景坐标与 s 无关；push=0 恒 1.0；statement 标题带 30 帧逐字节一致"
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2356,6 +2602,8 @@ CASES = [
     ("68 缩放取景的帧间稳定性（抖动回归）", t_zoom_stability),
     ("69 ASR 掉分可定位（lost_top / 最差段落）", t_asr_lost_diagnostics),
     ("70 出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）", t_intake_gate),
+    ("71 默认设计不画装饰细线（母题/底纹/HUD 全关）", t_plain_design_has_no_hairlines),
+    ("72 前景不随镜头位移（1px 台阶回归）", t_foreground_pinned),
 ]
 
 

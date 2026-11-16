@@ -4,7 +4,8 @@
 ⚠ 这**不是**给用户拷走改的模板：render.py 不写 --scenes 时会自动回落到本文件，
 用户工程目录里只需要一个 film.json。想改画面时，在剧本同目录放一个自己的 scenes.py
 （或 --scenes 显式指定），它会被优先发现；本文件就是那份自写场景的**参考实现**：
-10 类构图 / 8 种母题 / 6 种转场 / 35 字段主题 / 版式轮换 / 字幕参数全部从计划里读。
+10 类构图 / 9 种母题（默认 plain：不画装饰细线）/ 6 种转场 / 35 字段主题 / 版式轮换 / 字幕参数
+全部从计划里读。
 
 唯一约定：提供 draw_frame(scene, t_local, dur, t_global, script, frame) -> PIL.Image
   scene   : timeline.json 里的一段（含 id/text/sub/start/end/dur 与 grammar 注入的
@@ -248,7 +249,9 @@ _LEGACY_DRAWERS = {
 
 _PLAN_CACHE = {}
 _THEME_WARNED = set()
-_DEFAULT_PUSH = 0.04
+# 默认不推镜。慢速推镜在整数光栅上必然抖：4% 的推镜摊到 8 秒 = 0.03px/帧，
+# 取整后变成「每 5 帧跳 1px」，观众看到的是抖而不是推（见 _view 的注释）。
+_DEFAULT_PUSH = 0.0
 
 
 def _warn_once(key, msg):
@@ -446,7 +449,7 @@ def _fit_size(text, max_w, size, weight, th, floor=16):
     return s
 
 
-# ---------------- 镜头缓推 + 前景视差 ----------------
+# ---------------- 镜头缓推（只推背景）+ 前景锁定 ----------------
 
 class _View(object):
     """设计坐标 -> 帧坐标。
@@ -454,7 +457,8 @@ class _View(object):
     为什么不是整帧重采样：实测 1080p 双线性整帧变换 29ms/帧（预算 15ms），
     而整帧按 push 放大又会把 150px 边距的内容推出 SAFE。所以分两层：
       背景层做**真缩放**（端点预烘 + blend，约 4.4ms，见 _plate_zoom/_bg_plate）；
-      前景层做同向**视差**（0.35x，位置与卡片尺寸随镜头收放，字形不重采样保清晰）。
+      前景层**不进相机**（`_view` 恒 1.0）：整像素落位就不会被 1px 台阶抖碎，
+      慢速亚像素位移在 1x 光栅上只能靠超采样解决，而超采样超单帧预算。
     """
     __slots__ = ("s", "cx", "cy")
 
@@ -480,7 +484,30 @@ def _push_scale(th, t_local, dur):
 
 
 def _view(th, s_bg):
-    return _View(1.0 + (s_bg - 1.0) * 0.35)
+    """前景锁定：只有背景板随镜头缩放，前景永远按整像素落位。
+
+    为什么前景不再跟镜头：`_View.x/y` 是 int(round())，而镜头推 4% 时前景总位移
+    只有 7px，摊到 8 秒就是 0.03px/帧 —— 取整后是「每 5 帧整体跳 1px」，实测一次跳跃
+    就有 5000+ 个像素差 >40 灰阶，观众看到的是抖动而不是推镜。纯慢速亚像素位移在
+    1x 光栅上无法免费消除（要 4x 超采样，超单帧预算 15ms），所以本版把相机改成
+    「只推背景」：静止的整像素文字永远不会抖，背景有端点预烘 + blend 兜底（0~1 灰阶）。
+    要整幅推镜请在自己的 scenes.py 里做超采样，别把慢速位移塞回这条路径。
+    """
+    return _View(1.0)
+
+
+_PLAIN_LINE = 6
+
+
+def _plain(lang):
+    """本片是否是「素净」设计（默认）：不画任何装饰细线。"""
+    return str(((lang or {}).get("motif") or {}).get("kind") or "") == "plain"
+
+
+def _lw(width, lang):
+    """装饰描边的粗细：素净设计下一律抬到 _PLAIN_LINE，其余设计保持原值。"""
+    w = int(width)
+    return _PLAIN_LINE if _plain(lang) and w < _PLAIN_LINE else w
 
 
 # ---------------- 背景：按主题烘焙一次（渐变 + 材质 + 颗粒 + 暗角） ----------------
@@ -776,23 +803,28 @@ def _entrance_y(th, p):
 # 二、HUD（三档：chip-left / corner-line / none）
 # ============================================================================
 
-def _hud(img, th, chapter, progress, title):
-    style = str(th.get("hud") or "chip-left")
+def _hud(img, th, chapter, progress, title, lang=None):
+    style = str(th.get("hud") or "none")
     if style == "none":
         return img
     accent = th["accent"]
     rule = th["rule"]
     ink = th["ink"]
     prog = clamp(progress)
+    # 遮幅设计里顶部 40px 是黑边：HUD 整体下移，别把胶囊/角线压在黑边上（实测会压）。
+    mf = (lang or {}).get("motif") or {}
+    oy = int((mf.get("detail") or {}).get("top") or 40) \
+        if str(mf.get("kind") or "") == "letterbox" else 0
     d = ImageDraw.Draw(img, "RGBA")
     if style == "chip-left":
-        d.rectangle([0, 0, W, 3], fill=_rgba(rule, 14))
-        d.rectangle([0, 0, int(W * prog), 3], fill=_rgba(accent, 255))
+        # 通栏进度条按"块"画（6px），不按 1~3px 细线画：细线在压缩后最容易显脏。
+        d.rectangle([0, 0, W, 6], fill=_rgba(rule, 14))
+        d.rectangle([0, 0, int(W * prog), 6], fill=_rgba(accent, 255))
         cs = int(th["scale"]["chip"][0])
         tw = _text_w(chapter, cs, "reg", th)
         pad_l, pad_r = 16, 18
         h = int(cs * 1.95)
-        x0, y0 = 64, 42
+        x0, y0 = 64, 42 + oy
         x1 = x0 + pad_l + tw + pad_r
         fillc = _mix(th["surface"], th["bg"], 0.55)
         d.rounded_rectangle([x0, y0, x1, y0 + h], radius=h // 2,
@@ -803,21 +835,21 @@ def _hud(img, th, chapter, progress, title):
                font=_font(th, cs, "reg"), fill=_rgba(ink, 228))
         bs = int(th["scale"]["brand"][0])
         tw2 = _text_w(title, bs, "reg", th)
-        d.text((W - 64 - tw2, 56), title, font=_font(th, bs, "reg"),
+        d.text((W - 64 - tw2, 56 + oy), title, font=_font(th, bs, "reg"),
                fill=_rgba(_mix(ink, th["bg"], 0.62), 220))
         return img
-    # corner-line：只有角标与细线，没有胶囊底
-    d.rectangle([0, 0, W, 3], fill=_rgba(rule, 10))
-    d.rectangle([0, 0, int(W * prog), 2], fill=_rgba(accent, 214))
-    d.line([64, 44, 64, 96], fill=_rgba(accent, 190), width=2)
-    d.line([64, 44, 116, 44], fill=_rgba(accent, 190), width=2)
+    # corner-line：只有角标与细线，没有胶囊底（细线也要过 _lw：素净下不许出现 2px 线）
+    d.rectangle([0, 0, W, 6], fill=_rgba(rule, 10))
+    d.rectangle([0, 0, int(W * prog), 6], fill=_rgba(accent, 214))
+    d.line([64, 44 + oy, 64, 96 + oy], fill=_rgba(accent, 190), width=_lw(2, lang))
+    d.line([64, 44 + oy, 116, 44 + oy], fill=_rgba(accent, 190), width=_lw(2, lang))
     cs = int(th["scale"]["chip"][0])
-    d.text((84, 54), chapter, font=_font(th, cs, "reg"), fill=_rgba(ink, 220))
+    d.text((84, 54 + oy), chapter, font=_font(th, cs, "reg"), fill=_rgba(ink, 220))
     bs = int(th["scale"]["brand"][0])
     tw = _text_w(title, bs, "reg", th)
-    d.text((W - 64 - tw, 56), title, font=_font(th, bs, "reg"), fill=_rgba(ink, 120))
-    d.line([W - 64, 44, W - 64 - 96, 44], fill=_rgba(accent, 120), width=2)
-    d.line([W - 64, 44, W - 64, 96], fill=_rgba(accent, 120), width=2)
+    d.text((W - 64 - tw, 56 + oy), title, font=_font(th, bs, "reg"), fill=_rgba(ink, 120))
+    d.line([W - 64, 44 + oy, W - 64 - 96, 44 + oy], fill=_rgba(accent, 120), width=_lw(2, lang))
+    d.line([W - 64, 44 + oy, W - 64, 96 + oy], fill=_rgba(accent, 120), width=_lw(2, lang))
     return img
 
 
@@ -844,8 +876,8 @@ def _hud(img, th, chapter, progress, title):
 # ---------------- 视觉语言 / 场景字段 ----------------
 
 _DEFAULT_LANG = {
-    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.04, "breathe_hz": 0.85},
-    "motif": {"kind": "minimal", "density": 0.0, "detail": {}},
+    "motion": {"ease": "out3", "enter": (0.45, 0.85), "push": 0.0, "breathe_hz": 0.85},
+    "motif": {"kind": "plain", "density": 0.0, "detail": {}},
     "transition": {"kind": "cut", "dur": 0.0},
     "typography": {"tracking": 0.0, "line_gap": 1.30, "align": "left",
                    "number": "dim", "ratio": 1.50},
@@ -876,14 +908,21 @@ def _scene_type(scene):
             "emphasis": "statement", "calm": "statement"}.get(kind, "list")
 
 
-def _decor_scale(scene, lang):
-    """装饰强度 = 片内密度档（0/1/2 -> 0.55/0.75/1.0）× 该风格母题密度。"""
+def _decor_level(scene):
+    """本段的装饰密度档（0/1/2）。容错：脏数据当 0，绝不让 int() 把整帧渲染炸掉。"""
     try:
         lvl = int(scene.get("scene_decor") or 0)
     except (TypeError, ValueError, OverflowError):
-        lvl = 0
-    lvl = max(0, min(2, lvl))
-    base = _DECOR_LEVELS[lvl]
+        return 0
+    return max(0, min(2, lvl))
+
+
+def _decor_scale(scene, lang):
+    """装饰强度 = 片内密度档（0/1/2 -> 0.55/0.75/1.0）× 该风格母题密度。"""
+    if _plain(lang):
+        # 素净母题：装饰层整层不画（细线、网格、纹理都是装饰，默认设计里一个都不要）。
+        return 0.0
+    base = _DECOR_LEVELS[_decor_level(scene)]
     dens = float((lang.get("motif") or {}).get("density") or 1.0)
     return base * dens
 
@@ -972,9 +1011,14 @@ def _motif_layer(th, lang):
     got = _CACHE.get(key)
     if got is not None:
         return got
-    kind = str(mf.get("kind") or "minimal")
+    kind = str(mf.get("kind") or "plain")
     det = mf.get("detail") or {}
     dens = float(mf.get("density") or 0.0)
+    if kind == "plain":
+        # 素净：装饰层就是细线的来源，整层透明（下游 paste 是空操作，不必特判）。
+        lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        _CACHE[key] = lay
+        return lay
     lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(lay, "RGBA")
     accent = th["accent"]
@@ -1049,15 +1093,9 @@ def _motif_layer(th, lang):
         d.rectangle([W // 2 - 600, 700, W // 2 + 600, 702], fill=_rgba(rule, a(200 * dens)))
         d.rectangle([W // 2 - 120, 742, W // 2 + 120, 743], fill=_rgba(rule, a(90 * dens)))
     elif kind == "letterbox":
-        # 电影：上下遮幅（画幅外一律黑），内缘一条 1px 亮线
-        top = int(det.get("top") or 40)
-        bot = int(det.get("bottom") or 44)
-        d.rectangle([0, 0, W, top], fill=(0, 0, 0, 255))
-        d.rectangle([0, H - bot, W, H], fill=(0, 0, 0, 255))
-        d.rectangle([0, top, W, top + 1], fill=_rgba(rule, a(40 * dens)))
-        d.rectangle([0, H - bot - 1, W, H - bot], fill=_rgba(rule, a(40 * dens)))
-        if det.get("flares"):
-            img = Image.fromarray(np.zeros((2, 2, 4), dtype=np.uint8), "RGBA")
+        # 电影遮幅：黑边由 _letterbox_overlay 在**缩放之后**贴（画幅不随镜头缩放）。
+        # 这里不画任何东西——黑边若烘进底版会跟着 push 一起放大（实测 40px -> 0px）。
+        pass
     elif kind == "signal":
         # lo-fi：底部 12 格信号条 + 时间戳位
         bars = int(det.get("bars") or 12)
@@ -1096,7 +1134,7 @@ def _plate(th, lang, scene, s_bg):
 
     这是单帧预算里最大的一处优化：装饰是静态的，逐帧单独 paste 一张全屏 RGBA 要 5.6ms，
     合成进底版后逐帧只剩 copy（1.3ms）或端点 blend 取景（约 4.4ms，见 _plate_zoom）。
-    顺带一个好处：镜头缓推现在会把装饰一起推——装饰本来就该跟着镜头走，
+    顺带一个好处：镜头缓推现在会把装饰一起推（**仅非素净母题**；素净下装饰层整层不画）——装饰本来就该跟着镜头走，
     以前"背景推、装饰不动"在强 push 的风格（cinema 0.12 / epic 0.14）里其实是穿帮。
 
     缓存：一个片子只用一套主题 + 一套母题，密度档最多 3 档 -> 最多 3 张底版（约 18MB）。
@@ -1104,11 +1142,12 @@ def _plate(th, lang, scene, s_bg):
     """
     base = _bg(th)
     if _decor_scale(scene, lang) <= 0.02:
-        if s_bg <= 1.0008:
-            return base.copy()
-        return _bg_plate(th, s_bg)
-    key = _hashable(("plate", _motif_key(th, lang),
-                     int(max(0, min(2, int(scene.get("scene_decor") or 0))))))
+        out = base.copy() if s_bg <= 1.0008 else _bg_plate(th, s_bg)
+        bar = _letterbox_overlay(th, lang, scene)   # 遮幅与装饰密度无关：画幅永远在
+        if bar is not None:
+            out.paste(bar, (0, 0), bar)
+        return out
+    key = _hashable(("plate", _motif_key(th, lang), _decor_level(scene)))
     got = _CACHE.get(key)
     if got is None:
         lay = _motif_layer(th, lang)
@@ -1120,7 +1159,36 @@ def _plate(th, lang, scene, s_bg):
             old = _PLATE_ORDER.pop(0)
             if old != key:
                 _CACHE.pop(old, None)
-    return _plate_zoom(got, s_bg, th, _zoom_tag(th, key))
+    out = _plate_zoom(got, s_bg, th, _zoom_tag(th, key))
+    # 遮幅（letterbox）的黑边是"画幅"，不随镜头缩放：缩放后再贴一层固定 overlay。
+    # 否则 push=0.12 时 40px 黑边会被放大成 0px，画幅直接失效（实测）。
+    bar = _letterbox_overlay(th, lang, scene)
+    if bar is not None:
+        out.paste(bar, (0, 0), bar)
+    return out
+
+
+def _letterbox_overlay(th, lang, scene):
+    """letterbox 母题的固定黑边层（缓存）；非 letterbox 返回 None。"""
+    mf = (lang or {}).get("motif") or {}
+    if str(mf.get("kind") or "") != "letterbox":
+        return None
+    key = _hashable(("letterbox", _motif_key(th, lang), _decor_level(scene)))
+    got = _CACHE.get(key)
+    if got is not None:
+        return got
+    det = mf.get("detail") or {}
+    top = int(det.get("top") or 40)
+    bot = int(det.get("bottom") or 44)
+    dens = float(mf.get("density") or 1.0) * _DECOR_LEVELS[_decor_level(scene)]
+    lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(lay, "RGBA")
+    d.rectangle([0, 0, W, top], fill=(0, 0, 0, 255))
+    d.rectangle([0, H - bot, W, H], fill=(0, 0, 0, 255))
+    d.rectangle([0, top, W, top + 1], fill=_rgba(th["rule"], int(40 * dens)))
+    d.rectangle([0, H - bot - 1, W, H - bot], fill=_rgba(th["rule"], int(40 * dens)))
+    _CACHE[key] = lay
+    return lay
 
 
 def _apply_motif(img, th, lang, scene):
@@ -1244,14 +1312,16 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
 
 
     # 持续动态：背景里缓慢扩散的同心弧（每套风格都在动，但颜色/透明度随主题）
-    p_ring = smooth(rng(t, 0.15, 2.4))
-    d = ImageDraw.Draw(img, "RGBA")
-    cx, cy = (ax, 470.0) if align != "center" else (W * 0.5, 430.0)
-    for i in range(3):
-        rr = (120.0 + 260.0 * i) * (0.4 + 0.6 * p_ring)
-        d.arc([v.x(cx - rr), v.y(cy - rr * 0.62), v.x(cx + rr), v.y(cy + rr * 0.62)],
-              start=int(200 + i * 40), end=int(340 + i * 40),
-              fill=_rgba(th["accent"], int(46 * p_ring)), width=2)
+    # 同心弧是细线装饰：素净设计里不画（「默认没有细线」是产品约束，不是审美建议）。
+    if not _plain(lang):
+        p_ring = smooth(rng(t, 0.15, 2.4))
+        d = ImageDraw.Draw(img, "RGBA")
+        cx, cy = (ax, 470.0) if align != "center" else (W * 0.5, 430.0)
+        for i in range(3):
+            rr = (120.0 + 260.0 * i) * (0.4 + 0.6 * p_ring)
+            d.arc([v.x(cx - rr), v.y(cy - rr * 0.62), v.x(cx + rr), v.y(cy + rr * 0.62)],
+                  start=int(200 + i * 40), end=int(340 + i * 40),
+                  fill=_rgba(th["accent"], int(46 * p_ring)), width=2)
 
     size = int(th["scale"]["display"][0])
     big = scene.get("big") or script.get("title") or ""
@@ -1307,11 +1377,11 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
         lx = ax if align == "left" else (ax - line_w if align == "right" else ax - line_w // 2)
         ImageDraw.Draw(img, "RGBA").line(
             [v.x(lx), v.y(line_y), v.x(lx + line_w), v.y(line_y)],
-            fill=_rgba(th["accent"], 190), width=3)
+            fill=_rgba(th["accent"], 190), width=_lw(3, lang))
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "01 · 开场", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 2) statement 金句（居中大字，无卡片） ----------------
@@ -1366,7 +1436,7 @@ def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
         d = ImageDraw.Draw(img, "RGBA")
         x0 = W * 0.5 - ul_w * 0.5
         d.line([v.x(x0), v.y(ul_y), v.x(x0 + ul_w), v.y(ul_y)],
-               fill=_rgba(th["accent"], 170), width=3)
+               fill=_rgba(th["accent"], 170), width=_lw(3, lang))
 
     sub = scene.get("sub") or ""
     if sub and (str(sub).strip() == str(big).strip()
@@ -1382,7 +1452,7 @@ def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 3) list 要点（左标题 + 右条目 / 全宽序号列） ----------------
@@ -1453,7 +1523,7 @@ def _draw_list(scene, t, dur, tg, script, frame, plan, th):
     if not items:
         img = _apply_veil(img, th, lang, scene, t, s_bg)
         return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                    script.get("title", ""))
+                script.get("title", ""), lang)
 
     # 条目几何：全宽模式一行一条；双栏模式按行距排
     top = max(panel_y, sub_bottom + int(bsize * 0.45)) if full else panel_y
@@ -1485,9 +1555,10 @@ def _draw_list(scene, t, dur, tg, script, frame, plan, th):
         if is_focus:
             d.rectangle([v.x(panel_x - 26), v.y(yy + 8), v.x(panel_x - 20), v.y(yy + row_h - 18)],
                         fill=_rgba(th["accent"], int(190 * alpha)))
-            d.rectangle([v.x(panel_x - 14), v.y(yy + row_h - 14), v.x(panel_x + panel_w),
-                         v.y(yy + row_h - 12)],
-                        fill=_rgba(th["rule"], int(26 * alpha)))
+            if not _plain(lang):
+                d.rectangle([v.x(panel_x - 14), v.y(yy + row_h - 14), v.x(panel_x + panel_w),
+                             v.y(yy + row_h - 12)],
+                            fill=_rgba(th["rule"], int(26 * alpha)))
         col = th["good"] if ok else th["bad"]
         img = _soft_dot(img, v.x(panel_x + 12), v.y(yy + row_h * 0.5),
                         7.0 + 1.4 * math.sin(2.0 * t + i + ph), col, 0.95 * alpha)
@@ -1508,7 +1579,7 @@ def _draw_list(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 4) stat 数字卡（巨数字 count-up） ----------------
@@ -1609,7 +1680,7 @@ def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 5) compare 左右对比（中缝 + 双栏） ----------------
@@ -1649,10 +1720,10 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
     half = (y_bot - y_top) * 0.5 * pg
     d = ImageDraw.Draw(img, "RGBA")
     d.line([v.x(mid_x), v.y(cy - half), v.x(mid_x), v.y(cy + half)],
-           fill=_rgba(th["rule"], 90), width=2)
-    # 持续动态：中缝上缓慢下扫的高光
+           fill=_rgba(th["rule"], 90), width=_lw(2, lang))
+    # 扫描高光是一条横细线：素净设计里不画（两栏交替高亮已经是持续动态了）。
     scan = cy - half + 2.0 * half * (0.5 + 0.5 * math.sin(0.6 * t + ph))
-    if abs(scan - cy) <= half:
+    if not _plain(lang) and abs(scan - cy) <= half:
         d.line([v.x(mid_x - 90), v.y(scan), v.x(mid_x + 90), v.y(scan)],
                fill=_rgba(th["accent"], 40), width=2)
 
@@ -1677,7 +1748,7 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
                        "bold", th["accent"], "left", ph2)
             ImageDraw.Draw(img, "RGBA").line(
                 [v.x(x0), v.y(y_start - 48.0), v.x(x0 + ww * ph2), v.y(y_start - 48.0)],
-                fill=_rgba(th["accent"], 130), width=2)
+                fill=_rgba(th["accent"], 130), width=_lw(2, lang))
         for i, txt in enumerate(its[:3]):
             pi = ease(rng(t, 0.42 + 0.22 * i, 1.05 + 0.22 * i))
             if pi <= 0:
@@ -1700,13 +1771,14 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
         cyv = 250.0
         ImageDraw.Draw(img, "RGBA").rectangle(
             [v.x(mid_x - vw * 0.5 - 22), v.y(cyv - 8), v.x(mid_x + vw * 0.5 + 22), v.y(cyv + 44)],
-            fill=_rgba(th["surface"], int(220 * pv)), outline=_rgba(th["accent"], int(180 * pv)))
+            fill=_rgba(th["surface"], int(220 * pv)),
+            outline=None if _plain(lang) else _rgba(th["accent"], int(180 * pv)))
         _draw_text(img, th, v, "VS", mid_x - vw * 0.5, cyv, vs_size, "bold",
                    th["accent"], "left", pv)
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 6) process 流程轴 ----------------
@@ -1743,7 +1815,7 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
     pg = ease(rng(t, 0.10, 0.90))
     d = ImageDraw.Draw(img, "RGBA")
     d.line([v.x(x0), v.y(ay), v.x(x0 + (x1 - x0) * pg), v.y(ay)],
-           fill=_rgba(th["rule"], 70), width=2)
+           fill=_rgba(th["rule"], 70), width=_lw(2, lang))
     for i in range(n):
         st = steps[i]
         pn = ease(rng(t, 0.35 + 0.18 * i, 1.05 + 0.18 * i))
@@ -1751,8 +1823,14 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
             continue
         cx = x0 + gapx * i
         r = 14.0 * pn
-        d.ellipse([v.x(cx - r), v.y(ay - r), v.x(cx + r), v.y(ay + r)],
-                  outline=_rgba(th["accent"], int(230 * pn)), width=3)
+        if _plain(lang):
+            # 素净下不画 3px 环（厚度 < 6 的描边都算细线），改实心圆点。
+            d.ellipse([v.x(cx - r * 0.8), v.y(ay - r * 0.8),
+                       v.x(cx + r * 0.8), v.y(ay + r * 0.8)],
+                      fill=_rgba(th["accent"], int(230 * pn)))
+        else:
+            d.ellipse([v.x(cx - r), v.y(ay - r), v.x(cx + r), v.y(ay + r)],
+                      outline=_rgba(th["accent"], int(230 * pn)), width=3)
         d.ellipse([v.x(cx - 4), v.y(ay - 4), v.x(cx + 4), v.y(ay + 4)],
                   fill=_rgba(th["accent"], int(200 * pn)))
         lbl = str(st.get("label") or "")
@@ -1779,7 +1857,7 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 7) quote 引语 ----------------
@@ -1840,9 +1918,10 @@ def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
         _draw_text(img, th, v, "—— " + by, W - 300 - bw, top + len(lines) * lh + 46,
                    int(th["scale"]["body"][0]), "reg", th["muted"], "left", pb)
 
-    # 持续动态：引号随呼吸缓慢上浮 6px（正弦，不做方波跳变）+ 末行光标块
+    # 持续动态：引号只做透明度呼吸，**不做位置漂移**。
+    # 6px 的慢速上下浮动 = 0.1px/帧，取整后变成「每 10 帧跳 1px」——那不是呼吸，是抖动。
     bre = 0.5 + 0.5 * math.sin(0.5 * t + ph)
-    _draw_text(img, th, v, "\u201c", qx, qy - 6.0 * bre, 150, "bold",
+    _draw_text(img, th, v, "\u201c", qx, qy, 150, "bold",
                th["accent"], "left", 0.55 * (0.55 + 0.45 * bre))
     if int(t * 1.1) % 2 == 0:
         ly = top + len(lines) * lh - qsize
@@ -1853,7 +1932,7 @@ def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 8) chapter 章节卡 ----------------
@@ -1901,7 +1980,7 @@ def _draw_chapter(scene, t, dur, tg, script, frame, plan, th):
     half = 800.0 * pl * bre
     d = ImageDraw.Draw(img, "RGBA")
     d.line([v.x(W * 0.5 - half), v.y(700), v.x(W * 0.5 + half), v.y(700)],
-           fill=_rgba(th["rule"], 120), width=2)
+           fill=_rgba(th["rule"], 120), width=_lw(2, lang))
 
     # 持续动态：编号上方一条细光带横向扫（2.8s 周期）。
     # 为什么不做"整条竖光带"：竖着扫过编号会盖住笔画，看起来像渲染错误（实测第一版就是这样），
@@ -1913,7 +1992,7 @@ def _draw_chapter(scene, t, dur, tg, script, frame, plan, th):
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, chapter or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 9) chart 数据条 ----------------
@@ -1958,11 +2037,13 @@ def _draw_chart(scene, t, dur, tg, script, frame, plan, th):
     top = 260.0
     # 网格（一次画完，1px 低 alpha）
     d = ImageDraw.Draw(img, "RGBA")
-    pg = ease(rng(t, 0.0, 0.35))
-    for k in range(5):
-        gx = bar_x0 + (bar_x1 - bar_x0) * k / 4.0
-        d.line([v.x(gx), v.y(240), v.x(gx), v.y(240 + pitch * n * pg)],
-               fill=_rgba(th["rule"], 22), width=1)
+    # 1px 网格线是细线装饰：素净设计里不画。
+    if not _plain(lang):
+        pg = ease(rng(t, 0.0, 0.35))
+        for k in range(5):
+            gx = bar_x0 + (bar_x1 - bar_x0) * k / 4.0
+            d.line([v.x(gx), v.y(240), v.x(gx), v.y(240 + pitch * n * pg)],
+                   fill=_rgba(th["rule"], 22), width=1)
 
     for i, s in enumerate(series[:n]):
         p = ease(rng(t, 0.20 + 0.15 * i, 0.95 + 0.15 * i))
@@ -1992,11 +2073,11 @@ def _draw_chart(scene, t, dur, tg, script, frame, plan, th):
     scan_y = 240.0 + (pitch * n) * ((t / 2.6 + ph / 6.28) % 1.0)
     ImageDraw.Draw(img, "RGBA").line(
         [v.x(bar_x0), v.y(scan_y), v.x(bar_x1), v.y(scan_y)],
-        fill=_rgba(th["accent"], 26), width=2)
+        fill=_rgba(th["accent"], 26), width=_lw(2, lang))
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
-                script.get("title", ""))
+                script.get("title", ""), lang)
 
 
 # ---------------- 10) outro 收尾 ----------------
@@ -2058,10 +2139,10 @@ def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
     ly = min(bottom + int(size * 0.30), 840)
     ImageDraw.Draw(img, "RGBA").line(
         [v.x(W * 0.5 - line_w * 0.5), v.y(ly), v.x(W * 0.5 + line_w * 0.5), v.y(ly)],
-        fill=_rgba(th["accent"], 200), width=3)
+        fill=_rgba(th["accent"], 200), width=_lw(3, lang))
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
-    return _hud(img, th, scene.get("chapter") or "99 · 收尾", 1.0, script.get("title", ""))
+    return _hud(img, th, scene.get("chapter") or "99 · 收尾", 1.0, script.get("title", ""), lang)
 
 
 _DRAWERS = {

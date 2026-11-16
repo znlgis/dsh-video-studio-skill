@@ -320,7 +320,9 @@ MINOR_KEYS = ("Dm", "Am", "Em", "Cm")
 MAJOR_KEYS = ("C", "G", "D", "F", "A", "Bb")
 
 
-VISUAL_MOTIFS = ("brackets", "hairlines", "handdrawn", "slabs",
+# "plain" 是默认母题：装饰层整层透明、背景无纹理 —— 默认设计不带任何细线。
+# 其余 8 种是**显式选择**（brief 点名 / --revise / 手改 design.json），不是默认。
+VISUAL_MOTIFS = ("plain", "brackets", "hairlines", "handdrawn", "slabs",
                  "minimal", "letterbox", "signal", "rays")
 VISUAL_TRANSITIONS = ("dip", "wash", "paper", "wipe", "cut", "iris")
 NUMBER_STYLES = ("dim", "serif", "cn", "block", "roman", "timecode", "dot", "gilt")
@@ -396,8 +398,10 @@ def visual_lint_language(vl):
         dens = -1.0
     if not 0.0 <= dens <= 1.0:
         bad.append("motif.density=%r 必须在 0~1" % mf.get("density"))
-    elif dens <= 0.0 and str(mf.get("kind")) != "minimal":
-        bad.append("motif.density=0 只允许用于 minimal（否则等于没有装饰语言）")
+    elif dens <= 0.0 and str(mf.get("kind")) not in ("plain", "minimal"):
+        # plain 的零密度是**合法默认**（素净母题本来就不画装饰）；其余母题零密度
+        # 等于「声明了装饰语言但一点不画」，那是配置错误，不是风格。
+        bad.append("motif.density=0 只允许用于 plain / minimal（否则等于没有装饰语言）")
     enter = mo.get("enter") or (0.45, 0.85)
     try:
         ok_enter = (isinstance(enter, (list, tuple)) and len(enter) == 2

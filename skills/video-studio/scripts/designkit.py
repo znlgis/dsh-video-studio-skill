@@ -34,7 +34,9 @@ design.json 的形状（schema=1）
       "audio": {
         "voice": "zh-CN-YunxiNeural" 或
                  {"mode":"edge_id","id":"zh-CN-YunxiNeural",
-                  "map":{kind: id},"jitter":0.2,"max_distinct":2,
+                  # 默认单声线：四个 kind 都映射同一把；max_distinct=1。
+                  # 多声线只在用户点名（对话/访谈/广播剧）时才采，2~3 把。
+                  "map":{kind: id},"jitter":0.2,"max_distinct":1,
                   "rate":"+0%","pitch":"+0Hz"},
         "music": {"mode":"params","style":"tech-deep","scale":"minor",
                   "bpm":104,"key":"Dm","mood":"steady","seed":7},
@@ -180,6 +182,7 @@ _PALETTE_ANCHOR = {
     "ink-paper":  (60.0,  False),
 }
 _HUE_WINDOW = 26.0          # 锚点附近 ±26°（再宽就不像"深蓝"了，再窄等于恢复成枚举）
+_HUE_GRID = 24              # 约束色相窗口内的候选网格数（52° 窗口 = 每格约 2.2°）
 # 多个候选之间的"底色必须看得出不一样"的色相最小间距（度）。
 # 为什么是 12° 而不是分桶：12° 是并排看图时人眼能稳定分辨的色相下限附近
 # （再小就成了同一片底色的细微偏色）。约束收窄时可选色相窗口只有 52° 宽，
@@ -221,6 +224,7 @@ _MOOD_WORD = {
     "uplifting": "昂扬收束",
 }
 _MOTIF_WORD = {
+    "plain": "素净留白",
     "brackets": "四角括线", "hairlines": "细线页眉", "handdrawn": "手绘内框",
     "slabs": "粗色块", "minimal": "极简留白", "letterbox": "电影遮幅",
     "signal": "信号条", "rays": "放射线",
@@ -264,7 +268,9 @@ VOICES = _loudness_voices() or _FALLBACK_VOICES
 VOICE_KINDS = ("hook", "body", "quote", "outro")
 
 # 骨架几何按母题给（母题决定"框长什么样"，卡片只是它的容器）
+# 素净母题：卡片只有填充、没有描边（描边就是细线）。
 _CARD_BY_MOTIF = {
+    "plain": dict(radius=14, fill_a=24, outline_a=0, pad=34, h=96, gap=118),
     "brackets": dict(radius=14, fill_a=16, outline_a=28, pad=34, h=96, gap=118),
     "hairlines": dict(radius=8, fill_a=26, outline_a=40, pad=30, h=92, gap=112),
     "handdrawn": dict(radius=4, fill_a=30, outline_a=52, pad=32, h=94, gap=116),
@@ -274,7 +280,9 @@ _CARD_BY_MOTIF = {
     "signal": dict(radius=12, fill_a=22, outline_a=36, pad=30, h=92, gap=114),
     "rays": dict(radius=18, fill_a=18, outline_a=46, pad=34, h=96, gap=126),
 }
+# 背景纹理也是细线/网点来源：素净母题不叠任何纹理。
 _TEXTURE_BY_MOTIF = {
+    "plain": "none",
     "brackets": "dots", "hairlines": "paper", "handdrawn": "paper",
     "slabs": "grid", "minimal": "none", "letterbox": "none",
     "signal": "scanlines", "rays": "none",
@@ -282,7 +290,11 @@ _TEXTURE_BY_MOTIF = {
 
 # 采样用的离散档位（取整避免浮点尾差，JSON 才好逐字节比对）
 _DENSITIES = (0.55, 0.70, 0.85, 1.00)
-_PUSHES = (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14)
+# 默认不推镜（push=0）：慢速亚像素位移在 1x 光栅上必然表现为 1px 台阶，
+# 实测 push=0.14 的 4 秒段每秒跳 12 次（见 scenes._view）。要推镜请手改 design。
+_PUSHES = (0.0,)
+# 默认母题池：只有素净（不画装饰细线）。其余母题必须由 brief 点名或手改 design 才会出现。
+_DEFAULT_MOTIFS = ("plain",)
 _BREATHES = (0.30, 0.40, 0.50, 0.60, 0.75, 0.90, 1.05)
 _ENTERS = ((0.35, 0.75), (0.40, 0.90), (0.45, 0.85), (0.50, 1.00),
            (0.55, 1.00), (0.60, 1.10), (0.70, 1.20))
@@ -1721,6 +1733,11 @@ def _constraint_problems(design, must, avoid):
     return bad
 
 
+def _wrap360(h):
+    """归一化到 [0, 360)。"""
+    return float(h) % 360.0
+
+
 def _design_bg_hue(design):
     """取一个设计底色的色相；取不到返回 None。"""
     try:
@@ -1743,6 +1760,42 @@ def _beats_for(segments):
     return ["hook"] + mid[:n - 2] + ["outro"]
 
 
+# 只有用户**明确点名**要多人声时才采多声线。关键词是中文口语里真实会出现的说法，
+# 不靠猜：没点名就固定 1 把声音（旁白片默认就是一个播音员，不是广播剧）。
+# 只收**明确要求多个声音**的说法。裸词「对话」「多人」「双人」刻意不收：
+# 「大模型的对话能力」「多人协作」这类**题材**本身不是要两个旁白，误判会让整片突然换人。
+_MULTI_VOICE_WORDS = ("多人对话", "双人对谈", "两人对谈", "对谈", "访谈", "广播剧",
+                     "分角色", "多声线", "多个声线", "两个声音", "两个声线",
+                     "男女声", "男声女声", "一男一女", "双主播", "两个主播",
+                     "分别由两个人", "一人一句")
+# 显式要求"只用一个人念"的说法：命中就压回单声线，优先级高于多声线词。
+_SINGLE_VOICE_WORDS = ("一个人念", "一个人讲", "单人播报", "只用一种声音", "单声线",
+                       "一个声音", "不要多声线", "不要换人", "同一个人")
+
+
+def _wants_multi_voice(brief):
+    """brief 是否**明确要求**多声线（看题目原文与 must_have，不看"认不出的约束"）。
+
+    为什么读 topic：`_brief_of` 只把**认得出的**片段放进 must_have（"多人对话"不在
+    五类约束词表里），所以它会留在题目原文里。只读 must_have 会让"做个多人对话的
+    访谈片"静默退化成单声线——用户说了却没人听，正是本项目最忌讳的一类失败。
+    """
+    if not isinstance(brief, dict):
+        return False
+    texts = [str(brief.get("topic") or "")]
+    for word in (brief.get("must_have") or ()):
+        texts.append(str(word))
+    joined = " ".join(texts)
+    # 顺序很重要：显式排除/明说单声线 > 多声线词。
+    # 否则"一个人讲完，不要多声线"会因为句子里有「多声线」而被判成多声线（实测踩到）。
+    for word in (brief.get("avoid") or ()):
+        if any(w in str(word) for w in _MULTI_VOICE_WORDS):
+            return False
+    if any(w in joined for w in _SINGLE_VOICE_WORDS):
+        return False
+    return any(w in joined for w in _MULTI_VOICE_WORDS)
+
+
 def _voice_gender_of(vid):
     """edge voice id -> "male"/"female"；认不出返回 None（不猜：猜错等于把"女声"悄悄换成男声）。
 
@@ -1763,7 +1816,7 @@ def _voice_gender(vid):
     return "女" if _voice_gender_of(vid) == "female" else "男"
 
 
-def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
+def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hues=()):
     """按 sha1(brief 规范 JSON + index + seed + attempt) 派生一个完整 design。
 
     选择用"哈希 + 下标步进"而不是"每个字段独立随机"：对 n<=8 的候选，
@@ -1813,12 +1866,33 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
         if anchor is not None:
             base_hue, dark = anchor
             vivid = False                     # 配色锚点自带明暗，气质不再覆盖它
-            # 窗口内按哈希散开，但**避开**用户明确排除的色相
+            # 约束窗口内的取点：**放在网格上挑、且不离开窗口**。
+            #
+            # 为什么不是"哈希取点 + 撞 banned 就让开"：让开会把点推出锚点 ±window
+            # （实测「深蓝」被采到 240°，超出 210±26），而独立哈希在 52° 窗口里凑不出
+            # 三个色相拉得开的底色 —— 2160 次 n=3 采样里 3~8 次在第 3 个候选上死循环，
+            # 自检 63（带约束的 brief 不许高概率失败）会偶发飘红。
+            #
+            # 现在：窗口内均匀铺 _HUE_GRID 个格点（52° -> 每格约 2.2°），先剔除撞
+            # banned 的格，再按「与已接受候选的最小色相间距」分两档排序：能拉开
+            # >= _PALETTE_KEEP_GAP 的优先，其余按间距从大到小；档内顺序由 (nonce,
+            # attempt) 派生的哈希决定，所以重采会换格、但同一次采样必定散开。
             span = float(pcon.get("window") or _HUE_WINDOW)
-            for k in range(24):                      # 最多试 24 个位置，全都撞 banned 才放弃
-                hue = (base_hue + ((h("palette") + k * 11) % 100) / 100.0 * span - span / 2.0) % 360.0
-                if not any(_hue_gap(hue, bh) < span for bh in (pcon.get("banned_hues") or ())):
-                    break
+            banned = tuple(pcon.get("banned_hues") or ())
+            grid = [_wrap360(base_hue - span / 2.0 + span * (k + 0.5) / _HUE_GRID)
+                    for k in range(_HUE_GRID)]
+            grid = [g for g in grid if not any(_hue_gap(g, bh) < span for bh in banned)]
+            if not grid:
+                raise ValueError("配色约束把色相窗口全部排除掉了：%r" % (banned,))
+            # 分档：与任何已接受候选都拉开 >= _PALETTE_KEEP_GAP 的格子优先（第 0 档），
+            # 其次是间距最大的一档。档内顺序由 (nonce, attempt) 派生的哈希决定 ——
+            # 重采会换格，所以 50 次重试不会被同一个格子卡死。
+            def _hue_rank(g):
+                gap = min([_hue_gap(g, u) for u in used_hues] or [360.0])
+                band = 0 if gap >= _PALETTE_KEEP_GAP else 1
+                return (band, -gap, _digest("hue", tag, index, attempt, g))
+            ranked = sorted(grid, key=_hue_rank)
+            hue = ranked[0]
         else:
             hue = (h("palette") + index * 137.508) % 360.0
             banned_hues = pcon.get("banned_hues") or ()
@@ -1832,7 +1906,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     sat = sp["s"][0] + (h("sat") % 100) / 100.0 * (sp["s"][1] - sp["s"][0])
     val = sp["v"][0] + (h("val") % 100) / 100.0 * (sp["v"][1] - sp["v"][0])
     family = (hue, sat, val, dark)
-    motifs = tuple(dom.get("motif") or MOTIFS)
+    motifs = tuple(dom.get("motif") or _DEFAULT_MOTIFS)
     motif = motifs[(h("motif") + 3 * index) % len(motifs)]
     transes = tuple(dom.get("transition") or TRANSITIONS)
     trans = transes[(h("transition") + 5 * index) % len(transes)]
@@ -1844,7 +1918,10 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     voice_index = (h("voice") + index) % len(pool)
     scale = SCALES[(h("scale") + index) % len(SCALES)]
     layout = LAYOUTS[(h("layout") + index) % len(LAYOUTS)]
-    hud = HUDS[(h("hud") + index) % len(HUDS)]
+    # 默认不用 HUD：chip-left 是"顶部 6px 通栏进度条 + 1px 胶囊描边"，
+    # corner-line 更是一组细线 —— 那正是用户说的"默认带着一些细线"。
+    # HUD 仍然可以用：手改 design.json 的 visual.hud 即可（schema 与绘制都支持）。
+    hud = "none"
     align = ALIGNS[(h("align") + index) % len(ALIGNS)]
     font_family = FONT_FAMILIES[(h("family") + index) % len(FONT_FAMILIES)]
 
@@ -1920,7 +1997,10 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     key = keys[h("key") % len(keys)]
     music_seed = h("mseed") % 100000
 
-    vcount = 1 + h("vcount") % 3
+    # 默认**单声线**：整片一个旁白。多声线只在用户点名要（对话/多人/广播剧…）时才采，
+    # 因为「默认每片都换两三把声音」会让观众以为是广播剧而不是旁白（用户实测反馈）。
+    # 真要多声线，也可以手改 design.audio.voice.map（voicekit 按 kind 取，逐句 voice 优先）。
+    vcount = (2 + h("vcount") % 2) if _wants_multi_voice(brief) else 1
     picks = [pool[(voice_index + j) % len(pool)] for j in range(vcount)]
     vmap = {kind: picks[j % vcount] for j, kind in enumerate(VOICE_KINDS)}
     jitter = round(0.10 + (h("jitter") % 5) * 0.05, 2)
@@ -1931,9 +2011,11 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=()):
     # 标签描述"这配色长什么样"，而不是"它属于哪一套"（没有套了）
     fam_label = ("深" if dark else ("明" if vivid else "浅")) + "色 h%03d" % int(round(hue) % 360)
     label = "%s·%s" % (fam_label, _MOTIF_WORD[motif])
-    pitch = "%s×%s：%s，%s转场，%s声线，%d BPM %s。" % (
+    pitch = "%s×%s：%s，%s转场，%s声线%s，%d BPM %s。" % (
         fam_label, _MOTIF_WORD[motif], _MOOD_WORD[mood], _TRANS_WORD[trans],
-        _voice_gender(picks[0]), bpm, "小调" if scale == "minor" else "大调")
+        _voice_gender(picks[0]),
+        ("（单声线）" if vcount == 1 else "（%d 种声音）" % vcount),
+        bpm, "小调" if scale == "minor" else "大调")
 
     return {
         "schema": SCHEMA,
@@ -2016,6 +2098,7 @@ def sample_designs(brief, n=3, seed=None):
         brief["_nonce"] = ""
 
     out = []
+    used_hues = []
     for i in range(n):
         chosen = None
         problems = None
@@ -2024,7 +2107,7 @@ def sample_designs(brief, n=3, seed=None):
         why_not = []
         for attempt in range(_MAX_RESAMPLE):
             why_not = []
-            cand = _make_design(brief, i, seed, attempt, domain, unmatched)
+            cand = _make_design(brief, i, seed, attempt, domain, unmatched, used_hues)
             problems = validate_design(cand)
             if problems:
                 why_not.append("没过校验：%s" % problems[0])
@@ -2111,6 +2194,9 @@ def sample_designs(brief, n=3, seed=None):
                 "③ 用 --seed 固定后重试。"
                 % (i + 1, _MAX_RESAMPLE, " / ".join(too_close or ["?"]), hint, detail))
         out.append(chosen)
+        _h = _design_bg_hue(chosen)
+        if _h is not None:
+            used_hues.append(_h)
     return out
 
 

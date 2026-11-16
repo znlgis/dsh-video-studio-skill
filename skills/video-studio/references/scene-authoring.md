@@ -105,11 +105,11 @@ def vignette(img, strength=0.35) -> Image
 # d) 软边光点（比硬圆好看十倍）
 #    椭圆 + GaussianBlur(r*0.18)，预渲染成精灵
 
-# e) 半透明卡片 + 1px 描边
+# e) 半透明卡片 + 描边（1px 描边只给装饰型母题用；素净默认是无描边填充）
 d.rounded_rectangle([...], radius=14, fill=(255,255,255,16), outline=(255,255,255,28))
 
-# f) 顶部 3px 强调色进度条
-d.rectangle([0, 0, W * progress, 3], fill=ACCENT)
+# f) 顶部强调色进度条：画成块（6px），不要 1~3px 的细线
+d.rectangle([0, 0, W * progress, 6], fill=ACCENT)
 ```
 
 配色模板（深色科技风，久看不累）：

@@ -19,7 +19,7 @@
 |---|---|---|
 | `structure` | 几段、目标时长 | `segments` / `beats` / `hold_policy` / `target_sec` |
 | `visual` | 画面全部外观 | 见 §2 |
-| `audio` | 配乐 / 声线 / 音效 | `music`（scale/bpm/key/mood/seed）/ `voice`（id/map/jitter/max_distinct）/ `sfx`（enabled/density/gain_db） |
+| `audio` | 配乐 / 声线 / 音效 | `music`（scale/bpm/key/mood/seed）/ `voice`（id/map/jitter/max_distinct，**默认单声线**）/ `sfx`（enabled/density/gain_db） |
 | `pacing` | 节奏 | `lead` / `tail` / `min_dur` / `hold` / `item_stagger` |
 | `id` | 指纹 | `design:<hash>`，由 `designkit.design_fingerprint()` 算出 |
 | `label` / `pitch` | 中文标签 / 立意 | 提案卡上显示的那一句话 |
@@ -30,6 +30,20 @@
 （实测过 11 个静默失效的旋钮：`voice` 写字符串时 map/jitter 全失效、`pan` 对立体声配方无效……
 每个都"配置生效、画面不动"，且不报错。设计层改成一律报错，这类问题在 `--lint` 就暴露。）
 
+## 1.5 默认长什么样（素净 / 无细线 / 不抖）
+
+**默认设计不带任何装饰细线，画面也不跟着镜头漂。** 这三条是产品约束，不是审美建议：
+
+| 默认值 | 效果 | 想开回来怎么做 |
+|---|---|---|
+| `motif.kind = "plain"` | 装饰层整层不画（没有括角/刻度/页眉线/网格/扫描线），背景纹理 `none`，卡片无描边 | brief 点名「括角 / 细线 / 手绘 / 色块 / 极简 / 遮幅 / 信号 / 放射」，或手改 `motif.kind` |
+| `hud = "none"` | 没有顶部进度条与胶囊描边（`chip-left` 是 6px 通栏块 + 1px 胶囊描边、`corner-line` 是一组细线） | 手改 `visual.hud`；画出来的线宽见 §2 |
+| `motion.push = 0` | 不推镜。前景永远按整像素落位，段落中段是**整帧静止** | 手改 `motion.push` 只推背景板；前景不会跟着动（慢速亚像素位移在 1x 光栅上必碎成 1px 台阶） |
+
+素净母题下所有装饰描边（强调条、对比中缝、流程轴、章节线、扫描高光、表格网格）
+要么不画（图表网格、扫描高光）、要么加粗到 6px（强调条、对比中缝、流程轴）：**默认设计里不存在 1~3px 的线**。
+多样性来自配色（连续色相）、版式轮换、字族、编号写法、转场、配乐与声线，
+不来自细线装饰——`selfcheck` 第 71、72 条盯这两条：改了母题层或让前景跟相机，自检立刻 fail。
 ## 2. visual 字段表（能控制什么）
 
 | 字段 | 取值 | 改它会发生什么 |
@@ -37,18 +51,18 @@
 | `palette` | 11 个颜色角色（bg/bg2/surface/ink/muted/dim/accent/accent2/good/bad/rule），每个 `[r,g,b]` | 整片色调。它不是"从 8 套配色里挑"，而是**连续色相空间**里的一点：改 `bg` 的色相，其余角色会按对比度网格重新求解 |
 | `family` | `sans` / `serif` / `kai` / `round` | 全片字族（标题优先，字幕默认跟随） |
 | `typography` | `tracking`（字距）/ `line_gap`（行距）/ `number`（编号写法，8 种）/ `ratio`（字号比例）/ `align` | 文字气质；`number` 决定"01 / 壹 / I / 1.0"这类编号外观 |
-| `motif` | `kind`（8 种：brackets / hairlines / handdrawn / slabs / minimal / letterbox / signal / rays）× `density`（0.55–1.00） | 装饰语言：四角括线 / 细线页眉 / 手绘框 / 色块 / 极简 / 遮幅 / 信号条 / 放射线 |
+| `motif` | `kind`（9 种：**plain** / brackets / hairlines / handdrawn / slabs / minimal / letterbox / signal / rays）× `density`（0–1；采样器只取 0.55/0.70/0.85/1.00，`density=0` 只对 `plain` / `minimal` 合法） | 装饰语言。**默认 `plain`：不画装饰、不叠底纹、卡片无描边——默认设计没有细线**；其余是显式选择：四角括线 / 细线页眉 / 手绘框 / 色块 / 极简 / 遮幅 / 信号条 / 放射线 |
 | `transition` | `kind`（dip / wash / paper / wipe / cut / iris）+ `dur`（秒） | 段与段之间的转场 |
-| `motion` | `ease`（out3/out5/inOut3/outBack）/ `enter`(dx,dy) / `push`（镜头缓推）/ `breathe_hz` | 入场与镜头运动 |
+| `motion` | `ease`（out3/out5/inOut3/outBack）/ `enter`(dx,dy) / `push`（背景镜头缓推，默认 0）/ `breathe_hz` | 入场与背景运动。前景**不跟镜头**：慢速亚像素位移取整后就是 1px 抖动 |
 | `bias` | `x` / `y` / `inset` | 整屏重心偏移与安全区收缩 |
 | `layout` | `left-stack` / `center-stack` / `split-right` | 默认版式 |
 | `layout_cycle` | 版式数组（≥2 种不同） | 按章节轮换版式；不写则自动派生 2–3 种 |
-| `hud` | `chip-left` / `corner-line` / `none` | 页眉/角落装饰 |
+| `hud` | `chip-left` / `corner-line` / `none`（默认 `none`） | 页眉/角落装饰。默认关闭（这两种都靠细线构形） |
 | `size` / `fps` | `1920x1080` / `30` | 只支持 16:9 横屏（编码时可下采样到 720p） |
 | `subtitle` | 见 §3 | 字幕字号/位置/对齐/背板/圆角/字族/颜色/行数 |
 
-> **能组合出多少种画面？** 离散维度是 8 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族
-> × 7 情绪 × 2 调式（= 774,144 种），再乘配色这个连续量（色相 0–360° 任意取值）。
+> **能组合出多少种画面？** 离散维度是 9 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族
+> × 7 情绪 × 2 调式（= 870,912 种），再乘配色这个连续量（色相 0–360° 任意取值）。
 > 这个数字只说明"字段可组合空间足够大"，**不是推荐你从中挑**——好看与否仍由对比度体检、
 > 分镜语法和你的目检决定。
 
@@ -121,3 +135,5 @@
 | 想"用某套预设当起点" | 没有预设目录，外观只由 design.json 决定 | 现场采样 + `--revise` 表达要求，要复现用 `--seed` |
 | `render.py --preset x` 报错 | render.py 没有 `--preset` 这个参数 | 用 `--brief` 或直接写 design.json |
 | `stylekit.py --list` 只有一段说明、exit 2 | 没有可选外观清单（预期行为） | 看 `designkit.py --list-palettes` 的配色采样示例（那不是可选清单） |
+| 加密后的片子上还是有一根横向细线 | 那是 `hud=chip-left` 的通栏进度条（6px）或 `corner-line` 的角线（2px）——已经显式打开了 HUD | 改回 `hud: "none"`（默认），或换成素净母题 |
+| 画面在「慢慢地动 / 轻微抖」 | `motion.push > 0`（只推背景），或自己写 scenes.py 把前景又绑回了相机 | 把 `motion.push` 设回 0；要整幅推镜请自写 scenes.py 做超采样 |

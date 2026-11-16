@@ -204,7 +204,7 @@ timeline 顶层再加一个 `storyboard: {"type_counts": ...}` 摘要。
 | 维度 | 规则 | 现状 |
 |---|---|---|
 | 版式变体 | `variant_of(type, chapter, k)` 派生 0/1/2，并强制与上一段同类型不同 | 写入 storyboard 的每段；**当前只有 hero / statement / list / stat 四个绘制器读取它**，其余六类构图唯一 |
-| 装饰密度 | `decor_of`（grammar.py:349）三档 0.55 / 0.75 / 1.0，每 3 段回落到最低档 | 所有绘制器都读（经 `_apply_motif` → `_decor_scale`） |
+| 装饰密度 | `decor_of`（grammar.py:349）三档 0.55 / 0.75 / 1.0，每 3 段回落到最低档 | 所有绘制器都读（经 `_decor_scale`）。**素净母题（默认）直接返回 0**：不画装饰层 |
 | 相位偏移 | `phase_of(idx, chapter)` = 2π × sha1 派生值 | hero / statement / list / compare / process / quote / chapter / chart / outro 的持续动效都用它，避免同频"复印" |
 
 变体号、密度档、相位都**不按时间/帧号/随机数**派生——同一稿子同一结果，
@@ -243,8 +243,8 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
    如果画面上差别不大，就不要加——10 类已经覆盖了"数字/列表/对比/流程/引语/章节"这些基本形态。
 4. **`assets/scenes.py` 加绘制器** `_draw_timeline(scene, t, dur, tg, script, frame, plan, th)`，
    签名与现有 10 个一致。约定：
-   - 先用 `_bg_plate` / `_apply_motif` 铺底，最后 `_apply_veil` + `_hud`；
-   - 坐标过 `_view`（视差），文字用 `_draw_text`（字号不重采样）；
+   - 先用 `_plate`（背景板 + 母题烘焙）铺底，最后 `_apply_veil` + `_hud`；
+   - 坐标过 `_view`（**恒为 1.0：前景不跟镜头**，只为统一接口），文字用 `_draw_text`（字号不重采样）；
    - 持续动效至少一个（相位用 `_phase(scene)`），否则 3–6 s 的静态画面会撞"画面静止"判据；
    - 重的东西预烘焙并合成进底版（参考 `_motif_layer` + `_plate`：一次烘焙，逐帧只 copy/EXTENT
      约 1.3–2.0 ms）。**不要逐帧全屏 RGBA paste**（实测 5.6 ms，直接撑爆单帧预算）；
@@ -258,7 +258,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
    再跑一次剪影门禁（`--selftest` / `--designs N`）确认新类型在不同现场设计下也"看得出来"。这一步不做，等于新加的构图
    没有进入 G13 的覆盖范围。
 
-跑完的验证顺序：`python selfcheck.py`（**70 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影）
+跑完的验证顺序：`python selfcheck.py`（**72 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影，第 71 条盯默认无细线（HUD 打开时也无线、遮幅不随 push 缩放），第 72 条盯前景不抖）
 → `python <REPO>/tools/ci_check.py`（语法/包内容/文档路径）→ `python <REPO>/tools/silhouette_qa.py`（不同设计两两仍可区分）。
 
 ## 9. 常见误用
@@ -292,9 +292,12 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
 - **版式变体只有 4 类绘制器读**：`variant_of` 对每段都算并写进 storyboard，
   但当前只有 hero / statement / list / stat 用它，其余六类构图唯一。
   这条不修的话，"每类型 3 个变体"只在四类上成立。
-- **部分视觉语言字段"已声明、已体检、但绘制器没读"**：`motion.enter`、`motion.push`、
-  `typography.align`、`typography.ratio`由 `designkit.validate_design` 校验范围，
+- **部分视觉语言字段"已声明、已体检、但绘制器没读"**：`motion.enter`（入场位移由主题的
+  `entrance_dx/dy` 决定）、`typography.align` 由 `designkit.validate_design` 校验范围，
   但 `assets/scenes.py` 当前不读它们——写了不会报错，也不会改变画面。
+  反例（都是有消费者的）：`typography.ratio` 经 `designkit._font_scale` 进主题字号盘；
+  `motion.push` 进 `_push_scale`，但**只推背景板**——前景永远按整像素落位，
+  因为慢速亚像素位移取整后就是 1px 抖动（见 [frame-qa.md](frame-qa.md) §11）。
   详见 [appearance.md](appearance.md) 的 §2 visual 字段表。
 - **场景数据超容量会被截断**：`stats` >3 / `series` >6 / `steps` >5 / `sides` 每侧 >3
   的条目不会出现在画面上。filmcheck 报 `scene_capacity` WARN（容量表在

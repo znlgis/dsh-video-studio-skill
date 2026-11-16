@@ -154,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；70 条回归护栏，约 10–20 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；72 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -475,18 +475,18 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage styl
 | `palette` | 11 个颜色角色 | **连续色相空间**里的一点（`hsv` 求解），每套都必须过 `theme_lint` 对比度体检 |
 | `family` | `sans` / `serif` / `kai` / `round` | 字族 |
 | `typography` | `tracking` / `line_gap` / `number`（8 种编号写法）/ `ratio` / `align` | 排版 |
-| `motif` | 8 种装饰母题 × 密度 | 母题决定"框长什么样"（`brackets` / `hairlines` / `handdrawn` / `slabs` / `minimal` / `letterbox` / `signal` / `rays`） |
+| `motif` | 9 种装饰母题 × 密度（默认 `plain`） | `plain` 是**素净**：装饰层整层不画、底纹为 none、卡片无描边——默认设计不带任何细线。其余 8 种才是显式选择：`brackets` / `hairlines` / `handdrawn` / `slabs` / `minimal` / `letterbox` / `signal` / `rays`（brief 点名「括角 / 细线 / 手绘 / 色块 / 极简 / 遮幅 / 信号 / 放射」即可采到） |
 | `transition` | 6 种段界转场 + 时长 | `dip` / `wash` / `paper` / `wipe` / `cut` / `iris` |
-| `motion` | `ease`（4 档）/ `enter` / `push` / `breathe_hz` | 镜头缓推与入场 |
+| `motion` | `ease`（4 档）/ `enter` / `push` / `breathe_hz` | 入场与**背景**镜头缓推。默认 `push=0`（不推）：慢速推镜在整数光栅上必然变成 1px 台阶抖动，所以前景永远锁定、只有背景板缩放 |
 | `bias` | `x` / `y` / `inset` | 整体重心偏移 |
 | `layout` | `left-stack` / `center-stack` / `split-right` | 默认版式 |
 | `layout_cycle` | 版式数组（可选） | 按章节轮换，见下 |
-| `hud` | `chip-left` / `corner-line` / `none` | 页眉装饰 |
+| `hud` | `chip-left` / `corner-line` / `none`（默认 `none`） | 页眉装饰。默认关闭：`chip-left` 是「6px 通栏进度条 + 1px 胶囊描边」，`corner-line` 更是一组细线 |
 | `size` / `fps` | `1920x1080` / `30` | 本版只做 16:9 横屏（可下采样到 720p） |
 | `subtitle` | 字幕样式（可选） | 见下 |
 
-离散维度合计 **8 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族 × 7 情绪 × 2 调式 =
-774,144 种组合**，再乘配色这个连续量（色相 0–360° 任意取值，只是采样器会在锚点附近取）；
+离散维度合计 **9 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族 × 7 情绪 × 2 调式 =
+870,912 种组合**，再乘配色这个连续量（色相 0–360° 任意取值，只是采样器会在锚点附近取）；
 **这个数是"字段能组合出多少种"，不是"推荐你从中挑一套"**——好看与否仍由对比度体检、分镜语法和你的目检决定。
 
 #### 5.5.1 字幕样式 `visual.subtitle`（可选）
@@ -574,7 +574,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage styl
 
 1. 同一部片**不许跨明暗族**换主题（深蓝段直接切暖白段会精确触发闪烁门禁，观众也看着像换片）。
 2. 主题必须过 `stylekit.theme_lint` 的对比度体检（ink≥7 / muted≥4.5 / dim≥3 / accent≥4.5 / accent2≥4.5）。
-3. 旁白全片最多 2–3 把声音（`voice.max_distinct`），相邻句不换人——否则像广播剧而不是旁白。
+3. **默认整片只有一个旁白声音**（`max_distinct=1`）。只有用户明确点名「多人对话 / 对谈 / 访谈 / 广播剧 / 分角色 / 男女声」时才采多声线，且固定 2–3 把；裸词「对话」「多人」不算——「大模型的对话能力」不是要两个旁白。显式说「一个人念 / 同一个人」则强制单声线。
 
 #### 5.5.6 没有设计就出不了片（fail-closed）
 
@@ -612,7 +612,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage layo
 
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage style
 #   版式轮换: split-right -> left-stack（按章节轮换，防全片一张版式）
-#   视觉语言: 母题=brackets 转场=paper(0.40s) 字距=3.0 编号=cn 重心=(-60,+60)
+#   视觉语言: 母题=plain 转场=paper(0.40s) 字距=3.0 编号=cn 重心=(-60,+60)   # 默认素净
 #   字幕: 底部安全区 44px 对齐=center 背板α=138 圆角=2 最多1行
 #   （坏配置在这里就拦，不等渲完 300 帧）
 ```
@@ -760,7 +760,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（70 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（72 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1102,7 +1102,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | `scripts/gates.py` | **门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
-| `scripts/selfcheck.py` | 回归自检：**70 条**针对真实缺陷的断言，不联网、约 10–20 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）** |
+| `scripts/selfcheck.py` | 回归自检：**72 条**针对真实缺陷的断言，不联网、约 10–25 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）/ 70 出片前问诊（固定 7 题，没答完首次提案必拦）/ 71 默认设计不画装饰细线（母题层/底纹/HUD 全关，按绘制调用断言）/ 72 前景不随镜头位移（1px 台阶回归）** |
 | `scripts/preflight.py` | **渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |
@@ -1230,7 +1230,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 70 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 72 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）
