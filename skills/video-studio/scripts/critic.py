@@ -149,6 +149,36 @@ def _balance(box, shape):
     return float(abs(cx - 0.5) * 2.0)
 
 
+def _looks_like_single_frame(h, w):
+    """宽高比接近画布 = 单帧；否则当作联系表/拼图，跳过安全区判定。
+
+    用 1.6:1 到 2.2:1 的宽区间而不是精确 16:9：候选联系表也可能是 2 帧或 4 帧拼成，
+    只要明显更"宽"就说明它不是一个 16:9 的画框。
+    """
+    if h <= 0:
+        return False
+    ar = w / float(h)
+    return 1.6 <= ar <= 2.2
+
+
+def _safe_rect(h, w):
+    """取当前画布的安全区；layoutkit 不可用时按 16:9 比例折算（不硬编码 1080p 坐标）。
+
+    折算而不是照抄常量：critic 可能被单独拷去评一张 720p 的图，写死 (64,58,1856,974)
+    会在 720p 上把整幅内容判成越界。
+    """
+    try:
+        sys.path.insert(0, HERE)
+        import layoutkit
+        if (layoutkit.W, layoutkit.H) == (w, h):
+            return layoutkit.SAFE
+        k = min(w / float(layoutkit.W), h / float(layoutkit.H))
+        sx0, sy0, sx1, sy1 = layoutkit.SAFE
+        return (sx0 * k, sy0 * k, sx1 * k, sy1 * k)
+    except Exception:                                          # noqa: BLE001
+        return (0.033 * w, 0.054 * h, 0.967 * w, 0.902 * h)
+
+
 def score_image(path):
     """单图打分。返回 {path, score, metrics, notes}。"""
     arr, gray = _load(path)
@@ -157,15 +187,35 @@ def score_image(path):
     notes = []
     score = 100.0
 
-    # 1) 安全边距：最外侧内容离框 < 2.5% 画面边 = 贴边
-    if box:
-        m = min(box[0], box[1] and (h - 1 - box[1]), box[2], (w - 1 - box[3])) / float(min(h, w))
-        if m < 0.025:
+    # 1) 安全区：判据用**设计契约**（layoutkit.SAFE）而不是"离画框多远"。
+    #
+    # 第一版用的是"内容离画框 < 2.5% = 贴边"，实测把**正常的全出血底色 + 左侧贴边色带**
+    # 判成"边距偏窄 4.8%"——因为盒子里装的是装饰色带，不是文字。而这条技能的契约
+    # 本来写得清清楚楚：正文 y∈SAFE，字幕 y∈SUB_BAND。所以按 SAFE 判越界才是有意义的口径。
+    #
+    # 越界 <= 1% 短边算容差（描边/渐晕会溢出几像素），超过才扣分。
+    #
+    # **联系表不算安全区**：`_sheet.png` 是 N 帧并排的拼图（实测 1440x270），它的
+    # 边界由拼贴决定，与"正文离画框多远"无关——按 SAFE 判会稳定误报 700+px。
+    # 所以只在"单帧"（宽高比接近画布）上判边距，拼图上跳过这一项、并在输出里说明。
+    single = _looks_like_single_frame(h, w)
+    if box and single:
+        sx0, sy0, sx1, sy1 = _safe_rect(h, w)
+        tol = 0.01 * min(h, w)
+        over = max(sx0 - box[2], box[3] - sx1, sy0 - box[0], box[1] - sy1, 0.0)
+        m = min(box[0], h - 1 - box[1], box[2], w - 1 - box[3]) / float(min(h, w))
+        if over > tol * 3:
             score -= W_MARGIN
-            notes.append("内容贴边（边距 %.1f%% < 2.5%%）" % (m * 100))
-        elif m < 0.05:
-            score -= W_MARGIN * 0.4
-            notes.append("边距偏窄（%.1f%%）" % (m * 100))
+            notes.append("内容压出安全区（越界 %.0fpx）" % over)
+        elif over > tol:
+            score -= W_MARGIN * 0.5
+            notes.append("内容轻微越出安全区（%.0fpx）" % over)
+        elif m < 0.02:
+            # 只有**贴到画框边**（<2% 短边）才算问题，且降权：装饰色带本就该出血。
+            score -= W_MARGIN * 0.3
+            notes.append("内容贴到画框边（%.1f%%）" % (m * 100))
+    elif not single:
+        notes.append("联系表（多帧拼图）：跳过安全区判定")
     else:
         score -= W_MARGIN * 0.5
         notes.append("几乎无内容（整格接近纯色）")
@@ -213,6 +263,21 @@ def score_image(path):
         },
         "notes": notes,
     }
+
+
+def _label_of(path):
+    """给图起一个人读的短名。
+
+    `propose` 的候选联系表统一叫 `_sheet.png`（在各自的候选目录里），只取 basename
+    会得到三个一模一样的 "_sheet"——分不清哪个是 A 哪个是 B。所以下划线开头的名字
+    改用**父目录名**（候选 id），这才是人脑里"候选 A"的那个 A。
+    """
+    base = os.path.splitext(os.path.basename(path))[0]
+    if base.startswith("_"):
+        parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
+        if parent:
+            return parent
+    return base
 
 
 def _latest_rev(work):
@@ -300,7 +365,7 @@ def main(argv=None):
 
     targets = []
     if a.image:
-        targets = [(os.path.splitext(os.path.basename(p))[0], p) for p in a.image]
+        targets = [(_label_of(p), p) for p in a.image]
     else:
         rev = a.rev or _latest_rev(a.work)
         if not rev:

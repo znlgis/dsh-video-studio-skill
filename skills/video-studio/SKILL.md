@@ -154,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；72 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；74 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -762,7 +762,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（72 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（74 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1087,7 +1087,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 - `references/pitfalls.md` — 20 条最佳实践 + 17 条反模式 + 4 个 bug 复盘（含取景抖动与音轨中断）
 - `references/machine-facts.md` — **参考机器的实测基准**：ffmpeg 构建、编码速度、各模块耗时、排期公式、三条隐形坑（换机后按 §13 重测，别照抄）
 - `references/script-index.md` — **脚本资产完整表**：每个脚本的作用、参数、契约与坑位（§10 的详细版）
-- `references/portrait-and-motion.md` — **两条有意推迟的路线**：竖屏 9:16（LayoutProfile 三步走 + 会被打破的 4 个契约）、亚像素推镜（超采样 vs 仿射平移 + 可量化的验收判据）。想知道“为什么现在还只能横屏/为什么默认不动”，看这一篇
+- `references/portrait-and-motion.md` — **竖屏与动感的路线图**（第一步 `layoutkit` 已落地，见 `scripts/layoutkit.py`；余下两步与验收判据仍在此）：竖屏 9:16（LayoutProfile 三步走 + 会被打破的 4 个契约）、亚像素推镜（超采样 vs 仿射平移 + 可量化的验收判据）。想知道“为什么现在还只能横屏/为什么默认不动”，看这一篇
 
 ## 10. 脚本资产
 
@@ -1106,7 +1106,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
 | 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
 | 浏览器逐帧渲染 | `webengine.py` |
-| 回归自检（72 条断言） | `selfcheck.py` |
+| 回归自检（74 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
@@ -1161,7 +1161,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 72 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 74 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

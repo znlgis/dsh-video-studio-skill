@@ -437,6 +437,40 @@ def _candidate_row(design, script, outdir, n_frames, previewkit, designkit,
     }
 
 
+def _print_critic(rows):
+    """用 critic.py 给候选联系表打分并打印（失败只提示，不影响提案）。
+
+    为什么不 import critic 而是走子进程：critic 需要 numpy/PIL，而提案器本身
+    只需要 stdlib + designkit；把可选依赖塞进主流程会让"没装 numpy 也能提案"失效。
+    """
+    import subprocess as _sp
+    here = os.path.dirname(os.path.abspath(__file__))
+    found = [(r["id"], r["preview"]["sheet"]) for r in rows if r.get("preview", {}).get("sheet")]
+    if not found:
+        print("   审美打分: 跳过（没有联系表）")
+        return
+    args = [sys.executable, os.path.join(here, "critic.py")]
+    for _cid, sheet in found:
+        args += ["--image", sheet]
+    try:
+        r = _sp.run(args, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=300)
+    except Exception as e:                                    # noqa: BLE001
+        print("   审美打分: 失败（%s）" % e)
+        return
+    if r.returncode != 0:
+        print("   审美打分: 失败（critic.py 退出 %d：%s）"
+              % (r.returncode, (r.stderr or r.stdout)[-200:]))
+        return
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines()
+             if ln.strip() and not ln.startswith("-") and not ln.startswith("审美质检")
+             and not ln.startswith("提示：")]
+    print()
+    print("   审美打分（离线启发式，只用于排序，分差 >15 通常说明该换一个）:")
+    for ln in lines[:len(found)]:
+        print("     " + ln)
+
+
 def _fill_diversity(rows, designkit):
     """两两算设计距离，把"跟谁像/不像"写进每个候选（伪多方案门禁的输入）。"""
     for i, a in enumerate(rows):
@@ -451,7 +485,7 @@ def _fill_diversity(rows, designkit):
 
 
 def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out=False,
-                  with_audio=False, no_ledger=False, no_intake=False):
+                  with_audio=False, no_ledger=False, no_intake=False, critic=False):
     """生成一版提案（rev = 已有最大 rev + 1），落盘并打印人读摘要。"""
     designkit = _designkit()
     previewkit = _previewkit()
@@ -581,6 +615,10 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
                   % (r["id"], (r["pitch"] or r["label"])[:22], r["preview"]["secs"],
                      r["diversity"]["min_n"],
                      "OK" if r["diversity"]["min_n"] >= 2 else "!! 与某候选太像"))
+        # 审美打分：**默认不算**（要 --critic）。它是"四层 QA 之外"的一条参考线，
+        # 不进 proposal.json（那是契约，审美分不是契约的一部分），也不阻断任何流程。
+        if critic:
+            _print_critic(rows)
         if with_audio:
             print()
             print("   样音（12 秒 / 48 kHz 立体声）:")
@@ -691,7 +729,7 @@ def confirm(work, candidate, by="user", note="", json_out=False,
     return prev
 
 def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=False,
-           with_audio=False, no_ledger=False, no_intake=False):
+           with_audio=False, no_ledger=False, no_intake=False, critic=False):
     """不满意就重出：新 rev 不覆盖旧 rev，feedback 原文留存（这就是"迭代"的审计）。"""
     if not str(feedback or "").strip():
         raise SystemExit("[proposal] --revise 需要一段要求（例如：更冷一点、女声、节奏快些）")
@@ -702,7 +740,7 @@ def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=Fal
     return make_proposal(str(feedback), script, work, n=n, seed=seed,
                          n_frames=n_frames, json_out=json_out,
                          with_audio=with_audio, no_ledger=no_ledger,
-                         no_intake=no_intake)
+                         no_intake=no_intake, critic=critic)
 
 
 def diff(work, rev_a, rev_b, json_out=False):
@@ -825,6 +863,8 @@ def main(argv=None):
     ap.add_argument("--script", default="film.json")
     ap.add_argument("--brief", default="", help="一句话题材/要求（首次提案用）")
     ap.add_argument("--n", type=int, default=3, help="候选数（默认 3，最少 2）")
+    ap.add_argument("--critic", action="store_true",
+                    help="附带审美打分（离线启发式 0-100，只用于排序候选，不写 proposal.json）")
     ap.add_argument("--seed", default=None,
                     help="采样种子：给了就逐字节可复现（调试/回归用）；"
                          "不给则每次都不同（默认，满足『每条视频都不一样』）")
@@ -886,14 +926,14 @@ def main(argv=None):
             revise(a.work, a.revise, a.script, n=a.n, seed=a.seed,
                    n_frames=a.n_frames, json_out=a.json,
                    with_audio=a.with_audio, no_ledger=a.no_ledger,
-                   no_intake=a.no_intake)
+                   no_intake=a.no_intake, critic=a.critic)
             return 0
         if a.brief or os.path.exists(a.script):
             script = _load_script(a.script)
             make_proposal(a.brief, script, a.work, n=a.n, seed=a.seed,
                           n_frames=a.n_frames, json_out=a.json,
                           with_audio=a.with_audio, no_ledger=a.no_ledger,
-                          no_intake=a.no_intake)
+                          no_intake=a.no_intake, critic=a.critic)
             return 0
         ap.print_help()
         return 0

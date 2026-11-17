@@ -31,12 +31,22 @@ import wave
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1920, 1080
+# 本文件可能被两种方式加载：`python filmkit.py`（自身目录在 sys.path），
+# 或 `from filmkit import ...`（调用方已把 scripts/ 插进 sys.path）。
+# 为了在两种情况下都能 import 同目录的 layoutkit，这里显式兜一次。
+if __package__ in (None, ""):
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+
+# 画布与安全区来自 layoutkit（单一真源）：这里**不再**写死数字。
+# 以前 W/H/SAFE/SUB_BAND 在这个文件顶部各写一遍，而 scenes.py / preflight / qa_frames
+# 又各自 from filmkit import 复制一份值——"改画布尺寸"于是变成"找到所有副本"。
+# layoutkit 的默认 profile 与原来逐字节相同（golden_frames 守这条）。
+from layoutkit import H, SAFE, SUB_BAND, SUB_MAX_CHARS, W  # noqa: E402
+
 FPS = 30
 SR = 48000
-SAFE = (64, 58, 1856, 974)
-SUB_BAND = (180, 872, 1740, 1030)   # 字幕带：两行 + 距画面底部 50px，永不被裁
-SUB_MAX_CHARS = 24                  # 单行字幕中文字数上限
 SUB_MAX_HOLD = None                 # None = 字幕覆盖整句（默认）；设数字则钳住最大停留秒数
 
 # 提示点里好写的语义别名 -> sfxkit 配方名（sfxkit 自己也有同一张表，两边保持一致）

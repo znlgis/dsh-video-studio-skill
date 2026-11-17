@@ -2531,6 +2531,96 @@ def t_foreground_pinned():
                 % (i, int(diff.max())))
     return "前景坐标与 s 无关；push=0 恒 1.0；statement 标题带 30 帧逐字节一致"
 
+def t_layout_single_source():
+    """73 画布/安全区单一真源：filmkit 的 W/H/SAFE/SUB_BAND 必须来自 layoutkit。
+
+    为什么值得一条断言：这些常量以前在 filmkit 顶部写一遍，scenes.py / preflight /
+    qa_frames 又各自 from filmkit import 复制。"改画布尺寸"于是等于"找到所有副本"——
+    而竖屏恰好就是改画布尺寸，所以它一直做不了。收成一份之后，还要防止有人手一滑
+    又把数字写回 filmkit（那种回归不会有任何报错，只会让两处慢慢漂移）。
+
+    验四件事：① layoutkit 默认值与历史值逐项相等；② filmkit 导出的就是 layoutkit 的；
+    ③ scenes.py 从 filmkit 取的 W/H 等于 layoutkit 的（画面坐标系没被绕过）；
+    ④ profile() 给的是副本，改局部不会污染全局。
+    """
+    import layoutkit as LK
+    detail = LK.verify_defaults()          # ① 与写死的历史值比对（不拿自己比自己）
+    for name, want in (("W", LK.W), ("H", LK.H), ("SAFE", LK.SAFE),
+                       ("SUB_BAND", LK.SUB_BAND), ("SUB_MAX_CHARS", LK.SUB_MAX_CHARS)):
+        got = getattr(K, name)
+        assert got == want, "filmkit.%s=%r 与 layoutkit 的 %r 不一致（有人把数字写回去了？）" % (name, got, want)
+    # assets/scenes.py 只在装了包的场景存在（CI 里可能只拷 scripts/），缺了就跳过这段；
+    # 但**只要它在**，坐标系就必须与 layoutkit 一致——这是能不能做竖屏的前提。
+    SC = _load_scenes_mod()
+    if SC is None:
+        return detail + " · filmkit 取自同一份（没有 assets/scenes.py，跳过坐标系核对）"
+    assert (SC.W, SC.H) == (LK.W, LK.H), \
+        "scenes 的坐标系 (%r,%r) 与 layoutkit (%r,%r) 不一致：画面会画到画布外" % (
+            SC.W, SC.H, LK.W, LK.H)
+    p = LK.profile()
+    p["w"] = 1                       # ④ 改副本不许影响本体
+    assert LK.W != 1 and LK.profile()["w"] == LK.W, "profile() 交出去的不是副本"
+    return detail + " · filmkit/scenes 均取自同一份"
+
+
+def t_critic_offline():
+    """74 审美质检：离线、可复现、不写 proposal.json。
+
+    四层 QA + VMAF + ASR 全在回答"不能出错"，没有一条回答"好不好看"。critic 补这一环，
+    也因此必须守住三条边界，否则它会变成又一个"看起来在查、其实在猜"的模块：
+    ① 同一张图两次打分必须相同（确定性，禁 random）；
+    ② 它认不出联系表就不许瞎判（多帧拼图跳过安全区，而不是报 700px 越界）；
+    ③ 它**不写** proposal.json——审美分不是提案契约的一部分。
+    """
+    crit = os.path.join(HERE, "critic.py")
+    if not os.path.exists(crit):
+        return "skip（没有 critic.py）"
+    try:
+        import numpy  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except Exception:                                         # noqa: BLE001
+        return "skip（缺 numpy/Pillow）"
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="vs_critic_selfcheck_")
+    img = os.path.join(tmp, "frame.png")
+    from PIL import Image as _I, ImageDraw as _D
+    im = _I.new("RGB", (1920, 1080), (18, 22, 30))
+    d = _D.Draw(im)
+    d.rectangle([120, 140, 900, 420], fill=(233, 236, 241))      # 一块明显的前景
+    d.rectangle([120, 700, 1760, 760], fill=(60, 130, 220))
+    im.save(img)
+
+    def _score(pic):
+        r = subprocess.run([sys.executable, crit, "--image", pic, "--json"],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                        timeout=300)
+        assert r.returncode == 0, "critic.py 失败：%s" % (r.stderr or r.stdout)[-300:]
+        return json.loads(r.stdout)
+
+    a = _score(img)
+    b = _score(img)
+    sa = a["items"][0]["score"]
+    sb = b["items"][0]["score"]
+    assert sa == sb, "同一张图两次打分不同（%r vs %r）：critic 必须确定性" % (sa, sb)
+    assert 0.0 <= sa <= 100.0, "分数量纲不对：%r" % (sa,)
+    assert a["items"][0].get("metrics"), "缺 metrics（没法解释为什么扣分）"
+
+    # 联系表（多帧拼图）必须跳过安全区判定，而不是稳定误报
+    sheet = os.path.join(tmp, "_sheet.png")
+    strip = _I.new("RGB", (1440, 270), (18, 22, 30))
+    ds = _D.Draw(strip)
+    for i in range(3):
+        ds.rectangle([i * 480 + 20, 20, i * 480 + 460, 250], fill=(233, 236, 241))
+    strip.save(sheet)
+    js = _score(sheet)
+    note = " ".join(js["items"][0].get("notes") or [])
+    assert "联系表" in note, "联系表没有被识别（应该跳过安全区判定）：%r" % (note,)
+    assert "安全区" not in note.replace("跳过安全区判定", ""), \
+        "联系表被判了安全区越界：%r" % (note,)
+    return "确定性一致（%.1f）/ metrics 齐全 / 联系表跳过安全区" % sa
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2604,6 +2694,8 @@ CASES = [
     ("70 出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）", t_intake_gate),
     ("71 默认设计不画装饰细线（母题/底纹/HUD 全关）", t_plain_design_has_no_hairlines),
     ("72 前景不随镜头位移（1px 台阶回归）", t_foreground_pinned),
+    ("73 画布/安全区单一真源（layoutkit）", t_layout_single_source),
+    ("74 审美质检（离线/确定/联系表不误判）", t_critic_offline),
 ]
 
 
