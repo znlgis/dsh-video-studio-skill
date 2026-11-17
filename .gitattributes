@@ -1,0 +1,17 @@
+# 统一行尾：这个仓库所有文本文件都是 LF（含 Windows 上编辑的）。
+# 没有这一行时，某些编辑器/工具会悄悄把整个文件改写成 CRLF，
+# 于是 git diff 变成"改了 5000 行"，真正的改动被噪声埋掉——实测踩过一次：
+# filmkit.py 的 3 行改动显示成 5965 行。
+* text=auto eol=lf
+
+# GitHub Actions 的 workflow 必须是 LF；显式钉住，别指望 auto。
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 二进制，别让 git 猜。
+*.png binary
+*.jpg binary
+*.gif binary
+*.mp4 binary
+*.wav binary
+*.mp3 binary

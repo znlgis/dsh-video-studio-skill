@@ -1,0 +1,46 @@
+# pyproject.toml — 工具配置（不是打包清单）
+#
+# 这个仓库是 **npm 包**（package.json），Python 侧只是随包分发的脚本目录，
+# 所以这里**没有** [project] / [build-system]：pip 不该把它当 Python 包安装。
+# 它存在的唯一目的是让 ruff / mypy / pytest 在仓库根一次配置、处处一致。
+#
+# 为什么默认规则这么保守：仓库里有 20+ 个上百 KB 的脚本，全是“先能跑再谈风格”
+# 的历史代码。一上来开 ALL 规则只会得到几千条告警，然后所有人加 noqa 关掉它们——
+# 那不是 lint，那是把问题埋起来。这里只开**真 bug** 级别：F（未使用/未定义名字）、
+# E9（语法类错误）、B（常见陷阱：除零、可变默认参数、循环里改 list）。
+
+[tool.ruff]
+line-length = 120          # 历史代码偏长，120 而不是 88，避免噪声淹没有效告警
+target-version = 'py39'    # 与 ci_check 第 8 项（3.9 语法兼容）+ THIRD_PARTY_NOTICES 一致
+extend-exclude = [
+    'skills/video-studio/scripts/__pycache__',
+    'skills/video-studio/assets/web',   # JS 页面，不是 Python
+    'node_modules', 'work', 'out',
+]
+
+[tool.ruff.lint]
+select = ['F', 'E9', 'B']
+ignore = [
+    'E501',   # 行长：line-length 约束新代码，历史代码不返工
+    'B008',   # 默认值里调用函数：本项目 argparse 大量依赖这个模式
+]
+
+[tool.ruff.lint.per-file-ignores]
+# selfcheck 有意写成一整个大文件（一条用例一个函数，必须同屏能读完），
+# 里面大量 “缺可选模块时只 SKIP 该条” 的函数内 import。
+'skills/video-studio/scripts/selfcheck.py' = ['F401']
+
+[tool.mypy]
+python_version = '3.9'
+# 历史代码没有类型注解：先只查**显式标注过**的函数内部，
+# 新写的代码自动受保护，老代码不会一次爆出几千条 error。
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+exclude = ['skills/video-studio/assets/web/.*', 'node_modules/', '__pycache__/']
+
+[tool.pytest.ini_options]
+# 主回归不用 pytest（selfcheck.py 是零依赖自带断言器）；这条只为将来新增 tests/ 时不踩路径坑。
+testpaths = ['tests']

@@ -6,6 +6,60 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.3.0 — 削上下文税 + 补 CI 盲区 + 审美质检（2026-11-17）
+
+> 依据：一轮完整审计（不是会话反馈）。结论是**功能不缺，缺的是“每次都在交的税”和“从没被验证的断言”**：
+> frontmatter description 每轮占 734 字；SKILL.md 98 KB 触发即全量进上下文；
+> CI 只装 numpy/Pillow，于是**最重要的画质门禁（cv2 锐度比）整年在 CI 上走降级分支**；
+> 四个自带 `--selftest` 的模块一个都没进 CI；"3.9 语法兼容"这条断言没有任何 job 真跑 3.9；
+> 文档里的"N 条断言"三处写了两个值。
+
+### P0：把每轮的上下文税降下来
+
+| 项 | 内容 |
+|---|---|
+| 现象 | frontmatter `description` 734 字，且它**不是只在触发时**进上下文——每一轮系统提示里都有 |
+| 修法 | 压到 373 字（中文触发词 + 一句英文能力边界），流程细节留给正文 §0.4/§5 |
+| 护栏 | `ci_check` 第 4 项新增 `DESC_MAX_CHARS = 400` 上限断言（以前只有下限 20） |
+| SKILL.md 减重 | §12「参考机器环境事实」→ `references/machine-facts.md`（换机就失效的数字不该常驻）；§10 脚本长表 → `references/script-index.md`，正文只留"哪个脚本干什么"的 11 行短表；98 KB → 87 KB（实测 98182 → 87206 字节） |
+
+### P0：CI 覆盖对齐真实依赖
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `skill` job 只 `pip install numpy Pillow`；而 "编码锐度比 ≥ 0.85" 这条画质门禁**只由 cv2 实现**，缺了就降级 WARN —— 等于最重要的一条门禁从没在 CI 上真跑过 |
+| 修法 | 装 `opencv-python-headless scipy`；新增 `musicgen`/`qaasr`/`qavmaf` 三条 selftest；`webengine` 单独一个 job（要下 chromium）；新增 `py39` job 用真 3.9 解释器跑仓库体检 |
+| Windows | 新增 `skill-windows` **advisory** job（`continue-on-error`）：`filmkit` 有 `os.name == "nt"` 分支、字体全是 `C:\Windows\Fonts\*`，这条最可能坏的路径以前零回归。等连续绿几轮再转必过 |
+
+### P1：数字与依赖的可复现
+
+| 项 | 内容 |
+|---|---|
+| 条数漂移 | 新增 `ci_check` 第 13 项「断言条数一致」：AST 读 `selfcheck.CASES` 真实长度，与 SKILL.md/README/ci.yml 里"N 条断言/N 条全绿"的口径逐处比对（只认总数句式，`第 35/36 条` 这类序数不误伤）——第一版正则就误报了 4 处 |
+| 依赖上界 | `requirements.txt` 从只有 `>=` 改为 `numpy>=1.24,<3`、`Pillow>=10.0,<13`、`edge-tts>=6.1,<8`、`opencv…<6`：以"可复现"为卖点的项目，上游小版本漂移会同时打穿金帧与锐度门禁 |
+| 工具链 | 新增 `pyproject.toml`（ruff/mypy/pytest 配置，**没有** `[project]`：这是 npm 包，pip 不该装它）。规则只开 F/E9/B：历史代码一上来开 ALL 只会得到几千条告警然后被 noqa 埋掉 |
+
+### P1：单真源与交付凭据
+
+| 项 | 内容 |
+|---|---|
+| 字体双真源 | `FONT_CANDIDATES` 与 `FONT_FAMILIES["sans"]` 各抄一份同一批路径，加字体要改两处。现在 sans 由 `FONT_CANDIDATES` **派生**（`mono` 不进族表），并顺手补上 macOS PingFang 的 light 回退 |
+| 绝对路径 | `gates.signoff_state` 的 detail 会把 `%TEMP%\vs-smoke-xxxx\signoff.json` 整个写进 `out/QC-REPORT.md`——交付凭据里出现作者机器的临时目录。改为只报 basename |
+| package.json | `files` 由 6 行逐个列 `tools/*.py` 改为整目录 `tools`：以前新增 `tools/foo.py` 会漏进包（`ci_check` 第 6 项虽能兜住，但那是事后报警） |
+
+### P2：审美质检与门面
+
+| 项 | 内容 |
+|---|---|
+| 新增 `scripts/critic.py` | 四层 QA + VMAF + ASR 全在回答"不能出错"，没有一条回答"好不好看"。它做**离线启发式**打分（安全边距 / 明暗对比 / 色相分散 / 文字密度 / 重心平衡 → 0-100），并留 `--vlm-cmd` 挂钩把联系表交给用户自己的 VLM 命令（本脚本不联网、不带 key）。**不改 `proposal.json`**、不进 `--stage qa` 账本：审美分不该绑架交付 |
+| 口径校准 | 对比度最初用 p5–p95，结果一张**正常的浅底列表页**只有 0.066（误报"低对比"）；实测 p2/p98 = 0.081、p1/p99 = 0.63、p0.5/p99.5 = 0.73 —— 文字只占 1% 时宽分位带落在底色自身的窄带里。改成"底色（边框众数）与尾端 0.3%/99.7% 的较大差"后同一张图 0.066 → 0.69 |
+| 新增 `scripts/studio.py` | 20+ 脚本、约 200 个开关，对人是记忆负担、对 agent 是犯错概率。薄门面只做映射 + **未知参数原样透传**，现成脚本一个都不改（门面坏了也不影响出片） |
+
+### 验收
+
+`tools/ci_check.py` **13 项全绿**（原 12 项 + 断言条数一致）；`skills/video-studio/scripts/selfcheck.py` **72 条全绿**
+（CASES 未动——这一版改的是上下文、CI、依赖与文档，**没有动渲染行为**，所以金帧基线不需要重录）。
+
 ## 1.2.0 — 默认素净（无细线）+ 前景锁定（不抖）（2026-11-16）
 
 > 依据：真实会话反馈「生成的视频默认带着一些细线」「大部分画面有比较明显的抖动和移动」。

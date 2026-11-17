@@ -1,18 +1,18 @@
 # 仓库体检 + 技能自检。
 #
 # 两个 job 分工明确（别把两者混为一谈）：
-#   repo     —— tools/ci_check.py 的 12 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
+#   repo     —— tools/ci_check.py 的 13 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
 #               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
-#               film.json 契约）。不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：70 条针对真实缺陷的回归断言
+#               film.json 契约、断言条数一致）。不需要 ffmpeg、字体、网络，
+#               任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
+#   skill    —— skills/video-studio/scripts/selfcheck.py：72 条针对真实缺陷的回归断言
 #               （数为准的是 CASES 列表，不是文档里的任何数字）。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
 #
-# 为什么 skill 只在 Linux 跑：selfcheck 要 ffmpeg（libx264/aac/loudnorm）+ 中文字体，
-# windows-latest 镜像是否预装这两样没有核实过（本机 Windows 能跑≠runner 能跑）；
-# 与其押一个可能天天红的 job，不如先只跑 repo 检查。等核实（或改用 setup-ffmpeg + 字体下载）
-# 之后再决定要不要补 Windows skill job——这条留给维护者决策，不是遗漏。
+# 平台覆盖：repo 检查 Ubuntu + Windows + Python 3.9 各跑一遍（3.9 是为了让 ci_check 的
+# "3.9 语法兼容"那条断言真的有人验证）；skill 自检跑 Linux（必过）+ Windows（advisory，
+# 见文件末尾 skill-windows 的注释：等它连续绿几轮就转必过）。
 #
 # 不联网跑 TTS：selfcheck 只用合成信号与本地编码，不需要 edge-tts 真的合成。
 name: ci
@@ -66,10 +66,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+      # 装齐"强烈建议"与可选依赖，而不是只装必需：
+      # cv2 是"编码锐度比 ≥ 0.85"这条画质门禁的唯一实现，只装 numpy/Pillow 会让它
+      # 整年在 CI 上走降级 WARN 分支——等于最重要的画质门禁从没被真跑过。
+      # scipy 决定 sfxkit 走 IIR 还是 FFT 兜底（两条路径都要有覆盖，见下一步）。
       - name: install python deps
         run: |
           python -m pip install --upgrade pip
-          pip install numpy Pillow
+          pip install numpy Pillow opencv-python-headless scipy
       - name: selfcheck
         working-directory: skills/video-studio/scripts
         env:
@@ -98,6 +102,27 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python qa_frames.py --selftest
 
+      # ---- 下面四个模块各有 --selftest，以前一个都没进 CI --------------------
+      # webengine 是 122 KB / 38 个开关的大模块，不进 CI 等于完全裸奔。
+      # 它们都不联网；webengine 会真起无头浏览器，所以单独放到 web 那个 job 里跑。
+      - name: 'selftest: musicgen（参数化配乐编排）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python musicgen.py --selftest
+
+      - name: 'selftest: qaasr（ASR 回读判分逻辑，不加载模型）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python qaasr.py --selftest
+
+      - name: 'selftest: qavmaf（三档语义：没查不许写成通过）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python qavmaf.py --selftest
+
       # 兜底路径也要测：用户没装 scipy 时所有 IIR 走"分块 FFT 卷积"，
       # 那才是他们真正跑的代码。屏蔽 scipy 再跑一遍，断言按路径自适应
       # （见 sfxkit PERF_BUDGET_*）。
@@ -105,3 +130,68 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tools/selftest_noscipy.py sfxkit scorekit
+
+  # 浏览器引擎单独一个 job：要下 chromium，慢且容易在网络层抖，
+  # 不该拖累主 skill job 的反馈速度。
+  web:
+    name: webengine selftest (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps + chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy Pillow playwright
+          python -m playwright install --with-deps chromium
+      - name: 'selftest: webengine（无头浏览器逐帧渲染）'
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python webengine.py --selftest
+
+  # 3.9 语法断言（ci_check 第 8 项）以前没有任何 job 真正跑 3.9：
+  # 断言的兼容性没人验证。这里用 3.9 真解释器跑仓库级体检，把"写了就没人试"补上。
+  py39:
+    name: python 3.9 compat (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: repo check on 3.9
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/ci_check.py -v
+
+  # ---------------------------------------------------------------- 观察中的 Windows 回归
+  # 为什么需要它：filmkit 有 `os.name == "nt"` 分支、字体表全是 C:\Windows\Fonts\*、
+  # 子进程调用走 shell=True —— 这一整套"最可能坏"的路径以前从来没有回归。
+  #
+  # 为什么先挂 continue-on-error：windows-latest 是否预装 libx264/aac 的 ffmpeg、
+  # 是否带 msyh 字体，**没有核实过**。与其押一个可能天天红的必过 job（红了就会被无视），
+  # 不如先让它跑并出声。等它连续绿几轮，把下面这行删掉、转成必过。
+  # —— 这不是遗漏，是一个有时间点的决定；写成注释是为了别让它永远"观察中"。
+  skill-windows:
+    name: skill selfcheck (Windows, advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ffmpeg
+        run: choco install ffmpeg -y --no-progress
+      - name: install python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy Pillow opencv-python-headless
+      - name: selfcheck
+        working-directory: skills/video-studio/scripts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python selfcheck.py

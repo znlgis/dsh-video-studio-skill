@@ -67,6 +67,12 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  # 参数化配乐编排器（不提供曲风表，按参数现场编排）
                  "musicgen"}
 MAX_FILE_BYTES = 400 * 1024
+# frontmatter description 的硬上限（理由见 t_manifest）：这行文字**每一轮**都进上下文，
+# 而它的读者只有“要不要触发技能”这一个判断。能力细节属于正文，不属于这一行。
+DESC_MAX_CHARS = 400
+# 本文件的检查项数（main() 里那张 checks 表的长度）。文档与分发页写的"仓库体检 N 项"
+# 要与它一致；改这里必须同批改 CHECKS 表，否则这项自检会先失败——这是故意的。
+CI_CHECK_COUNT = 13
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
 SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv"}
@@ -200,8 +206,14 @@ def t_manifest():
     desc = re.search(r"^description:\s*(.+)$", fm, re.M)
     assert name, "frontmatter 缺 name"
     assert desc and len(desc.group(1).strip()) >= 20, "frontmatter 缺 description 或太短"
+    # 上限和下限一样重要：description 出现在**每个会话的每一轮**系统提示里（不是只在触发时），
+    # 一份 700 字的说明就是持续的上下文税。
+    d_len = len(desc.group(1).strip())
+    assert d_len <= DESC_MAX_CHARS, (
+        "frontmatter description 太长（%d 字 > %d）：它每轮都在上下文里，"
+        "触发场景 + 一句能力边界就够，流程细节写进正文" % (d_len, DESC_MAX_CHARS))
     assert name.group(1) == "video-studio", "frontmatter name=%r，应为目录名 video-studio" % name.group(1)
-    return "name=video-studio / description %d 字" % len(desc.group(1).strip())
+    return "name=video-studio / description %d 字（上限 %d）" % (d_len, DESC_MAX_CHARS)
 
 
 # ---------------------------------------------------------------- 4 依赖白名单
@@ -542,6 +554,68 @@ def t_film_contract():
                                % (p.returncode, out.strip()[-600:]))
     return "夹具 film.json 通过契约校验；schema %d 字节" % len(schema.read_text(encoding="utf-8"))
 
+# ---------------------------------------------------------------- 13 断言条数一致
+def t_case_count():
+    """文档里写的"N 条断言"必须等于 selfcheck.CASES 的真实长度。
+
+    这条检查是给一次真实事故收的尾：CHANGELOG 记着编号表"落后过两次"
+    （停在 43 而 CASES 已 51、停在 51 而 CASES 已 58），ci.yml 的注释也一度写 70
+    而 CASES 是 72。数字写错不会让片子出问题，但会让"我查过了"这类说法贬值——
+    读者发现一处对不上，就会怀疑其余每一处。
+
+    口径：只扫**断言类**句子（同一行里同时出现 selfcheck/回归护栏/针对真实缺陷/断言
+    与"N 条"），CHANGELOG 里"17 条反模式"这种无关计数不会被误伤；CHANGELOG 是历史
+    记录，本来就会保留旧数字，不参与这项检查。
+    """
+    src = SCRIPTS / "selfcheck.py"
+    assert src.is_file(), "缺 scripts/selfcheck.py"
+    # 不 import：selfcheck 会 import numpy 等模块，ci_check 要能在裸机器上跑。
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    cases = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "CASES" for t in node.targets):
+            if isinstance(node.value, (ast.List, ast.Tuple)):
+                cases = len(node.value.elts)
+            break
+    assert cases is not None, "selfcheck.py 顶层找不到 CASES = [...]（断言器的主清单）"
+
+    # 分发页文案也算"文档"：marketplace-entry.json 曾写着"自检 69 条、仓库体检 12 项"，
+    # 而 CASES 已经是 72 —— 用户看到的简介与仓库真实状态不一致，比内部文档漂移更伤。
+    docs = [SKILL / "SKILL.md", ROOT / "README.md", ROOT / ".github" / "workflows" / "ci.yml",
+            ROOT / "marketplace-entry.json"]
+    docs += sorted((ROOT / "locale").glob("*.json"))
+    # 只认**总数句式**："72 条全绿 / 72 条断言 / 自检 72 条"。
+    # "selfcheck 第 35/36 条" 这种序数引用不能算总数——第一版正则就是这样误伤了 4 处。
+    # 分发页文案（marketplace）写的是"自检 69 条"，所以带上这个句式。
+    # 两种口径分别匹配："N 条全绿/断言/..." 与 "自检 N 条"。
+    # 特意**不**把 "、，。（" 加进 lookahead：那会把"批量 ≤500 条""清单 20 条"这类
+    # 完全无关的数量一起抓进来（第一版就误报了 4 处）。
+    claim_re = re.compile("(?<![第\\d/])(\\d{2,3})\\s*条(?=全绿|断言|回归护栏|针对真实缺陷)")
+    selfcheck_re = re.compile("自检\\s*(\\d{2,3})\\s*条")
+    # "仓库体检 12 项" 指的是本文件的检查项数，口径不同，单独核。
+    ci_re = re.compile("仓库体检\\s*(\\d{1,2})\\s*项")
+    bad = []
+    for doc in docs:
+        if not doc.is_file():
+            continue
+        for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            for m in list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line)):
+                n = int(m.group(1))
+                # 只认"具体条数"：<10 的多半是编号（第 5 条）或区间，不当作总数。
+                if n >= 10 and n != cases:
+                    bad.append("%s:%d 写 %d 条（CASES 实际 %d 条）"
+                               % (doc.name, ln_no, n, cases))
+            for m in ci_re.finditer(line):
+                n = int(m.group(1))
+                if n != CI_CHECK_COUNT:
+                    bad.append("%s:%d 写仓库体检 %d 项（实际 %d 项）"
+                               % (doc.name, ln_no, n, CI_CHECK_COUNT))
+    assert not bad, "；".join(sorted(set(bad))[:6])
+    return ("CASES=%d 条 / ci_check=%d 项，与文档、CI 注释、分发页文案里的口径一致"
+            % (cases, CI_CHECK_COUNT))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印每一节的详细证据")
@@ -566,9 +640,12 @@ def main(argv=None) -> int:
         ("10 CI workflow 语法", t_ci_workflow),
         ("11 单文件体积", t_size),
         ("12 film.json 契约", t_film_contract),
+        ("13 断言条数一致", t_case_count),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)
+    assert len(checks) == CI_CHECK_COUNT, (
+        "checks 表有 %d 项，但 CI_CHECK_COUNT=%d：改表必须同批改常量，否则文档里的\"仓库体检 N 项\"口径就错了" % (len(checks), CI_CHECK_COUNT))
     for name, fn in checks:
         check(name, fn)
     for status, name, detail in _results:

@@ -258,13 +258,15 @@ def read_signoff(work):
     """读签核账本；坏 JSON 当作"没有签核"，但把原因带出来（不静默吞掉）。"""
     p = signoff_path(work)
     if not os.path.exists(p):
-        return {"schema": SCHEMA, "signed": {}}, "没有 %s（还没人签核过）" % p
+        # 只报 basename：交付凭据里写绝对路径，等于把作者机器的临时目录
+        # （%TEMP%\vs-smoke-xxxx）抄进用户仓库的 out/QC-REPORT.md。
+        return {"schema": SCHEMA, "signed": {}}, "没有 %s（还没人签核过）" % os.path.basename(p)
     try:
         d = json.load(open(p, encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        return {"schema": SCHEMA, "signed": {}}, "%s 读不了（%s）——当作没有签核" % (p, e)
+        return {"schema": SCHEMA, "signed": {}}, "%s 读不了（%s）——当作没有签核" % (os.path.basename(p), e)
     if not isinstance(d, dict) or not isinstance(d.get("signed"), dict):
-        return {"schema": SCHEMA, "signed": {}}, "%s 结构不对——当作没有签核" % p
+        return {"schema": SCHEMA, "signed": {}}, "%s 结构不对——当作没有签核" % os.path.basename(p)
     return d, ""
 
 

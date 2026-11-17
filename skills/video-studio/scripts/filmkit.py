@@ -266,15 +266,25 @@ def _run(cmd, **kw):
 
 # ---------------------------------------------------------------- 字体与字形
 _font_cache = {}
+# ---------------------------------------------------------------------------
+# 字体候选：**只在这里写一次**。
+#
+# 以前 FONT_CANDIDATES 与 FONT_FAMILIES["sans"] 各抄一份同一批路径，
+# 于是"加一个字体"要改两处、漏改一处就会出现「用 A 字体量宽度、用 B 字体绘制」
+# （文字溢出安全区）。现在 sans 族由本表派生，单一真源。
+#
+# 顺序即优先级：先 Windows 自带（msyh 一族覆盖最全），再 Linux Noto，
+# 最后 macOS PingFang（放在末尾是因为它没有独立的 bold 字重文件）。
+# mono 只保证 ASCII；中文请勿用 mono（consola 无中文字形，会画成方块）。
 FONT_CANDIDATES = {
     "bold": [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\simhei.ttf",
              "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
              "/System/Library/Fonts/PingFang.ttc"],
-    "reg": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc",
+    "reg": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/System/Library/Fonts/PingFang.ttc"],
-    "light": [r"C:\Windows\Fonts\msyhl.ttc", r"C:\Windows\Fonts\msyh.ttc"],
-    # mono 只保证 ASCII；中文请勿用 mono（consola 无中文字形，会画成方块）
+    "light": [r"C:\Windows\Fonts\msyhl.ttc", r"C:\Windows\Fonts\msyh.ttc",
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"],
     "mono": [r"C:\Windows\Fonts\consola.ttf", r"C:\Windows\Fonts\msyh.ttc",
              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"],
 }
@@ -285,13 +295,8 @@ FONT_CANDIDATES = {
 # 否则会出现"用 A 字体量宽度、用 B 字体绘制"——文字直接溢出安全区。
 # 每一族都给中文回退：找不到 serif/kai 时退到同族 reg 再退 sans，**绝不退到 mono**（无中文字形）。
 FONT_FAMILIES = {
-    "sans": {                      # 现状：微软雅黑一族
-        "bold": [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\simhei.ttf",
-                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"],
-        "reg": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf",
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"],
-        "light": [r"C:\Windows\Fonts\msyhl.ttc", r"C:\Windows\Fonts\msyh.ttc"],
-    },
+    # sans 由 FONT_CANDIDATES 派生（单一真源）：mono 不进族表，它没有中文字形。
+    "sans": {k: list(v) for k, v in FONT_CANDIDATES.items() if k != "mono"},
     "serif": {                     # 杂志 / 史诗：宋体系
         "bold": [r"C:\Windows\Fonts\NotoSerifSC-VF.ttf", r"C:\Windows\Fonts\simsun.ttc",
                  r"C:\Windows\Fonts\msyhbd.ttc"],

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.3.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -191,6 +191,8 @@ skills/video-studio/
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
   scripts/selfcheck.py       回归自检（72 条针对真实缺陷的断言）
+  scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
+  scripts/studio.py          薄门面（studio.py <子命令> 转调现成脚本，未知参数原样透传）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘）
   scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
@@ -206,7 +208,7 @@ skills/video-studio/
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
 schemas/film.schema.json     film.json 的契约（draft-07 子集）
-tools/ci_check.py            仓库级体检（12 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约，不需 ffmpeg）
+tools/ci_check.py            仓库级体检（13 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约/断言条数，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；含 preflight/vmaf/asr）
 tools/golden_frames.py       金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
 tools/silhouette_qa.py       剪影可区分门禁 G13（换设计不能只是换色）
@@ -251,7 +253,7 @@ peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 D
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 12 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
+python tools/ci_check.py -v     # 13 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /
