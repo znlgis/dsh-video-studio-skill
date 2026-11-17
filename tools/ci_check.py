@@ -219,8 +219,57 @@ def t_manifest():
 
 
 # ---------------------------------------------------------------- 4 依赖白名单
+def _stdlib_names():
+    """标准库模块名集合（**兼容 3.9**）。
+
+    `sys.stdlib_module_names` 是 3.10 才有的；这个文件要在 3.9 上跑
+    （py39 job 就是为了验证"仓库真的还能在 3.9 上跑"），所以不能直接用。
+    3.9 上退回"内建模块 + stdlib 目录里的顶层 .py 名"，够识别 import 的顶层名。
+    """
+    names = set(sys.builtin_module_names)
+    getter = getattr(sys, "stdlib_module_names", None)
+    if getter is not None:
+        return set(getter)
+    # 3.9 回退：内建 + stdlib 顶层 .py/目录 + **C 扩展**（unicodedata/binascii 这类
+    # 在 DLLs/ 或 lib-dynload/ 里，只扫 stdlib 目录会漏掉它们，进而把合法 import
+    # 误报成"不在白名单"）。
+    try:
+        import sysconfig
+        paths = sysconfig.get_paths()
+        roots = [paths.get("stdlib") or "", paths.get("platstdlib") or ""]
+        for root in roots:
+            if not root or not os.path.isdir(root):
+                continue
+            try:
+                entries = os.listdir(root)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry in ("site-packages", "dist-packages", "__pycache__"):
+                    continue
+                if entry.endswith(".py"):
+                    names.add(entry[:-3])
+                    continue
+                full = os.path.join(root, entry)
+                if os.path.isdir(full):
+                    names.add(entry)
+                    continue
+                # 顶层 C 扩展：unicodedata.pyd / _ssl.so / ...
+                base, ext = os.path.splitext(entry)
+                if ext.lower() in (".pyd", ".so", ".dll", ".dylib"):
+                    names.add(base.split(".")[0])
+    except Exception:                                       # noqa: BLE001
+        pass
+    # 兜底：标准库顶层包里最常被 import 的几个（老版本布局差异）
+    names.update({"collections", "concurrent", "ctypes", "encodings", "importlib",
+                  "json", "logging", "multiprocessing", "unittest", "urllib",
+                  "xml", "sqlite3", "email", "html", "http", "wsgiref",
+                  "unicodedata", "binascii", "array", "select", "socket"})
+    return names
+
+
 def t_deps():
-    stdlib = set(sys.stdlib_module_names)
+    stdlib = _stdlib_names()
     bad = []
     for p in _py_files():
         tree = ast.parse(p.read_text(encoding="utf-8"))
@@ -390,6 +439,12 @@ def t_size():
 # 这正是"门禁看着干净、其实没在查"的典型形态：zip(..., strict=True) 在 3.9 上是 TypeError
 # （zip() takes no keyword arguments），而语法检查一路绿灯。
 # 只查**确定**不兼容且容易误用的这几个；不要按 BinOp|BitOr 一律报错（numpy 位或会刷假失败）。
+# 这两个节点类型在旧解释器上不存在（TryStar 3.11+ / Match 3.10+）。
+# 先 getattr 落成模块级常量，下面的 isinstance 才能在本文件**自己**跑在 3.9 上时也安全。
+_AST_TRyStar = getattr(ast, "TryStar", None)
+_AST_MATCH = getattr(ast, "Match", None)
+
+
 def _py39_runtime_violations(tree):
     """扫 3.10+ 运行期 API。返回 [(行号, 说明)]。"""
     out = []
@@ -428,9 +483,14 @@ def _py39_runtime_violations(tree):
         elif isinstance(node, ast.ImportFrom):
             if (node.module or "").split(".")[0] == "tomllib":
                 out.append((node.lineno, "tomllib 需要 Python 3.11+"))
-        elif isinstance(node, ast.TryStar):
+        # 注意：TryStar / Match 这两个 AST 节点类型本身在 3.9 上**不存在**。
+        # 直接写 isinstance(node, ast.TryStar) 会让整个检查在 3.9 上抛
+        # AttributeError: module 'ast' has no attribute 'TryStar' ——
+        # 而这正是"Python 3.9 兼容检查"这条断言自己的工作，等于它从没在 3.9 上跑过
+        # （py39 job 从 v1.3.0 起一直红，红的原因就是它自己崩了）。
+        elif _AST_TRyStar is not None and isinstance(node, _AST_TRyStar):
             out.append((node.lineno, "except* 需要 Python 3.11+"))
-        elif isinstance(node, ast.Match):
+        elif _AST_MATCH is not None and isinstance(node, _AST_MATCH):
             out.append((node.lineno, "match/case 需要 Python 3.10+"))
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
             if not has_future_annotations and id(node) in ann_nodes:

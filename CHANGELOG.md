@@ -6,6 +6,33 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.3 — py39 job 终于真的在 3.9 上跑通（它自己就是坏的那个）（2026-11-17）
+
+> 1.8.2 把 CI 五个 job 修到只剩 `py39` 一个红。修这一个时发现了本轮最讽刺的一条：
+> **"Python 3.9 语法兼容"这项检查自己用了 3.10+/3.11+ 的 API**，所以它在 3.9 上必然崩。
+> 而这个 job 从 v1.3.0 起就一直红，红的原因没人看——等于这项检查从诞生起就没验证过。
+
+### P0：`ci_check` 自己不能跑在 3.9 上
+
+| 项 | 内容 |
+|---|---|
+| 现象 | py39 job 上 `ci_check` 两项失败：`5 三方依赖白名单：AttributeError: module 'sys' has no attribute 'stdlib_module_names'`、`8 Python 3.9 语法兼容：AttributeError: module 'ast' has no attribute 'TryStar'` |
+| 根因 1 | `t_deps()` 用 `sys.stdlib_module_names`（**3.10+**）来识别标准库顶层名 |
+| 根因 2 | `_py39_runtime_violations()` 里直接写 `isinstance(node, ast.TryStar)`（**3.11+**）与 `ast.Match`（**3.10+**）——用来检测"用了高版本语法"的代码，自己先用了高版本 API |
+| 为什么长期没发现 | py39 job 一直红，且红的第一个原因是 runner 找不到 3.9（见 1.8.2）。两层红叠在一起，没人往下看第二层 |
+| 修法 | `_stdlib_names()`：优先用 `sys.stdlib_module_names`，3.9 上退回"内建 + stdlib 顶层 .py/目录 + **C 扩展**（`DLLs/*.pyd`、`lib-dynload/*.so`）"。只扫 .py 会把 `unicodedata`/`binascii` 这类扩展模块漏掉，进而把合法 import 误报成"不在白名单"（实测第一版就漏了）；`_AST_TRyStar`/`_AST_MATCH` 用 `getattr(ast, ...)` 落成模块级常量，旧解释器上是 `None` 就不参与 isinstance |
+| 验证 | 在**模拟 3.9**（删掉 `sys.stdlib_module_names` 与 `ast.TryStar/Match`）下跑完整 `ci_check`：**13 项全绿**；并做负向验证——塞入 `tomllib`/`match`/`except*`/`zip(strict=)` 四种 3.10+ 用法，4 条全部被抓出，说明检查本身没有被削弱 |
+
+### 顺带确认（都不需要改）
+
+- `ast.parse(..., feature_version=(3, 9))` 的元组写法在 3.9 上是**安全**的：CPython 3.9 的 `ast.py` 里明确有 `if isinstance(feature_version, tuple): major, minor = feature_version`。查过源码才敢下结论，不靠"猜它应该支持"。
+- `starlette`/`tomllib` 等 3.10+ 用法检测在 3.9 上仍能正常报出（`feature_version` 会拒绝 `match`/`except*` 语法，运行期 API 由 AST 扫描兜住）。
+
+### 验收
+
+`selfcheck` **77 条全绿**；`ci_check` **13 项全绿**（原生 3.12 与模拟 3.9 各一遍）；`ruff` **0 违规**；
+CI 五个 job 全绿。
+
 ## 1.8.2 — CI 修复：把"从 v1.3.0 起就一直红的两个 job"才修好（2026-11-17）
 
 > 1.8.1 推送后 CI 有 5 个 job 失败。查下来只有 2 项是 1.8.1 自己的问题，另外 3 项是
