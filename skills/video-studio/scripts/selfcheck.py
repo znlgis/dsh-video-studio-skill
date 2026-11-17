@@ -2667,6 +2667,16 @@ def t_portrait_profile():
         "SC._fit_px(50, 5000.0, 'x' * 40, 96)",
         "out['clamped'] = len(SC._CLAMPED)",
         "import stylekit as ST",
+        "# 构图内部的竖屏分支：compare 上下对照 / process 竖向轴；两者都必须走到自己的分支",
+        "cmp_scene = {'id': 'c', 'kind': 'body', 'scene_type': 'compare', 'big': '对比',",
+        "  'sides': {'left': {'head': '甲', 'items': ['一', '二']},"
+        "            'right': {'head': '乙', 'items': ['三', '四']}}}",
+        "prc_scene = {'id': 'p', 'kind': 'body', 'scene_type': 'process', 'big': '流程',",
+        "  'steps': [{'label': '甲', 'note': 'x'}, {'label': '乙', 'note': 'y'}]}",
+        "out['cmp_mode'] = hasattr(SC, '_draw_compare_portrait') and \\",
+        "    SC.draw_frame(cmp_scene, 1.0, 5.0, 1.0, script, 30).size == (SC.W, SC.H)",
+        "out['prc_mode'] = hasattr(SC, '_draw_process_portrait') and \\",
+        "    SC.draw_frame(prc_scene, 1.0, 5.0, 1.0, script, 30).size == (SC.W, SC.H)",
         "lay = SC._scene_layout({'scene_layout': 'left-stack'}, SC._scene_theme(plan, {}))",
         "out['native_layouts'] = bool(ST.LAYOUTS_PORTRAIT) and \\",
         "    lay.get('panel_y') != ST.LAYOUTS['left-stack']['panel_y']",
@@ -2693,6 +2703,8 @@ def t_portrait_profile():
     assert got.get("clamped", 0) >= 1, "过宽文字没有被钳住——`_fit_px` 的保证失效了"
     # 竖屏版式必须**原生**（另一套坐标），不能是横屏几何的等比缩放：
     # 缩放的典型症状就是"标题 y 与卡片 y 同比例下落"，内容永远只占上半屏。
+    assert got.get("cmp_mode") is True, "竖屏 compare 没走上下对照分支（落回横屏实现？）"
+    assert got.get("prc_mode") is True, "竖屏 process 没走竖向轴分支（落回横屏实现？）"
     assert got.get("native_layouts") is True, \
         "竖屏没有用原生版式（ST.LAYOUTS_PORTRAIT）：%r" % (got.get("native_layouts"),)
     return "10 类构图 1080x1920 全部出图 / 过宽文字被钳进安全区"

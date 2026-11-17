@@ -2495,9 +2495,9 @@ def main():
     if (os.environ.get("VIDEO_STUDIO_LAYOUT") or "").strip().lower() in (
             "portrait", "9x16", "vertical", "portrait-9x16"):
         sys.stderr.write(
-            "[warn] 竖屏是实验性布局：安全区/字幕带/版式骨架都已按 1080x1920 原生算好，"
-            "但 compare（左右对照）/process（横向流程轴）等**构图内部**仍是横屏结构。\n"
-            "       能出片、能过字形检测，但不建议直接交付；构图内部重设计见 "
+            "[warn] 竖屏是实验性布局：安全区/字幕带/版式骨架/compare/process 都已按 1080x1920 "
+            "原生实现，但**排版节奏**（停留窗口、estimate 耗时基准）没按竖屏复核过。\n"
+            "       能出片、能过字形检测，但不建议直接交付；节奏校准见 "
             "references/portrait-and-motion.md\n")
 
     if a.batch:

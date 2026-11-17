@@ -1802,6 +1802,9 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
         sides = (_G.derive_sides(scene) if _G is not None else None)
     if not sides:
         return _draw_statement(scene, t, dur, tg, script, frame, plan, th)
+    if H > W:
+        # 竖屏：左右对照在 1080 宽里只剩 500px 一栏，字会被压到读不了——改**上下对照**。
+        return _draw_compare_portrait(scene, t, dur, tg, script, frame, plan, th, sides)
 
     big = str(scene.get("big") or "")
     if big:
@@ -1879,6 +1882,90 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
                 script.get("title", ""), lang)
 
 
+def _draw_compare_portrait(scene, t, dur, tg, script, frame, plan, th, sides):
+    """竖屏对照：**上下两栏** + 横中缝（横屏版本是左右两栏 + 竖中缝）。
+
+    为什么必须换方向而不是缩一缩：1080 宽减掉左右留白，一栏只剩 ~460px；
+    中文正文一行放得下 7~8 字，三条要点要折 2~3 行，读起来是断的。竖屏的天然优势是纵向，
+    上下两栏每栏能有 920px 宽、一整屏高的一半，字不用挤。
+
+    结构对齐横屏版本：栏头（作者写了就画）+ 最多 3 条 + 反相高亮 + 无栏头时画 VS 徽标。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    big = str(scene.get("big") or "")
+    pb = ease(rng(t, 0.0, 0.7))
+    if big:
+        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 10), 900, "bold", th)[:1]):
+            _draw_text(img, th, v, ln, W * 0.5, 210.0 + _entrance_y(th, pb),
+                       int(th["scale"]["heading"][0] - 10), "bold", th["ink"], "center", pb, trk)
+
+    # 两个栏位的几何：上栏 / 下栏，各自一条横带。
+    x0, ww = 80.0, float(W - 160)
+    top_y0, bot_y0 = 470.0, 880.0
+    row_pitch = 86.0
+    max_rows = max(len((sides.get("left") or {}).get("items") or []),
+                   len((sides.get("right") or {}).get("items") or []), 1)
+    rows_h = min(3, max_rows) * row_pitch
+
+    # 横中缝：从上栏底部向下栏顶部生长（0.35s），是「对照」最直接的符号。
+    pg = ease(rng(t, 0.05, 0.40))
+    mid_y = (top_y0 + rows_h + bot_y0) * 0.5 - 20.0
+    half = min(60.0, (bot_y0 - top_y0 - rows_h) * 0.5) * pg
+    d = ImageDraw.Draw(img, "RGBA")
+    d.line([v.x(x0 + 60), v.y(mid_y), v.x(x0 + 60 + (ww - 120) * pg), v.y(mid_y)],
+           fill=_rgba(th["rule"], 90), width=_lw(2, lang))
+
+    blocks = (("left", top_y0, -1), ("right", bot_y0, 1))
+    heads = [str((sides.get(s) or {}).get("head") or "") for s, _, _ in blocks]
+    has_head = any(heads)
+    for side, dy, sgn in blocks:
+        blk = sides.get(side) or {}
+        head = str(blk.get("head") or "")
+        its = [str(x) for x in (blk.get("items") or [])]
+        ph2 = ease(rng(t, 0.10, 0.70))
+        if head:
+            _draw_text(img, th, v, head, x0, dy - 74.0 + 18 * (1 - ph2) * sgn,
+                       int(th["scale"]["body"][0]), "bold", th["accent"], "left", ph2)
+            ImageDraw.Draw(img, "RGBA").line(
+                [v.x(x0), v.y(dy - 34.0), v.x(x0 + 320 * ph2), v.y(dy - 34.0)],
+                fill=_rgba(th["accent"], 130), width=_lw(2, lang))
+        for i, txt in enumerate(its[:3]):
+            pi = ease(rng(t, 0.42 + 0.22 * i, 1.05 + 0.22 * i))
+            if pi <= 0:
+                continue
+            yy = dy + i * row_pitch
+            # 反相高亮：上下两栏轮流亮（周期 3.2s），让「对照」一直在动
+            hi = ((math.sin(2 * math.pi * t / 3.2 + ph + (0 if side == "left" else math.pi)) + 1) / 2)
+            alpha = 0.55 + 0.45 * hi
+            tsize = _fit_size(txt, ww - 90, int(th["scale"]["body"][0] - 2), "reg", th, 18)
+            _draw_text(img, th, v, txt, x0 + 46, yy, tsize, "reg", th["ink"], "left", pi * alpha)
+            img = _soft_dot(img, v.x(x0 + 16), v.y(yy + tsize * 0.6), 6.0,
+                            th["accent"], 0.7 * pi)
+
+    if not has_head:
+        # 没有栏头时画 VS 徽标：放在横中缝左侧，充当两栏的「对撞点」。
+        pv = ease(rng(t, 0.2, 0.8))
+        vs_size = int(th["scale"]["body"][0] - 6)
+        vw = _text_w("VS", vs_size, "bold", th)
+        ImageDraw.Draw(img, "RGBA").rectangle(
+            [v.x(x0 - 6), v.y(mid_y - vw * 0.58), v.x(x0 + 56), v.y(mid_y + vw * 0.58)],
+            fill=_rgba(th["surface"], int(220 * pv)),
+            outline=None if _plain(lang) else _rgba(th["accent"], int(180 * pv)))
+        _draw_text(img, th, v, "VS", x0 + 8, mid_y - vs_size * 0.62, vs_size, "bold",
+                   th["accent"], "left", pv)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
+
+
 # ---------------- 6) process 流程轴 ----------------
 
 def _draw_process(scene, t, dur, tg, script, frame, plan, th):
@@ -1899,6 +1986,9 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
         steps = (_G.derive_steps(scene) if _G is not None else []) or []
     if len(steps) < 2:
         return _draw_list(scene, t, dur, tg, script, frame, plan, th)
+    if H > W:
+        # 竖屏：横向流程轴在 1080 宽里每个节点只有 ~200px，标签必然重叠——改**竖向流程轴**。
+        return _draw_process_portrait(scene, t, dur, tg, script, frame, plan, th, steps)
 
     big = str(scene.get("big") or "")
     pb = ease(rng(t, 0.0, 0.7))
@@ -1952,6 +2042,80 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
         u = clamp((t / dur))
         px = x0 + (x1 - x0) * u
         img = _soft_dot(img, v.x(px), v.y(ay), 9.0, th["accent2"], 0.85)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
+
+
+def _draw_process_portrait(scene, t, dur, tg, script, frame, plan, th, steps):
+    """竖屏流程轴：**竖向**（横屏版本是横向）。
+
+    为什么必须换方向：横向轴在 1080 宽里减去两端留白只剩 600px，5 个节点每个 150px，
+    而标签 4 个中文字就要 130px+，再加编号与注释必然重叠。竖屏纵向有 1400px 可用，
+    每个节点一整行，标签、注释、编号都能并排摆开——这也是竖屏原生视频最常见的流程排版。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    big = str(scene.get("big") or "")
+    pb = ease(rng(t, 0.0, 0.7))
+    if big:
+        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 8), 900, "bold", th)[:1]):
+            _draw_text(img, th, v, ln, 80.0, 230.0 + _entrance_y(th, pb),
+                       int(th["scale"]["heading"][0] - 8), "bold", th["ink"], "left", pb, trk)
+
+    n = min(5, len(steps))
+    ax = 150.0                       # 竖轴 x
+    y0, y1 = 480.0, 1420.0
+    gapy = (y1 - y0) / max(1, n - 1)
+    lsize = int(th["scale"]["body"][0] - 4)
+    pg = ease(rng(t, 0.10, 0.90))
+    d = ImageDraw.Draw(img, "RGBA")
+    d.line([v.x(ax), v.y(y0), v.x(ax), v.y(y0 + (y1 - y0) * pg)],
+           fill=_rgba(th["rule"], 70), width=_lw(2, lang))
+
+    for i in range(n):
+        st = steps[i]
+        pn = ease(rng(t, 0.35 + 0.18 * i, 1.05 + 0.18 * i))
+        if pn <= 0:
+            continue
+        cy = y0 + gapy * i
+        r = 14.0 * pn
+        if _plain(lang):
+            # 素净下不画 3px 环（厚度 < 6 的描边都算细线），改实心圆点。
+            d.ellipse([v.x(ax - r * 0.8), v.y(cy - r * 0.8),
+                       v.x(ax + r * 0.8), v.y(cy + r * 0.8)],
+                      fill=_rgba(th["accent"], int(230 * pn)))
+        else:
+            d.ellipse([v.x(ax - r), v.y(cy - r), v.x(ax + r), v.y(cy + r)],
+                      outline=_rgba(th["accent"], int(230 * pn)), width=3)
+        d.ellipse([v.x(ax - 4), v.y(cy - 4), v.x(ax + 4), v.y(cy + 4)],
+                  fill=_rgba(th["accent"], int(200 * pn)))
+        lbl = str(st.get("label") or "")
+        _draw_text(img, th, v, lbl, ax + 44, cy - lsize * 0.62, lsize, "bold",
+                   th["ink"], "left", pn)
+        note = str(st.get("note") or "")
+        if note:
+            ny = cy + lsize * 0.72
+            for j, ln in enumerate(_wrap(note, int(lsize * 0.82), 700, "reg", th)[:2]):
+                _draw_text(img, th, v, ln, ax + 44, ny + j * int(lsize * 1.05),
+                           int(lsize * 0.82), "reg", th["muted"], "left", pn * 0.95)
+        num = _number_text(str(_typo(lang).get("number") or "dim"), i + 1)
+        nw = "reg" if any("\u4e00" <= ch <= "\u9fff" for ch in num) else _NUM_WEIGHT
+        _draw_text(img, th, v, num, ax - 58, cy - lsize * 0.55, int(lsize * 0.8), nw,
+                   th["dim"], "left", pn * 0.9)
+
+    # 持续动态：进度光点沿竖轴匀速（周期 = 段长），永远有运动
+    if dur > 0.1:
+        u = clamp((t / dur))
+        py = y0 + (y1 - y0) * u
+        img = _soft_dot(img, v.x(ax), v.y(py), 9.0, th["accent2"], 0.85)
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
