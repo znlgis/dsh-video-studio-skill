@@ -2277,6 +2277,11 @@ def _draw_chart(scene, t, dur, tg, script, frame, plan, th):
         series = (_G.derive_series(scene) if _G is not None else []) or []
     if len(series) < 2:
         return _draw_stat(scene, t, dur, tg, script, frame, plan, th)
+    if H > W:
+        # 竖屏：横屏版把标签画在 bar_x0=640 的**左边**，而竖屏整幅只有 1080 宽——
+        # 标签会被钳到 0（_fit_px）与条压在一起，数值则直接画到画布外。
+        # 改**标签在条上方、条从 120 起**，条形本身仍是横向（比较同类数值时横向最长条最好读）。
+        return _draw_chart_portrait(scene, t, dur, tg, script, frame, plan, th, series)
 
     big = str(scene.get("big") or "")
     if big:
@@ -2336,6 +2341,83 @@ def _draw_chart(scene, t, dur, tg, script, frame, plan, th):
     ImageDraw.Draw(img, "RGBA").line(
         [v.x(bar_x0), v.y(scan_y), v.x(bar_x1), v.y(scan_y)],
         fill=_rgba(th["accent"], 26), width=_lw(2, lang))
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
+
+
+def _draw_chart_portrait(scene, t, dur, tg, script, frame, plan, th, series):
+    """竖屏数据条：**标签在条上方、数值在条内右端**，条形仍是横向。
+
+    为什么保留横向条形：比较一组同类数值时，"最长条"比"最高柱"更好读，而且竖屏纵向高度
+    足够放下 6 条（每条 一标签 + 一条 + 间距）。真正要改的是**标签的位置**——横屏版把它画在
+    条形左侧（bar_x0=640 减去标签宽），在 1080 宽的画布里会把标签推到负坐标。
+
+    数值的画法也换了：横屏版一律画在条的右端外侧（+16px），竖屏里那条位置会随最短条跑到画布外；
+    改成"够长就放条内右端、太短就放条外右侧"。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    big = str(scene.get("big") or "")
+    if big:
+        pb = ease(rng(t, 0.0, 0.7))
+        _draw_text(img, th, v, big, 100.0, 190.0 + _entrance_y(th, pb),
+                   int(th["scale"]["heading"][0] - 26), "bold", th["ink"], "left", pb, trk)
+
+    vals = []
+    for s in series[:6]:
+        try:
+            vals.append(float(s.get("value")))
+        except (TypeError, ValueError):
+            vals.append(0.0)
+    vmax = max(vals) if vals else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+    n = len(vals)
+
+    x0, x1 = 100.0, float(W - 100)
+    top = 330.0
+    row_h = min(210.0, (1420.0 - top) / max(1, n))     # 每行 = 标签 + 条 + 间隙
+    bar_h = 34.0
+    lsize = int(th["scale"]["body"][0] - 6)
+
+    d = ImageDraw.Draw(img, "RGBA")
+    for i, s in enumerate(series[:n]):
+        p = ease(rng(t, 0.20 + 0.15 * i, 0.95 + 0.15 * i))
+        if p <= 0:
+            continue
+        ry = top + i * row_h
+        lbl = str(s.get("label") or "")
+        _draw_text(img, th, v, lbl, x0, ry, lsize, "reg", th["ink"], "left", p)
+        by = ry + lsize * 1.42
+        frac = vals[i] / vmax
+        wpx = (x1 - x0) * frac * p
+        d.rectangle([v.x(x0), v.y(by), v.x(x0 + wpx), v.y(by + bar_h)],
+                    fill=_rgba(th["accent"] if i == 0 else th["accent2"], 190))
+        num = ("%g" % vals[i]) + str(s.get("unit") or "")
+        nsize = int(lsize * 1.02)
+        nw = _text_w(num, nsize, _NUM_WEIGHT, th)
+        # 条够长 -> 数字放条内右端（白字，靠对比读）；不够长 -> 放条外右侧（不与条重叠）
+        if wpx > nw + 36:
+            _draw_num(img, th, v, num, x0 + wpx - nw - 14, by + 4, nsize,
+                      (255, 255, 255), "left", p)
+        else:
+            _draw_num(img, th, v, num, x0 + wpx + 14, by + 4, nsize,
+                      th["ink"], "left", p)
+
+    # 持续动态：最大条端点呼吸（与横屏一致的可读"最强项"提示）
+    if vals:
+        i0 = vals.index(max(vals))
+        ry = top + i0 * row_h + lsize * 1.42
+        r = 4.0 + 3.0 * (0.5 + 0.5 * math.sin(1.8 * t + ph))
+        img = _soft_dot(img, v.x(x1), v.y(ry + bar_h * 0.5), r, th["accent"], 0.8)
 
     img = _apply_veil(img, th, lang, scene, t, s_bg)
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),

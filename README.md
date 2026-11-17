@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.7.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.8.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -101,7 +101,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，75 条断言，不联网）
+# 2) 环境自检（可选，76 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 7 题一次问完（题材/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -190,7 +190,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（75 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（76 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/studio.py          薄门面（studio.py <子命令> 转调现成脚本，未知参数原样透传）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
@@ -205,6 +205,8 @@ skills/video-studio/
   assets/voice_loudness.json 音色响度补偿实测表
   assets/golden_frames.json  金帧基线（3 帧 sha256 + 字体/环境指纹，改绘制代码后重录）
   assets/golden_frames_portrait.json  竖屏金帧基线（--layout portrait --write 重录；横屏基线不受影响）
+  assets/golden_frames_compose.json   构图层基线（10 类构图各一帧；--compose --write 重录）
+  assets/golden_frames_compose_portrait.json  竖屏构图层基线（同上，--layout portrait --compose）
   assets/web/                浏览器页面示例（--engine web 需要你自己的页面；不是出片模板）
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
@@ -264,7 +266,7 @@ python tools/ci_check.py -v     # 13 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**75 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**76 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 

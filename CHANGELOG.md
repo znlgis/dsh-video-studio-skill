@@ -6,6 +6,42 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.0 — 竖屏收尾：chart 原生 + 构图层金帧 + estimate 按 profile（2026-11-17）
+
+> 1.7.0 把 `compare` / `process` 的方向改对了。这一版补完剩下的三件：`chart` 的标签位置、
+> 构图层（不是整片）的像素基线、以及 `estimate.py` 的 profile 感知。
+
+### P0：chart 改竖屏标签位置
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 横屏版把标签画在 `bar_x0 = 640` 的**左边**，竖屏整幅只有 1080 宽 → 标签被 `_fit_px` 钳到 0（与条压在一起），数值直接画到画布外 |
+| 修法 | `_draw_chart_portrait`：标签在条上方、条从 x=100 起跨到 x=980、数值够长放条内右端、太短放条外 |
+| 为什么保留横向条 | 比较一组同类数值时"最长条"比"最高柱"好读；而且竖屏纵向正好放得下 6 条 |
+
+### P0：构图层金帧（补一个真实存在的洞）
+
+| 项 | 内容 |
+|---|---|
+| 洞 | 整片金帧用夹具 `film.json`，只有 hook/body/outro 三类。`compare` / `process` / `chart` 这些**按 scene_type 分派**的绘制器改了，整片金帧**一个像素都不会变**——1.7.0 给这三类各加了竖屏实现，等于没有回归网 |
+| 修法 | `golden_frames.py --compose`：按 scene_type 逐类渲一帧取哈希，存 `golden_frames_compose.json`（横屏）/ `golden_frames_compose_portrait.json`（竖屏）。与整片时刻基线完全分开命名 |
+| 一次命名踩坑 | 第一版把 `--golden` 再按 profile 追后缀，结果 `--layout portrait` 已改过 `--golden`，产出 `golden_frames_portrait_portrait.json`——两个 profile 各写一份互不相同的名字。改成固定名（`_compose` / `_compose_portrait`），不派生 |
+| 自检 | 新增第 76 条：当前 profile 的构图层基线必须存在且逐类一致；缺基线记 SKIP（不是 PASS）。已做负向验证：改坏其中一个 sha256，selfcheck 立刻退出 1 |
+
+### P1：estimate.py 按 profile 预演
+
+| 项 | 内容 |
+|---|---|
+| 画布 | 从 `layoutkit` 读 W/H（拿不到再按环境变量判，最后退回横屏常量）。三条路都不抛异常——预演工具自己不该因为取不到画布而崩 |
+| 耗时 | 竖屏乘 `PORTRAIT_COST_FACTOR = 1.23`（**实测比值**：同一套 10 类构图各渲 120 帧，横屏 174.5 fps / 竖屏 141.5 fps）。竖屏像素数与横屏相同，但绘制调用更密（list/compare/process/chart 都变成多个纵向块） |
+| 比的是比值 | 夹具内容偏简单，绝对帧率远高于 `PIL_FPS` 的 40–80（那是中等复杂度真实片的口径）；比值与内容复杂度弱相关，所以只搬比值。输出里标「实测比值」，不再写「未实测」 |
+| 横屏不受影响 | 系数恒为 1.0；横屏的预演数字与 1.7.0 完全一致 |
+
+### 验收
+
+`selfcheck` **76 条全绿**；`ci_check` **13 项全绿**；四份金帧基线（横屏/竖屏 × 整片/构图）全部一致；
+`estimate.py` 在两种 profile 下都能跑，横屏数字未变。
+
 ## 1.7.0 — 竖屏构图的内部几何也改原生（compare 上下 / process 竖向）（2026-11-17）
 
 > 1.6.0 让竖屏**版式骨架**原生（标题与卡片怎么摆），但 `compare` / `process` 的**构图内部**

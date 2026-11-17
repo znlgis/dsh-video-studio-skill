@@ -2710,6 +2710,42 @@ def t_portrait_profile():
     return "10 类构图 1080x1920 全部出图 / 过宽文字被钳进安全区"
 
 
+def t_compose_golden():
+    """76 构图层金帧：10 类构图各自有像素基线，且当前渲染与之一致。
+
+    为什么单独一条：整片金帧用的是夹具 film.json，它只有 hook/body/outro 三类——
+    `compare` / `process` / `chart` 这些"按 scene_type 分派"的绘制器改了，整片金帧
+    **一个像素都不会变**。1.7.0 给这三类各加了竖屏实现，如果只靠自检"分支存在"，
+    改坏它们依然不会有任何报警。这条补的就是那个洞。
+
+    两侧都验：当前 profile 的构图层基线必须存在且逐类一致；缺基线记为 SKIP（不是 PASS）。
+    """
+    tool = os.path.join(os.path.dirname(HERE), "..", "..", "tools", "golden_frames.py")
+    tool = os.path.abspath(tool)
+    if not os.path.exists(tool):
+        return "skip（没有 tools/golden_frames.py：只拷了 scripts/）"
+    portrait = int(K.H) > int(K.W)
+    base = os.path.join(HERE, "..", "assets",   # HERE = scripts/，上一级是 video-studio/
+                        "golden_frames_compose%s.json" % ("_portrait" if portrait else ""))
+    base = os.path.abspath(base)
+    if not os.path.exists(base):
+        return "skip（没有 %s：先跑 golden_frames.py --compose --write）" % os.path.basename(base)
+    r = subprocess.run([sys.executable, tool] + (["--layout", "portrait"] if portrait else [])
+                       + ["--compose", "--check", "--json"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=600)
+    assert r.returncode == 0, "构图层金帧不一致：%s" % ((r.stdout or r.stderr or "")[-400:])
+    try:
+        got = json.loads((r.stdout or "").strip())      # --json 是整段 pretty JSON，不是单行
+    except Exception as e:                                 # noqa: BLE001
+        raise AssertionError("构图层导出不是合法 JSON：%s" % e)
+    status = str(got.get("status") or "")
+    if status == "skipped":
+        return "skip（%s）" % (got.get("reason") or "环境不可比")
+    assert status == "pass", "构图层金帧没有通过：%s" % (got.get("changed") or status)
+    return "%s 的 10 类构图与基线逐类一致" % ("竖屏" if portrait else "横屏")
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2786,6 +2822,7 @@ CASES = [
     ("73 画布/安全区单一真源（layoutkit）", t_layout_single_source),
     ("74 审美质检（离线/确定/联系表不误判）", t_critic_offline),
     ("75 竖屏 profile（画布/出图/文字不出画）", t_portrait_profile),
+    ("76 构图层金帧（10 类构图各自有像素基线）", t_compose_golden),
 ]
 
 

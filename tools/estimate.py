@@ -43,8 +43,16 @@ from pathlib import Path
 # 基准常量（换机请重测后回填，别把这里的数字当通用真理）
 # ============================================================================
 
-W, H, FPS = 1920, 1080, 30          # filmkit.W/H/FPS：本项目写死，film.json 改不了
+W, H, FPS = 1920, 1080, 30          # 默认横屏画布；实际值运行时从 layoutkit 读（见 _canvas()）
 PIL_FPS = (40.0, 80.0)              # PIL 逐帧渲染速度：中等复杂度 40–54 fps / 夹具片 68–82 fps
+# 竖屏（9:16）的耗时系数：**实测 1.23×**（本文件其它常量都是实测值，这个也是）。
+# 为什么不是 1.0：竖屏与横屏像素数相同（1080x1920 vs 1920x1080），但绘制调用更密——
+# 10 类构图里 list/compare/process/chart 都变成"多个纵向块"，填充面积接近而调用次数更多。
+# 测法：同一套 10 类构图场景 + 每条都叠字幕，两个 profile 各渲 120 帧取墙钟；
+# 横屏 174.5 fps / 竖屏 141.5 fps → 1.23×。**比的是比值不是绝对值**：夹具内容偏简单，
+# 绝对帧率远高于 PIL_FPS 的 40–80（那是中等复杂度真实片的口径），但比值与内容复杂度弱相关。
+# 换机/换场景后这个比值可能漂，漂到 1.5 以上再重测。
+PORTRAIT_COST_FACTOR = 1.23
 PARALLEL_EFF = 0.5                  # 分块并行的**实测效率**：2 进程只快 1.5×，不是 2×（见 CALIBRATION）
 WEB_SEC_PER_FRAME = (0.080, 0.130)  # web 引擎：Edge 无头 PNG 截图 80–130 ms/帧
 WEB_STARTUP_SEC = 6.0               # 浏览器冷启动 + CDP 连接（12 s 片 28–30 s 含启动）
@@ -102,6 +110,37 @@ AUDIO_MBPS = 0.192                   # AAC 192 kbps
 QA_DISK_BYTES = 12 * 1024 * 1024     # 联系表 + 静帧 + deep.png
 BASELINE_NOTE = ("区间来自本机实测（机型/样本见下方 calibration；"
                  "SKILL.md §12 记录的作者机是 Ryzen AI 9 HX 370 / 12C24T）；换机请先重测再采信")
+
+def _canvas():
+    """当前画布与是否为竖屏。
+
+    优先问 layoutkit（它才是真源），拿不到就按环境变量判，最后退回横屏常量。
+    三条路都不抛异常：estimate 是"开渲前预演"，它自己不该因为取不到画布而崩。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent
+                                   / "skills" / "video-studio" / "scripts"))
+        import layoutkit                                # noqa: PLC0415
+        return int(layoutkit.W), int(layoutkit.H)
+    except Exception:                                   # noqa: BLE001
+        prof = str(os.environ.get("VIDEO_STUDIO_LAYOUT") or "").strip().lower()
+        if prof in ("portrait", "9x16", "vertical", "portrait-9x16"):
+            return 1080, 1920
+        return W, H
+
+
+# 当前画布（模块级）：import 时定一次。排期公式读它，免得把画布一路透传。
+# 与 scenes/filmkit 同一约定：改画布必须在导入前用 VIDEO_STUDIO_LAYOUT 定死。
+_CANVAS = (1920, 1080)
+
+
+def _cost_factor(w, h):
+    """非横屏的耗时上浮系数（竖屏 1.15，见 PORTRAIT_COST_FACTOR 的注释）。"""
+    return PORTRAIT_COST_FACTOR if int(h) > int(w) else 1.0
+
+
+_CANVAS = _canvas()
+
 
 STAGE_LABELS = {
     "tts": "旁白 edge-tts",
@@ -322,6 +361,16 @@ def _speedup(jobs):
     return 1.0 + (jobs_eff - 1) * PARALLEL_EFF
 
 
+def _fps_label(engine):
+    """帧耗时基准的人读标签：竖屏要把"没实测的系数"写在脸上，别让人以为那是实测值。"""
+    k = _cost_factor(_CANVAS[0], _CANVAS[1])
+    base = ("PIL 40–80 fps" if engine == "pil"
+            else "web 80–130 ms/帧 + 启动 6 s")
+    if k == 1.0:
+        return base
+    return "%s × 竖屏系数 %.2f（实测比值，见 PORTRAIT_COST_FACTOR）" % (base, k)
+
+
 def frames_seconds(frames, jobs, engine, rerender):
     """frames 阶段墙钟（只算画面生成；不重编码时封装成本在 mux 行）。
 
@@ -329,10 +378,14 @@ def frames_seconds(frames, jobs, engine, rerender):
     render.py 的分块 worker 是边渲染边编码，所以这里的 fps 已经含了编码开销。
     """
     sp = _speedup(jobs)
+    # 竖屏的绘制调用更密（像素数相同），按 PORTRAIT_COST_FACTOR 上浮；
+    # 横屏系数恒为 1.0，所以既有预演数字一个都不变。
+    # 这个系数**没有实测**（见常量处注释），输出里会单独标明。
+    k = _cost_factor(_CANVAS[0], _CANVAS[1])
     if engine == "web":
-        base = [WEB_STARTUP_SEC + frames * spf / sp for spf in WEB_SEC_PER_FRAME]
+        base = [WEB_STARTUP_SEC + frames * spf * k / sp for spf in WEB_SEC_PER_FRAME]
     else:
-        base = [frames / rfps / sp for rfps in PIL_FPS]
+        base = [frames / (rfps / k) / sp for rfps in PIL_FPS]
     base = sorted(base)
     return base[0] * rerender, base[-1] * rerender
 
@@ -587,8 +640,7 @@ def build_report(script_path, script, args):
         dict(stage="frames", lo=fr_lo, hi=fr_hi, measured=True,
              note=("%s：%s，--jobs %d → 有效加速比 %.2f×（实测 2 进程 1.51×），"
                    "返工系数 %.2g；不重编码时封装成本在 mux 行"
-                   % (engine, "PIL 40–80 fps" if engine == "pil"
-                      else "web 80–130 ms/帧 + 启动 6 s", jobs_eff,
+                   % (engine, _fps_label(engine), jobs_eff,
                       _speedup(jobs_eff), rerender))),
         dict(stage="mux", lo=mux_lo, hi=mux_hi, measured=True,
              note=("-c:v copy + 两遍 loudnorm（实测 29 s 片 1.7–1.9 s，与帧数无关）；"
@@ -712,7 +764,8 @@ def print_report(rep):
     print()
     print("  磁盘")
     print("    raw 管道峰值   %s   %d×%d×3 字节 × %d 帧（原始帧流式喂 x264，不落盘，"
-          "但决定内存/管道带宽）" % (_pad(d["raw_peak_human"], 10), W, H, v["frames"]))
+          "但决定内存/管道带宽）" % (_pad(d["raw_peak_human"], 10),
+                                   _CANVAS[0], _CANVAS[1], v["frames"]))
     print("    work/          %s   segments + silent.mp4 + wav + tts + qa"
           "（分块并行时 segments 与 silent 会同时存在）" % _pad(d["work_human"], 10))
     print("    out/           %s   成片（视频 %.1f–%.1f Mbps + AAC 192 kbps）"

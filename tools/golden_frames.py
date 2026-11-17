@@ -611,6 +611,155 @@ def check_golden(script_path, scenes_path, golden_path, design_path=None):
 
 
 # ---------------------------------------------------------------- CLI
+# ---------------------------------------------------------------- 构图层基线（10 类构图）
+#
+# 为什么需要一份**单独**的构图层基线：默认金帧用的是夹具 film.json，它只有 hook/body/outro
+# 三类，覆盖不到 compare / process / chart 这些"按 scene_type 分派"的绘制器。
+# 而竖屏下 compare→上下两栏、process→竖向轴、chart→标签上移，全是这些绘制器里的分支——
+# 改了它们，默认金帧**一个像素都不会变**（夹具里根本没有这些类型）。
+#
+# 所以这里按 scene_type 直接合成 10 个场景，逐类渲一帧取哈希，单独存一份基线文件。
+# 它守的是"每类构图长什么样"，与默认金帧（守"整片某个时刻长什么样"）互补。
+COMPOSE_SCENES = (
+    ("hero", {"id": "cp_hero", "kind": "hook", "scene_type": "hero", "chapter": "01 · 开场",
+              "text": "开场一句话。", "big": "开场标题", "sub": "开场字幕"}),
+    ("statement", {"id": "cp_statement", "kind": "body", "scene_type": "statement",
+                   "text": "一句陈述，用来测试排版宽度。", "big": "陈述标题", "sub": "陈述字幕"}),
+    ("list", {"id": "cp_list", "kind": "body", "scene_type": "list", "chapter": "02 · 正文",
+              "text": "三条要点。", "big": "要点标题", "sub": "要点字幕",
+              "items": [{"text": "条目一"}, {"text": "条目二"}, {"text": "条目三"}]}),
+    ("stat", {"id": "cp_stat", "kind": "body", "scene_type": "stat",
+              "text": "一个数字。", "big": "数字标题", "stat": {"value": "42", "unit": "%"},
+              "stats": [{"value": "42", "unit": "%", "label": "完成度"}]}),
+    ("compare", {"id": "cp_compare", "kind": "body", "scene_type": "compare",
+                 "text": "两种做法对比。", "big": "对比标题",
+                 "sides": {"left": {"head": "甲方案", "items": ["要点一", "要点二"]},
+                           "right": {"head": "乙方案", "items": ["要点三", "要点四"]}}}),
+    ("process", {"id": "cp_process", "kind": "body", "scene_type": "process",
+                 "text": "四个步骤。", "big": "流程标题",
+                 "steps": [{"label": "第一步", "note": "说明一"}, {"label": "第二步", "note": "说明二"},
+                           {"label": "第三步", "note": "说明三"}, {"label": "第四步", "note": "说明四"}]}),
+    ("quote", {"id": "cp_quote", "kind": "quote", "scene_type": "quote",
+               "text": "一句引语，用来测试引言排版。", "big": "引语正文"}),
+    ("chapter", {"id": "cp_chapter", "kind": "body", "scene_type": "chapter",
+                 "chapter": "03 · 章节", "big": "章节标题", "kicker": "SECTION"}),
+    ("chart", {"id": "cp_chart", "kind": "body", "scene_type": "chart",
+               "text": "一组数据。", "big": "数据标题",
+               "series": [{"label": "甲", "value": 3.0, "unit": "s"},
+                          {"label": "乙", "value": 7.5, "unit": "s"},
+                          {"label": "丙", "value": 1.2, "unit": "s"}]}),
+    ("outro", {"id": "cp_outro", "kind": "outro", "scene_type": "outro",
+               "text": "结束语。", "big": "结束标题", "sub": "结束字幕"}),
+)
+
+
+def _compose_default_golden(golden_path=None):
+    """构图层基线的文件名：**固定按 profile 取**，不从 --golden 派生。
+
+    踩过一次：`--layout portrait` 已经把 --golden 改成了 golden_frames_portrait.json，
+    这里再按 profile 追一次后缀，就变成 golden_frames_portrait_portrait.json——
+    两个 profile 各自写了一份名字互不相同的基线，谁都对不上谁。
+    所以构图层基线用**自己的固定名字**（golden_frames_compose.json / _compose_portrait.json），
+    与整片时刻基线（golden_frames*.json）完全分开。
+    """
+    suffix = "_portrait" if _is_portrait() else ""
+    return os.path.join(ASSETS, "golden_frames_compose%s.json" % suffix)
+
+
+def _is_portrait():
+    """当前画布是不是竖屏。**只看 filmkit 的 W/H**，不看环境变量：
+
+    环境变量可能没设（默认横屏），而 W/H 是 layoutkit 解析后的**事实**。
+    """
+    K, _ST = _modules()
+    return int(K.H) > int(K.W)
+
+
+def compose_frames(scenes_path, golden_path, design_path=None, mode="check"):
+    """按 scene_type 逐类渲一帧并比对/写入构图层基线。
+
+    mode: "check" 比对 / "write" 重录。返回与 check_golden 同形状的 result。
+    """
+    K, ST = _modules()
+    scenes_mod = _load_scenes(scenes_path)
+    plan = resolve_plan(ST, {}, design_path=design_path)
+    script = {"title": "构图基线", "lines": []}
+    if plan:
+        script["_style"] = plan
+    font_fp, fonts = font_fingerprint(K, plan)
+    env_fp, env = env_fingerprint()
+    rows = []
+    for name, scene in COMPOSE_SCENES:
+        img = scenes_mod.draw_frame(dict(scene), 1.5, 6.0, 1.5, script, 45)
+        if img is None:
+            raise RuntimeError("构图 %s 返回 None" % name)
+        if tuple(img.size) != (int(K.W), int(K.H)):
+            raise RuntimeError("构图 %s 渲染出 %dx%d，期望 %dx%d"
+                               % (name, img.size[0], img.size[1], K.W, K.H))
+        rows.append({"name": name, "sha256": _sha256_image(img),
+                     "size": [int(K.W), int(K.H)]})
+
+    golden_path = _compose_default_golden()
+    data = {
+        "version": GOLDEN_VERSION,
+        "generator": "golden_frames.py compose v%s" % __version__,
+        "comment": "构图层基线：按 scene_type 逐类渲一帧。与 golden_frames*.json（整片时刻基线）互补——夹具片只有 hook/body/outro，覆盖不到 compare/process/chart 这些分派绘制器。",
+        "profile": "portrait" if _is_portrait() else "landscape",
+        "canvas": [int(K.W), int(K.H)],
+        "scenes": _rel(scenes_path),
+        "design": _rel(design_path) if design_path else "",
+        "font_fp": font_fp,
+        "fonts": fonts,
+        "env_fp": env_fp,
+        "env": env,
+        "inputs": {"scenes_sha1": _sha1_file(scenes_path),
+                   "filmkit_sha1": _sha1_file(os.path.join(SCRIPTS, "filmkit.py")),
+                   "stylekit_sha1": _sha1_file(os.path.join(SCRIPTS, "stylekit.py")),
+                   "design_sha1": _sha1_file(design_path) if design_path else ""},
+        "frames": rows,
+    }
+
+    if mode == "write":
+        d = os.path.dirname(golden_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        payload = _json_bytes(data)
+        with open(golden_path, "wb") as fh:
+            fh.write(payload)
+        return {"status": "pass", "written": True, "golden": golden_path,
+                "frames": [dict(frame=r["name"], sha256=r["sha256"], expect=None,
+                                 scene=r["name"]) for r in rows],
+                "font_fp": font_fp, "font_fp_expect": None, "reason": "", "notes": []}
+
+    golden, why = _load_golden(golden_path)
+    if golden is None:
+        return dict(status="skipped", frames=[], font_fp=font_fp, reason=why)
+    if str(golden.get("font_fp") or "") != font_fp:
+        return dict(status="skipped", frames=[], font_fp=font_fp,
+                    font_fp_expect=golden.get("font_fp"),
+                    reason="skipped: font differs——换机后在当前机器 --compose --write 重录")
+    if _env_fp_from(golden.get("env") or {}) != env_fp:
+        return dict(status="skipped", frames=[], font_fp=font_fp,
+                    font_fp_expect=golden.get("font_fp"), env=env,
+                    env_expect=golden.get("env"),
+                    reason="skipped: env differs（Pillow/numpy/Python 版本不同）")
+    expect = {str(r.get("name")): str(r.get("sha256")) for r in (golden.get("frames") or [])
+              if isinstance(r, dict)}
+    out, changed = [], []
+    for r in rows:
+        want = expect.get(r["name"])
+        out.append(dict(frame=r["name"], sha256=r["sha256"], expect=want, scene=r["name"]))
+        if want is None or want != r["sha256"]:
+            changed.append(r["name"])
+    notes = []
+    if changed:
+        notes.append("构图基线变了：%s（改绘制器是有意的就 --compose --write 重录并复核）"
+                     % "、".join(changed))
+    return {"status": "fail" if changed else "pass", "frames": out, "font_fp": font_fp,
+            "font_fp_expect": golden.get("font_fp"), "changed": changed,
+            "notes": notes, "reason": "", "golden": golden_path}
+
+
 def _print_human(res):
     st = str(res.get("status") or "").upper()
     if res.get("written"):
@@ -658,6 +807,8 @@ def main(argv=None):
     ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
                     help="画布 profile：landscape（默认，基线 golden_frames.json）/"
                          "portrait（experimental，基线 golden_frames_portrait.json）")
+    ap.add_argument("--compose", action="store_true",
+                    help="构图层基线：按 scene_type 逐类渲一帧（覆盖夹具片没有的 compare/process/chart）")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON（机读）")
     ap.add_argument("--strict", action="store_true",
                     help="skipped 用退出码 2 表示（默认 skipped 退出码 0，但绝不写 pass）")
@@ -673,7 +824,10 @@ def main(argv=None):
                 ASSETS, "golden_frames.json" if a.layout == "landscape"
                 else "golden_frames_%s.json" % a.layout.replace("-", "_"))
     try:
-        if a.write:
+        if a.compose:
+            res = compose_frames(a.scenes, a.golden, design_path=(a.design or None),
+                                 mode=("write" if a.write else "check"))
+        elif a.write:
             frames = None
             if a.frames:
                 try:
