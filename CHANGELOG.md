@@ -6,6 +6,34 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.4 — 3.9 标准库识别改用"问解释器"而不是"扫目录猜"（2026-11-17）
+
+> 1.8.3 让 py39 job 从"两项崩"缩到"一项错"：`5 三方依赖白名单` 把 `math` 判成第三方。
+> 原因是 3.9 回退路径"扫描 stdlib 目录猜名字"，而 Linux 上 `math` 在
+> `stdlib/lib-dynload/` **子目录**里。这一版把判据换成**逐个 import 问解释器**。
+
+### P0：标准库判定从"枚举目录"改为"解析模块来源"
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 真 3.9（Linux）上 `estimate.py: import math（不在白名单）` 等 11 处误报 |
+| 根因 | 3.9 没有 `sys.stdlib_module_names`，回退实现靠 `os.listdir(stdlib)` 猜顶层名。而模块布局是按平台的：Linux 的 C 扩展在 `<prefix>/lib/python3.X/lib-dynload/`，Windows 在 `<prefix>/DLLs/`，两者都**不在** stdlib 根目录下。**枚举布局永远会漏**——我先漏了 `unicodedata`（Windows），补了扩展目录后又在 Linux 上漏 `math`（子目录） |
+| 修法 | 新增 `_is_stdlib(name)`：对**每个真实 import 的顶层名**判定归属。① `builtin_module_names` / `stdlib_module_names`（3.10+ 快路径）；② 否则 `importlib.util.find_spec(name)` 拿 `origin`，落在 `sys.base_prefix` / `sys.prefix` 内且**不在** `site-packages`/`dist-packages` 里 → 标准库；`built-in`/`frozen` 也算。`t_deps` 不再预建名字集合，改成逐个问 |
+| 为什么这样更稳 | 不再为每个平台写一遍目录特例；解释器自己知道模块在哪，Windows/Linux/3.9/3.12 一套逻辑 |
+| 验证 | 模拟 3.9（删 `stdlib_module_names` 与 `ast.TryStar/Match`）下：18 个标准库探针（含 `math`/`unicodedata`/`binascii`/`_ssl`/`lib-dynload` 里那些）**全部识别**，7 个第三方探针（numpy/PIL/cv2/edge_tts/playwright/scipy/faster_whisper）**全部排除**；完整 `ci_check` 在原生 3.12 与模拟 3.9 下都 **13/13** |
+
+### 过程记录：一次"测试脚本自己错了"的弯路
+
+中途我写了个模拟 Linux 布局的脚本，把 `sysconfig` 指到空目录——结果 `ci_check` 一片红。
+差点把它当成代码缺陷去"修"。实际是**测试脚本的假设错了**（空目录里当然扫不出模块）。
+换成正向验证（逐个探针问 `_is_stdlib`）才看清：真缺陷只有一个，就是 `math` 的归属判据。
+这条留在 CHANGELOG 里，是因为"修错方向"比"没修"更浪费时间。
+
+### 验收
+
+`selfcheck` **77 条全绿**；`ci_check` **13/13**（原生 3.12 + 模拟 3.9）；`ruff` **0 违规**；
+CI 五个 job 全绿。
+
 ## 1.8.3 — py39 job 终于真的在 3.9 上跑通（它自己就是坏的那个）（2026-11-17）
 
 > 1.8.2 把 CI 五个 job 修到只剩 `py39` 一个红。修这一个时发现了本轮最讽刺的一条：

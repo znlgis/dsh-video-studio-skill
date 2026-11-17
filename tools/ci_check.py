@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -229,47 +230,164 @@ def _stdlib_names():
     names = set(sys.builtin_module_names)
     getter = getattr(sys, "stdlib_module_names", None)
     if getter is not None:
-        return set(getter)
-    # 3.9 回退：内建 + stdlib 顶层 .py/目录 + **C 扩展**（unicodedata/binascii 这类
-    # 在 DLLs/ 或 lib-dynload/ 里，只扫 stdlib 目录会漏掉它们，进而把合法 import
-    # 误报成"不在白名单"）。
-    try:
-        import sysconfig
-        paths = sysconfig.get_paths()
-        roots = [paths.get("stdlib") or "", paths.get("platstdlib") or ""]
-        for root in roots:
-            if not root or not os.path.isdir(root):
-                continue
-            try:
-                entries = os.listdir(root)
-            except OSError:
-                continue
-            for entry in entries:
-                if entry in ("site-packages", "dist-packages", "__pycache__"):
-                    continue
-                if entry.endswith(".py"):
-                    names.add(entry[:-3])
-                    continue
-                full = os.path.join(root, entry)
-                if os.path.isdir(full):
-                    names.add(entry)
-                    continue
-                # 顶层 C 扩展：unicodedata.pyd / _ssl.so / ...
-                base, ext = os.path.splitext(entry)
-                if ext.lower() in (".pyd", ".so", ".dll", ".dylib"):
-                    names.add(base.split(".")[0])
-    except Exception:                                       # noqa: BLE001
-        pass
-    # 兜底：标准库顶层包里最常被 import 的几个（老版本布局差异）
-    names.update({"collections", "concurrent", "ctypes", "encodings", "importlib",
-                  "json", "logging", "multiprocessing", "unittest", "urllib",
-                  "xml", "sqlite3", "email", "html", "http", "wsgiref",
-                  "unicodedata", "binascii", "array", "select", "socket"})
+        names.update(getter)
+        return names
+    # 3.9 没有 stdlib_module_names。这里**不**去"扫目录猜名字"——踩过两次坑：
+    #   ① 只扫 stdlib 顶层 .py 会漏 C 扩展（unicodedata 在 DLLs/）；
+    #   ② 加了扩展目录还是漏（Linux 的 math/binascii 在 lib-dynload/ 子目录里）。
+    # 枚举布局永远漏，所以改成**对每个真实 import 的名字逐个判定归属**（见 _is_stdlib）。
+    # 这个函数在 3.9 上只作为"已知能排除的白名单"，真正判定交给 _is_stdlib。
+    names.update(getattr(sys, "stdlib_module_names", None) or ())
     return names
 
 
+def _is_stdlib(name):
+    """name（import 的顶层名）是否属于标准库。
+
+    判据：① 解释器自报的 stdlib_module_names / builtin（3.10+ 快路径）；
+          ② 否则 importlib.util.find_spec 实际解析：origin 在 Python 安装前缀内、
+             且不在 site-packages/dist-packages 里 → 标准库。
+    内置/冻结模块（origin 是 "built-in"/"frozen"）也算。
+
+    为什么不用"扫 stdlib 目录"的做法：Windows 的扩展在 <prefix>/DLLs、
+    Linux 的在 <prefix>/lib-dynload —— 两者都在 prefix 内但不在 stdlib 内，
+    任何目录枚举都得为每个平台写一遍特例，而 find_spec 直接问解释器，一次到位。
+    """
+    top = str(name or "").split(".")[0]
+    if not top:
+        return False
+    if top in sys.builtin_module_names:
+        return True
+    known = getattr(sys, "stdlib_module_names", None)
+    if known is not None and top in known:
+        return True
+    try:
+        spec = importlib.util.find_spec(top)
+    except (ImportError, ValueError, AttributeError, TypeError):
+        return False
+    if spec is None:
+        return False
+    origin = getattr(spec, "origin", None) or ""
+    if origin in ("built-in", "frozen"):
+        return True
+    raw_paths = [origin]
+    raw_paths.extend(list(getattr(spec, "submodule_search_locations", None) or []))
+    prefix_roots = []
+    for base in (getattr(sys, "base_prefix", "") or "", getattr(sys, "prefix", "") or ""):
+        if base and os.path.isdir(base):
+            prefix_roots.append(os.path.abspath(base))
+    site_parts = ("site-packages", "dist-packages")
+    for raw in raw_paths:
+        if not raw:
+            continue
+        try:
+            ap = os.path.abspath(raw)
+        except (TypeError, ValueError):
+            continue
+        if any(sep in ap for sep in site_parts):
+            return False
+        if any(ap == r or ap.startswith(r + os.sep) for r in prefix_roots):
+            return True
+    return False
+
+
+def _stdlib_module_names():
+    """标准库顶层名（3.10+ 直接问解释器；3.9 用 find_spec 实测）。"""
+    return _stdlib_names()
+
+
+def _stdlib_roots():
+    """标准库目录（含 platstdlib）；找不到返回空列表。"""
+    try:
+        import sysconfig
+        paths = sysconfig.get_paths()
+    except Exception:                                       # noqa: BLE001
+        return []
+    out = []
+    for key in ("stdlib", "platstdlib"):
+        p = paths.get(key) or ""
+        if p and os.path.isdir(p):
+            out.append(os.path.abspath(p))
+    return out
+
+
+def _stdlib_names_by_search():
+    """在没有 sys.stdlib_module_names 的解释器上，扫出标准库顶层模块名（含 C 扩展）。
+
+    做法：先收"顶层可见"的候选（.py / 包目录 / DLLs 里的扩展），再对每个候选
+    **用 find_spec 验证真实来源**——来源在 stdlib 根下且不在 site-packages 才算。
+    这样 lib-dynload/ 这种子目录布局（Linux 的 math、binascii 在那里）自然覆盖。
+    """
+    roots = _stdlib_roots()
+    if not roots:
+        return set()
+    cand = set()
+    for root in roots:
+        subdirs = [root]
+        # Linux：扩展模块在 lib-dynload/；Windows：在 DLLs/（DLLs 通常在 stdlib 旁）
+        for extra in ("lib-dynload", "DLLs", os.path.join(os.pardir, "DLLs")):
+            p = os.path.normpath(os.path.join(root, extra))
+            if os.path.isdir(p):
+                subdirs.append(p)
+        for d in subdirs:
+            try:
+                entries = os.listdir(d)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry in ("site-packages", "dist-packages", "__pycache__",
+                             "lib-dynload", "DLLs"):
+                    continue
+                if entry.endswith(".py"):
+                    cand.add(entry[:-3])
+                elif "." not in entry and os.path.isdir(os.path.join(d, entry)):
+                    cand.add(entry)
+                else:
+                    base, ext = os.path.splitext(entry)
+                    if ext.lower() in (".pyd", ".so", ".dll", ".dylib"):
+                        cand.add(base.split(".")[0])
+    # 归属判据：**在 Python 安装前缀里，且不在 site-packages/dist-packages 里**。
+    # 不能只认 stdlib 目录：Windows 的 C 扩展在 <prefix>/DLLs/（stdlib 是 <prefix>/Lib），
+    # Linux 的在 <prefix>/lib/python3.X/lib-dynload/ —— 两者都在 prefix 内但不在 stdlib 内。
+    # 实测踩过：只认 stdlib 目录时 unicodedata 被判成第三方，estimate.py 直接报
+    # "import unicodedata（不在白名单）"。
+    site_parts = ("site-packages", "dist-packages")
+    prefix_roots = []
+    for base in (getattr(sys, "base_prefix", "") or "", getattr(sys, "prefix", "") or ""):
+        if base and os.path.isdir(base):
+            prefix_roots.append(os.path.abspath(base))
+    prefix_roots.extend(roots)
+    good = set()
+    for name in cand:
+        if not name.isidentifier():
+            continue
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError, AttributeError):
+            continue
+        if spec is None:
+            continue
+        raw_paths = [getattr(spec, "origin", None) or ""]
+        raw_paths.extend(list(getattr(spec, "submodule_search_locations", None) or []))
+        for raw in raw_paths:
+            if not raw:
+                continue
+            if raw in ("built-in", "frozen"):
+                good.add(name)
+                break
+            try:
+                ap = os.path.abspath(raw)
+            except (TypeError, ValueError):
+                continue
+            if any(sep in ap for sep in site_parts):
+                break                       # 第三方包目录里的，不算标准库
+            if any(ap == r or ap.startswith(r + os.sep) for r in prefix_roots):
+                good.add(name)
+                break
+    return good
+
+
 def t_deps():
-    stdlib = _stdlib_names()
     bad = []
     for p in _py_files():
         tree = ast.parse(p.read_text(encoding="utf-8"))
@@ -281,7 +399,8 @@ def t_deps():
                 names = [node.module]
             for n in names:
                 top = n.split(".")[0]
-                if top in stdlib or top in ALLOWED_THIRD_PARTY or top in LOCAL_MODULES:
+                if (top in ALLOWED_THIRD_PARTY or top in LOCAL_MODULES
+                        or _is_stdlib(top)):
                     continue
                 bad.append("%s: import %s（不在白名单）" % (p.name, top))
     assert not bad, "；".join(sorted(set(bad)))
