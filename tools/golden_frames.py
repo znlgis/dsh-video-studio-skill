@@ -655,10 +655,23 @@ def main(argv=None):
                     help="基线 JSON（默认 skills/video-studio/assets/golden_frames.json）")
     ap.add_argument("--frames", default="",
                     help="--write 时指定帧号（逗号分隔）；缺省取夹具片 3 个时刻")
+    ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
+                    help="画布 profile：landscape（默认，基线 golden_frames.json）/"
+                         "portrait（experimental，基线 golden_frames_portrait.json）")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON（机读）")
     ap.add_argument("--strict", action="store_true",
                     help="skipped 用退出码 2 表示（默认 skipped 退出码 0，但绝不写 pass）")
     a = ap.parse_args(argv)
+    # 画布 profile 必须在**任何 import filmkit/scenes 之前**落到环境变量：
+    # scenes.py 写的是 `from filmkit import W, H`，值在导入那一刻就绑死了。
+    # 等到 _modules() 里面再设，渲染出来的仍是横屏——而基线文件名却是 portrait，
+    # 于是"竖屏基线"里存的是横屏像素，回归从此永远绿（最坏的那种假通过）。
+    if a.layout:
+        os.environ["VIDEO_STUDIO_LAYOUT"] = a.layout
+        if a.golden == DEFAULT_GOLDEN:
+            a.golden = os.path.join(
+                ASSETS, "golden_frames.json" if a.layout == "landscape"
+                else "golden_frames_%s.json" % a.layout.replace("-", "_"))
     try:
         if a.write:
             frames = None

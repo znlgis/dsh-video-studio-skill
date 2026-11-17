@@ -1087,7 +1087,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 - `references/pitfalls.md` — 20 条最佳实践 + 17 条反模式 + 4 个 bug 复盘（含取景抖动与音轨中断）
 - `references/machine-facts.md` — **参考机器的实测基准**：ffmpeg 构建、编码速度、各模块耗时、排期公式、三条隐形坑（换机后按 §13 重测，别照抄）
 - `references/script-index.md` — **脚本资产完整表**：每个脚本的作用、参数、契约与坑位（§10 的详细版）
-- `references/portrait-and-motion.md` — **竖屏与动感的路线图**（第一步 `layoutkit` 已落地，见 `scripts/layoutkit.py`；余下两步与验收判据仍在此）：竖屏 9:16（LayoutProfile 三步走 + 会被打破的 4 个契约）、亚像素推镜（超采样 vs 仿射平移 + 可量化的验收判据）。想知道“为什么现在还只能横屏/为什么默认不动”，看这一篇
+- `references/portrait-and-motion.md` — **竖屏与动感**：竖屏已能出片且版式骨架是原生的（`layoutkit` + `stylekit.LAYOUTS_PORTRAIT` + 分 profile 金帧），但 `compare`/`process` 的构图内部仍是横屏结构；动感（亚像素推镜）仍未做，判据在此：竖屏 9:16（LayoutProfile 三步走 + 会被打破的 4 个契约）、亚像素推镜（超采样 vs 仿射平移 + 可量化的验收判据）。想知道“为什么现在还只能横屏/为什么默认不动”，看这一篇
 
 ## 10. 脚本资产
 

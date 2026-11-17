@@ -2666,6 +2666,10 @@ def t_portrait_profile():
         "SC._CLAMPED.clear()",
         "SC._fit_px(50, 5000.0, 'x' * 40, 96)",
         "out['clamped'] = len(SC._CLAMPED)",
+        "import stylekit as ST",
+        "lay = SC._scene_layout({'scene_layout': 'left-stack'}, SC._scene_theme(plan, {}))",
+        "out['native_layouts'] = bool(ST.LAYOUTS_PORTRAIT) and \\",
+        "    lay.get('panel_y') != ST.LAYOUTS['left-stack']['panel_y']",
         "print(json.dumps(out, ensure_ascii=False))",
     ])
     with open(probe, "w", encoding="utf-8") as fh:
@@ -2687,6 +2691,10 @@ def t_portrait_profile():
     bad = {k: v for k, v in got["sizes"].items() if v != [1080, 1920]}
     assert not bad, "这些构图在竖屏下尺寸不对：%r" % (bad,)
     assert got.get("clamped", 0) >= 1, "过宽文字没有被钳住——`_fit_px` 的保证失效了"
+    # 竖屏版式必须**原生**（另一套坐标），不能是横屏几何的等比缩放：
+    # 缩放的典型症状就是"标题 y 与卡片 y 同比例下落"，内容永远只占上半屏。
+    assert got.get("native_layouts") is True, \
+        "竖屏没有用原生版式（ST.LAYOUTS_PORTRAIT）：%r" % (got.get("native_layouts"),)
     return "10 类构图 1080x1920 全部出图 / 过宽文字被钳进安全区"
 
 

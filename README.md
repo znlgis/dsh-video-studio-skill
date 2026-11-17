@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.5.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -204,6 +204,7 @@ skills/video-studio/
   assets/design_fixture.json 金帧基准设计（像素回归绑它，不绑任何内置风格）
   assets/voice_loudness.json 音色响度补偿实测表
   assets/golden_frames.json  金帧基线（3 帧 sha256 + 字体/环境指纹，改绘制代码后重录）
+  assets/golden_frames_portrait.json  竖屏金帧基线（--layout portrait --write 重录；横屏基线不受影响）
   assets/web/                浏览器页面示例（--engine web 需要你自己的页面；不是出片模板）
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约

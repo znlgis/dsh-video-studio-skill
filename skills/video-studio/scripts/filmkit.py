@@ -2026,17 +2026,22 @@ def tts_batch(lines, workdir, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0
 
 # ---------------------------------------------------------------- 画幅规划
 VIDEO_FPS_ALLOWED = (24, 25, 30, 50, 60)
+# 允许的**输出**尺寸，按当前画布的宽高比归档。
+# 白名单而不是"任意宽高"：每个尺寸都得确认镜头/字号/安全区在目标分辨率下仍然成立，
+# 加新尺寸要重跑一次金帧与 preflight，不是改个数字。
 VIDEO_OUT_ALLOWED = ((1920, 1080), (1280, 720), (960, 540), (2560, 1440))
+VIDEO_OUT_ALLOWED_PORTRAIT = ((1080, 1920), (720, 1280), (540, 960))
 VIDEO_ASPECT = 16.0 / 9.0
+VIDEO_ASPECT_PORTRAIT = 9.0 / 16.0
 
 
 def video_plan(script=None):
     """解析 film.json 的 video 块 -> 内部分辨率 / 输出分辨率 / 帧率。
 
     设计取舍（都是刻意的）：
-      * **只做横屏 16:9**。竖屏不是"把宽高换一下"：安全区、版式几何、HUD、字幕折行
-        全部按 16:9 的像素坐标写死，换比例要重做一套版式（竖屏不在支持范围内）。
-        竖屏/非 16:9 直接报错，而不是悄悄出个变形或带黑边的片子。
+      * **输出宽高比必须与当前画布一致**。画布由 `layoutkit` 的 profile 决定（横屏 16:9 /
+        竖屏 9:16，见 `--layout`）；输出换成另一个比例就是换了整套版式——安全区、字幕带、
+        版式几何全部不成立，所以直接报错，而不是悄悄出个变形或带黑边的片子。
       * **构图恒定 1920x1080，只允许下采样输出**（720p/540p/1440p 里 1440p 需上采样，
         因此默认拒绝）：上采样不会增加信息，只会把"1080p 的清晰度"包装成"4K"，
         与项目"文档真话化 / 不糊弄"的原则冲突。要 4K 就改内部构图分辨率。
@@ -2059,18 +2064,21 @@ def video_plan(script=None):
     if (ow, oh) == (W, H):
         return dict(fps=fps, w=W, h=H, out_w=ow, out_h=oh, scale=False,
                     label="%dx%d" % (ow, oh))
-    if ow < oh:
-        raise ValueError("video.width=%d height=%d 是竖屏：本项目只支持 16:9 横屏"
-                         "（安全区/版式按横屏像素写死，竖屏是另一套版式，本轮不做）"
-                         % (ow, oh))
-    if abs(ow / float(oh) - VIDEO_ASPECT) > 0.01:
-        raise ValueError("video.width=%d height=%d 不是 16:9（%.3f:1）：换宽高比要重做"
-                         "版式几何与字幕安全区，本轮只支持 16:9 横屏的缩放输出"
-                         % (ow, oh, ow / float(oh)))
-    if (ow, oh) not in VIDEO_OUT_ALLOWED:
-        raise ValueError("video 输出尺寸 %dx%d 不在允许列表 %s 内（要新尺寸先确认镜头/字号"
-                         "在目标分辨率下仍然成立，再把它加进 VIDEO_OUT_ALLOWED）"
-                         % (ow, oh, ", ".join("%dx%d" % s for s in VIDEO_OUT_ALLOWED)))
+    # 宽高比必须与**当前画布**一致：竖屏画布下输出横屏（或反过来）等于换了一套版式，
+    # 安全区与字幕带全都不成立。这里按画布判断，而不是硬编码 16:9。
+    canvas_portrait = H > W
+    want_aspect = VIDEO_ASPECT_PORTRAIT if canvas_portrait else VIDEO_ASPECT
+    allowed = VIDEO_OUT_ALLOWED_PORTRAIT if canvas_portrait else VIDEO_OUT_ALLOWED
+    shape = "竖屏 9:16" if canvas_portrait else "横屏 16:9"
+    if abs(ow / float(oh) - want_aspect) > 0.01:
+        raise ValueError("video.width=%d height=%d 与当前画布 %dx%d（%s）宽高比不同"
+                         "（%.3f:1）：换宽高比要重做版式几何与字幕安全区；"
+                         "要出竖屏请用 --layout portrait 起渲染"
+                         % (ow, oh, W, H, shape, ow / float(oh)))
+    if (ow, oh) not in allowed:
+        raise ValueError("video 输出尺寸 %dx%d 不在 %s 的允许列表 %s 内（要新尺寸先确认"
+                         "镜头/字号在目标分辨率下仍然成立，再把它加进白名单）"
+                         % (ow, oh, shape, ", ".join("%dx%d" % s for s in allowed)))
     if ow > W or oh > H:
         raise ValueError("video 输出 %dx%d 大于内部构图 %dx%d：那是上采样，只会把 1080p 的"
                          "清晰度包装成更高分辨率（假 4K）。要真高清请改内部构图分辨率，"

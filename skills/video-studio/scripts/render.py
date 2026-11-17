@@ -2453,7 +2453,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=1, help="分块并行渲染进程数（frames 阶段）")
     ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
                     help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920（**实验性**，"
-                         "版式几何仍按横屏设计，能出片但不建议直接交付）")
+                         "版式骨架已原生（三套骨架各有一套竖屏坐标），但 compare/process 等构图内部"
+                         "仍是横屏结构）")
     ap.add_argument("--resume", action="store_true", help="复用已存在的分块")
     ap.add_argument("--force-tts", action="store_true", help="丢弃 TTS 缓存重新合成")
     ap.add_argument("--force-music", action="store_true", help="丢弃配乐重出（score 阶段）")
@@ -2494,9 +2495,9 @@ def main():
     if (os.environ.get("VIDEO_STUDIO_LAYOUT") or "").strip().lower() in (
             "portrait", "9x16", "vertical", "portrait-9x16"):
         sys.stderr.write(
-            "[warn] 竖屏是实验性布局：安全区/字幕带已按 1080x1920 算好，但 10 类构图的"
-            "版式几何仍按横屏设计，画面会偏挤。\n"
-            "       能出片、能过字形检测，但不建议直接交付；版式重设计见 "
+            "[warn] 竖屏是实验性布局：安全区/字幕带/版式骨架都已按 1080x1920 原生算好，"
+            "但 compare（左右对照）/process（横向流程轴）等**构图内部**仍是横屏结构。\n"
+            "       能出片、能过字形检测，但不建议直接交付；构图内部重设计见 "
             "references/portrait-and-motion.md\n")
 
     if a.batch:

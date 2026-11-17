@@ -290,6 +290,49 @@ LAYOUTS = {
 
 LAYOUT_IDS = tuple(LAYOUTS.keys())
 
+# ============================================================================
+# 竖屏原生版式（同名的另一套几何，坐标直接是 1080x1920 的像素）
+#
+# 为什么不是把横屏的数乘个系数：竖屏的约束根本不是缩放——卡片该在标题下面纵向堆叠，
+# 而不是在标题右侧；center-stack 的上下留白比例也完全不同。所以这里给的是另一套坐标，
+# scenes._scene_layout 在竖屏下直接取用、不再折算（再折算一次就成了二次缩放）。
+#
+# 三套骨架在竖屏里靠**纵向节奏与密度**区分，不靠左右：竖屏没有真正的左右两栏。
+# 注意 split-right 不能做成「卡片在上、标题在下」——正文段先出条目后出标题读起来是错的
+# （第一版就是这么写的，出图后当场看出来）。
+#
+# 数值来源：SAFE=(65,120,1015,1610)、SUB_BAND=(80,1450,1000,1616)。
+# 正文底边留到 1430，给字幕带留出 20px 间隙。
+# ============================================================================
+LAYOUTS_PORTRAIT = {
+    "left-stack": {
+        "label": "竖屏 标题在上 / 卡片在下",
+        "title_x": 80, "title_y": 300, "title_w": 920,
+        "kicker_y": 230, "sub_y": 470, "sub_w": 920,
+        "panel_x": 80, "panel_y": 600, "panel_w": 920, "panel_h": 118, "panel_gap": 148,
+        "center": False,
+    },
+    "center-stack": {
+        "label": "竖屏 居中大字",
+        "title_x": None, "title_y": 520, "title_w": 920,
+        "kicker_y": 450, "sub_y": 0, "sub_w": 920,
+        "panel_x": None, "panel_y": 900, "panel_w": 880, "panel_h": 112, "panel_gap": 140,
+        "center": True,
+    },
+    "split-right": {
+        "label": "竖屏 紧凑标题 / 高密度卡片",
+        "title_x": 80, "title_y": 250, "title_w": 920,
+        "kicker_y": 190, "sub_y": 420, "sub_w": 920,
+        "panel_x": 80, "panel_y": 520, "panel_w": 920, "panel_h": 104, "panel_gap": 132,
+        "center": False,
+    },
+}
+
+
+def layout_portrait(name):
+    """取竖屏版式几何；名字与横屏一致（章节轮换用的还是那三个 key）。"""
+    return LAYOUTS_PORTRAIT.get(str(name)) or LAYOUTS_PORTRAIT["left-stack"]
+
 
 def layout(name):
     """取版式几何；未知名字报错并列出可用值（不静默回落）。"""

@@ -60,7 +60,7 @@ except ImportError:
 import filmkit as K
 # 只 import 模板**当下真的用到**的名字（多余导入会被 pyflakes 记一笔，也容易让人以为哪都能用）。
 # 写自己的场景时，缓动/噪声直接走模块：K.lerp / K.ease_in / K.ease_in_out / K.vnoise / K.hash2 …
-from filmkit import SAFE, W, H, clamp, smooth, ease_out, rng
+from filmkit import SAFE, SUB_BAND, W, H, clamp, smooth, ease_out, rng
 
 # ============================================================================
 # 零、legacy 绘制器（逐字节基线，别动这里的任何一行）
@@ -391,6 +391,11 @@ _TYPE_SCALE = max(0.5, min(1.0, W / 1920.0))
 # 条目多说明该段版式在小画布上挤不下，该改的是版式，不是把字号再调小。
 # 横屏永远不写这个列表（`_fit_px` 在 W==1920 时直接返回），所以它对既有行为零影响。
 _CLAMPED = []
+
+# 正文可用的**下边界**：字幕带顶再留 16px 间隙。
+# 以前这里到处写 856（= 1080 版字幕带上沿 872 - 16），竖屏下它落在画面中间，
+# 于是卡片区会被压到上半屏。改成从 layoutkit 的 SUB_BAND 派生，两个 profile 都成立。
+_BODY_LIMIT = int(SUB_BAND[1]) - 16
 
 
 def _font(th, size, weight="reg"):
@@ -731,7 +736,7 @@ def _panel_x(lay):
 
 
 def _panel_boxes(lay, th, n, y_floor, v):
-    """条目卡片布局：选列数 + 压缩卡片高度，保证①不压标题②不越字幕带（856）。
+    """条目卡片布局：选列数 + 压缩卡片高度，保证①不压标题②不越字幕带（_BODY_LIMIT）。
 
     panel_gap 在 stylekit 里是**行距（pitch）**不是间隙：按 240 + i*118 排卡片时，
     所以 pitch 至少得比卡片高度多 6px，否则卡片会叠在一起。条目多时先加列，再压高度，
@@ -744,7 +749,7 @@ def _panel_boxes(lay, th, n, y_floor, v):
     base_pitch = max(float(lay["panel_gap"]), float(lay["panel_h"]) + 6.0)
     ch_base = float(lay["panel_h"])
     y0 = max(float(lay["panel_y"]), float(y_floor))
-    ylim = v.cy + (856.0 - v.cy) / max(0.2, v.s)
+    ylim = v.cy + (float(_BODY_LIMIT) - v.cy) / max(0.2, v.s)
     avail = max(80.0, ylim - y0)
     if lay.get("center"):
         cand = (1, 2) if n <= 2 else ((2, 3) if n <= 6 else (3, 2))
@@ -1012,6 +1017,10 @@ def _scene_layout(scene, th):
     的第三步，需要新录金帧、重算若干断言阈值，不能顺手塞在这里。
     """
     name = str(scene.get("scene_layout") or th.get("layout") or "left-stack")
+    if H > W:
+        # 竖屏：直接用**原生**几何，不再折算——ST.LAYOUTS_PORTRAIT 里的坐标已经是
+        # 1080x1920 的像素，再乘一遍比例就是二次缩放（卡片会被压到上半屏）。
+        return ST.layout_portrait(name)
     return _fit_layout(ST.LAYOUTS.get(name) or ST.LAYOUTS["left-stack"])
 
 
@@ -1462,7 +1471,7 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
     amp = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(hz * t + ph))
     line_w = int(min(float(lay["title_w"]), 760) * 0.55 * amp)
     line_y = sub_bottom + int(size * 0.42)
-    if line_y < 856:
+    if line_y < _BODY_LIMIT:
         lx = ax if align == "left" else (ax - line_w if align == "right" else ax - line_w // 2)
         ImageDraw.Draw(img, "RGBA").line(
             [v.x(lx), v.y(line_y), v.x(lx + line_w), v.y(line_y)],
@@ -1521,7 +1530,7 @@ def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
     bre = 0.5 + 0.5 * math.sin(hz * 0.9 * t + ph)
     ul_w = int(280 * (0.7 + 0.3 * bre))
     ul_y = top + len(lines) * lh + int(size * 0.22)
-    if ul_y < 856:
+    if ul_y < _BODY_LIMIT:
         d = ImageDraw.Draw(img, "RGBA")
         x0 = W * 0.5 - ul_w * 0.5
         d.line([v.x(x0), v.y(ul_y), v.x(x0 + ul_w), v.y(ul_y)],
@@ -1619,9 +1628,9 @@ def _draw_list(scene, t, dur, tg, script, frame, plan, th):
     top = max(top, 200.0)
     body = max(22, int(th["scale"]["body"][0]) - 1)
     # 行高：优先"每条 96–118px"，条目多时往下压，硬下限 56px（再低中文就糊成一片）。
-    # 为什么不是固定行高：模板片 5 条要点在 9.3s 的段里，固定 118px 会溢出 856 硬边界，
+    # 为什么不是固定行高：模板片 5 条要点在 9.3s 的段里，固定 118px 会溢出 _BODY_LIMIT 硬边界，
     # 于是第 5 条被静默截断（实测踩到过），观众看到"五步"只列出四步。
-    avail = 856.0 - top
+    avail = float(_BODY_LIMIT) - top
     row_h = avail / max(1, len(items)) if items else 118.0
     row_h = min(118.0, max(56.0, row_h - 6.0))
     shown = int(avail // row_h)
