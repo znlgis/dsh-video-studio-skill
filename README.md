@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-1.8.4-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-1.8.5-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：用代码从零生成中文视频。**
 
@@ -101,7 +101,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，77 条断言，不联网）
+# 2) 环境自检（可选，79 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 7 题一次问完（题材/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -151,7 +151,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage acce
 
 | 想要 | 怎么做 |
 |---|---|
-| 交付 720p / 换帧率 | `film.json` 写 `"video": {"width":1280,"height":720,"fps":24}`（只做 16:9 横屏、只能下采样） |
+| 交付 720p / 换帧率 | `film.json` 写 `"video": {"width":1280,"height":720,"fps":24}`（横屏 16:9 / 竖屏 9:16 都支持：竖屏写 1080x1920 并加 `--layout portrait`；只能同比例下采样） |
 | 批量出片 | `python <SKILL_DIR>/scripts/render.py --batch films.json`（≤100 条、开跑前全量预检、单条失败不阻断） |
 | 只渲前 N 秒给人看 | `--preview 15`（出 `out/preview/*.mp4` + `.gif`，不写交付账本） |
 | 让 QA 快一点 | `--vmaf sample`（每 5 帧取 1）或 `--vmaf off`（G11 记 skipped） |
@@ -190,7 +190,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（77 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（79 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/studio.py          薄门面（studio.py <子命令> 转调现成脚本，未知参数原样透传）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
@@ -266,7 +266,7 @@ python tools/ci_check.py -v     # 13 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**77 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**79 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
 
 ## License
 

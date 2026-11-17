@@ -112,11 +112,14 @@ QUESTIONS = (
         "required": False,
         "default": "1080p30",
         "options": [
-            {"value": "1080p30", "label": "1920×1080 / 30fps（推荐）", "brief": ""},
-            {"value": "1080p24", "label": "1920×1080 / 24fps（电影感）", "brief": ""},
-            {"value": "720p24", "label": "1280×720 / 24fps（更快、更省）", "brief": ""},
+            {"value": "1080p30", "label": "1920×1080 / 30fps 横屏（推荐）", "brief": ""},
+            {"value": "1080p24", "label": "1920×1080 / 24fps 横屏（电影感）", "brief": ""},
+            {"value": "720p24", "label": "1280×720 / 24fps 横屏（更快、更省）", "brief": ""},
+            {"value": "portrait1080p30", "label": "1080×1920 / 30fps 竖屏（手机端；experimental）", "brief": ""},
+            {"value": "portrait1080p24", "label": "1080×1920 / 24fps 竖屏", "brief": ""},
+            {"value": "portrait720p30", "label": "720×1280 / 30fps 竖屏（更快、更省）", "brief": ""},
         ],
-        "hint": "只做 16:9 横屏、只能下采样；选完写进 film.json 的 video 块。",
+        "hint": "横屏 16:9 与竖屏 9:16 都支持（竖屏 experimental，版式骨架与 compare/process/chart 已竖屏原生，只有排版节奏未按竖屏复核）；只允许同比例下采样。选完写进 film.json 的 video 块；竖屏还要在 render / propose / filmcheck 上加 --layout portrait（不加就是横屏画布，与 video 块比例不符会被拒片）。",
     },
     {
         "id": "voice",

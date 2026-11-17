@@ -37,6 +37,34 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+
+def _early_layout(argv=None):
+    """在 import filmkit/previewkit **之前**把 --layout 落到环境变量。
+
+    为什么要在模块顶部做：scenes.py 写的是 `from filmkit import W, H`，而 filmkit 的 W/H
+    来自 layoutkit —— 值在导入那一刻就绑死了。等 argparse 解析完再设环境变量，此时画布
+    早就定了，`--layout portrait` 会静默失效（最坏的那种 bug：以为在出竖屏，实际是横屏）。
+    与 render.py 同一条纪律（那边是为了 `--stage frames`，这边是为了提案/校验）。
+
+    只认 `--layout X` 与 `--layout=X` 两种写法；别的参数一概不碰。
+    """
+    import os as _os, sys as _sys
+    args = list(_sys.argv[1:] if argv is None else argv)
+    want = ""
+    for i, tok in enumerate(args):
+        if tok == "--layout" and i + 1 < len(args):
+            want = args[i + 1]
+            break
+        if tok.startswith("--layout="):
+            want = tok.split("=", 1)[1]
+            break
+    if want:
+        _os.environ["VIDEO_STUDIO_LAYOUT"] = want
+
+
+_early_layout()
+
+
 # ============================================================================
 # 与 render.py / stylekit.py / voicekit.py 对齐的硬事实（改了那边要同步这里）
 # ============================================================================
@@ -400,13 +428,16 @@ SCRIPT_SPEC = {
         "tts": {"t": "dict", "props": {
             "backend": {"t": "str"},
             "voice": {"t": ("str", "dict")}}},
-        # 画幅与帧率：只允许 16:9 横屏 + 下采样输出（见 filmkit.video_plan 的取舍说明）
+        # 画幅与帧率：横屏 16:9 与竖屏 9:16 各自只能同比例下采样（见 filmkit.video_plan）
         "video": {"t": "dict", "props": {
             "width": {"t": "int", "min": 2},
             "height": {"t": "int", "min": 2},
             "out_width": {"t": "int", "min": 2},
             "out_height": {"t": "int", "min": 2},
             "fps": {"t": "int", "min": 1, "max": 120}}},
+        # 合成参数（可选）：true_peak_db 覆盖 mux 的 loudnorm 真峰目标（默认 -1.5 dBTP）
+        "mux": {"t": "dict", "props": {
+            "true_peak_db": {"t": "num", "max": -0.1}}},
         # 质检门禁参数（全片 VMAF/SSIM 阻断 + ASR 回读）
         "qa": {"t": "dict", "props": {
             "vmaf": {"t": "dict", "props": {
@@ -858,6 +889,10 @@ def main(argv=None):
         description="film.json 契约校验器（未知键 WARN + 枚举/范围 ERROR + 跨字段对账）")
     ap.add_argument("path", nargs="?", default="", help="film.json 路径（缺省找 cwd/film.json）")
     ap.add_argument("--strict", action="store_true", help="warning 也算失败（退出码 1）")
+    ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
+                    help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920"
+                         "（experimental：版式骨架与 compare/process/chart 已竖屏原生，"
+                         "排版节奏未按竖屏复核）。必须与 film.json 的 video 块宽高比一致")
     ap.add_argument("--json", action="store_true", dest="as_json", help="机读输出（stdout 只有 JSON）")
     args = ap.parse_args(argv)
 

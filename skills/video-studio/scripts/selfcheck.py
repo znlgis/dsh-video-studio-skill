@@ -2818,6 +2818,108 @@ def _walk_enum_rules(obj, path):
                 yield got
 
 
+def t_canvas_switch():
+    """78 画幅开关：竖屏不能只在渲染器里支持，入口也要认。
+
+    这条守的是一次**真实事故**：技能 1.5.0-1.8.0 已把竖屏做到能出片，但
+    ① intake.py 的画幅题只有 3 个横屏选项、提示写着"只做 16:9 横屏"；
+    ② designkit.SIZES 与 schemas/design.schema.json 的 size 枚举也只有横屏；
+    ③ propose.py / filmcheck.py 没有 --layout，previewkit 的 CANVAS 还写死 1920x1080。
+    结果：用户在会话里要竖屏，agent 照着 SKILL.md/问诊单回答"本技能只做 16:9 横屏"，
+    并且竖屏提案连 zh 帧都出不来（预览按横屏算尺寸，每帧都判"尺寸不符"）。
+    入口文案与工具能力不一致，等于把能力藏起来——这条断言把它钉住。
+    """
+    import designkit as DK
+    scripts = HERE
+    intake_py = os.path.join(scripts, 'intake.py')
+    filmcheck_py = os.path.join(scripts, 'filmcheck.py')
+    propose_py = os.path.join(scripts, 'propose.py')
+    import subprocess as _sp
+
+    def _run(args, cwd, extra_env=None):
+        env = dict(os.environ, PYTHONIOENCODING='utf-8')
+        env.pop('VIDEO_STUDIO_LAYOUT', None)
+        env.update(extra_env or {})
+        return _sp.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', env=env, timeout=300)
+
+    tmp = tempfile.mkdtemp(prefix='vs_canvas_selfcheck_')
+    # ① 问诊单必须给出竖屏选项，且不能再声称"只做横屏"
+    r = _run([intake_py, '--work', 'work', '--questions', '--json'], tmp)
+    assert r.returncode == 0, 'intake --questions 失败：%s' % (r.stderr or r.stdout)[-300:]
+    payload = json.loads(r.stdout[r.stdout.find('{'):])
+    fmt = [q for q in payload['questions'] if q['id'] == 'format'][0]
+    vals = [o['value'] for o in fmt.get('options') or []]
+    labels = ' '.join(o['label'] for o in fmt.get('options') or [])
+    assert any(v.startswith('portrait') for v in vals), \
+        '画幅题没有竖屏选项（能力被藏起来）：%s' % vals
+    assert '竖屏' in labels, '画幅题的选项文案里没有竖屏：%r' % labels
+    hint = str(fmt.get('hint') or '')
+    assert '竖屏' in hint, '画幅题 hint 仍不提竖屏：%r' % hint
+    assert '只做 16:9' not in hint and '只做16:9' not in hint, \
+        'hint 仍声称"只做 16:9 横屏"（与 --layout portrait 矛盾）：%r' % hint
+    # ② designkit 的尺寸枚举必须两套都在（横屏三档 + 竖屏三档）
+    assert '1080x1920' in DK.SIZES and '1920x1080' in DK.SIZES, \
+        'designkit.SIZES 缺一套画幅：%r' % (DK.SIZES,)
+    # ③ 同一份竖屏剧本：带 --layout portrait 通过，不带则（因为 9:16 vs 16:9）报错
+    film = os.path.join(tmp, 'film_p.json')
+    with io.open(film, 'w', encoding='utf-8') as fh:
+        json.dump({'title': '竖屏自检', 'video': {'width': 1080, 'height': 1920},
+                   'lines': [{'id': 'l01', 'kind': 'hook', 'text': '第一句话。'},
+                             {'id': 'l02', 'kind': 'outro', 'text': '结束。'}]},
+                  fh, ensure_ascii=False)
+    r = _run([filmcheck_py, film, '--layout', 'portrait'], tmp)
+    assert r.returncode == 0, 'filmcheck --layout portrait 没认竖屏剧本：%s' % (
+        (r.stdout or '') + (r.stderr or ''))[-400:]
+    r = _run([filmcheck_py, film], tmp)
+    assert r.returncode != 0, 'filmcheck 不带 --layout 时竟然接受了竖屏剧本（应当报 9:16 vs 16:9）'
+    # ④ propose.py 必须接受 --layout（否则竖屏提案根本出不来）
+    r = _run([propose_py, '--help'], tmp)
+    assert '--layout' in (r.stdout or ''), 'propose.py 没有 --layout（竖屏提案无法预览）'
+    return '问诊有竖屏选项 / SIZES 两套 / filmcheck 认 --layout / propose 有 --layout'
+
+
+def t_mux_true_peak_override():
+    """79 真峰目标可覆盖：竖屏片默认 -1.5 dBTP 会 G5 fail，得能调。
+
+    事故现场：一部 1080x1920 竖屏片，audio.wav 叠加峰值 0.872（同期横屏片 0.839），
+    mux 用默认 target_tp=-1.5 之后，AAC 编码把真峰抬到 -0.0 dBTP，G5（<= -1 dBTP）直接 fail。
+    混音侧的 peak_guard 只保证"不削波"，管不到编码后的真峰——所以这个参数必须可覆盖，
+    而不是让用户去改技能源码。
+    """
+    import render as R
+    real_k = R.K
+    seen = {}
+
+    class _FakeK:
+        def mux(self, video, audio, out, **kw):
+            seen.update(kw)
+            return out
+
+    _buf = io.StringIO()
+    try:
+        R.K = _FakeK()
+        with redirect_stdout(_buf):
+            R.st_mux('s.mp4', 'a.wav', 'o.mp4', {})
+        assert seen.get('target_tp') == -1.5, \
+            '默认真峰目标变了（文档写 -1.5）：%r' % (seen.get('target_tp'),)
+        seen.clear()
+        with redirect_stdout(_buf):
+            R.st_mux('s.mp4', 'a.wav', 'o.mp4', {'mux': {'true_peak_db': -3.0}})
+        assert seen.get('target_tp') == -3.0, \
+            'film.json 的 mux.true_peak_db 没透传给 K.mux：%r' % (seen.get('target_tp'),)
+        for bad, why in ((0.5, '>= 0'), ('x', '非数字')):
+            try:
+                with redirect_stdout(_buf):
+                    R.st_mux('s.mp4', 'a.wav', 'o.mp4', {'mux': {'true_peak_db': bad}})
+            except SystemExit:
+                continue
+            raise AssertionError('mux.true_peak_db=%r（%s）没被拒（会被静默接受）' % (bad, why))
+    finally:
+        R.K = real_k
+    return '默认 -1.5 / 可覆盖 -3.0 / 非法值报错'
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2896,6 +2998,8 @@ CASES = [
     ("75 竖屏 profile（画布/出图/文字不出画）", t_portrait_profile),
     ("76 构图层金帧（10 类构图各自有像素基线）", t_compose_golden),
     ("77 枚举校验真的在执行（enum 不许只写在 SPEC 里）", t_enum_enforced),
+    ("78 画幅开关（问诊/尺寸枚举/filmcheck/propose 都认竖屏）", t_canvas_switch),
+    ("79 真峰目标可覆盖（竖屏片默认 -1.5 dBTP 会 G5 fail）", t_mux_true_peak_override),
 ]
 
 

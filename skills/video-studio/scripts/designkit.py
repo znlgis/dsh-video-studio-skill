@@ -111,10 +111,27 @@ LAYOUTS = tuple(ST.LAYOUT_IDS)
 HUDS = ("chip-left", "corner-line", "none")
 FONT_FAMILIES = ("sans", "serif", "kai", "round")
 ALIGNS = ("left", "center", "right")
-SIZES = ("1920x1080", "1280x720", "960x540")
+SIZES = ("1920x1080", "1280x720", "960x540",
+         "1080x1920", "720x1280", "540x960")
+# 尺寸与渲染画布必须同比例：横屏三档 / 竖屏三档分属两套版式（见 layoutkit 的 profile）。
+# 校验口径放在这里，但"当前这一跑是横屏还是竖屏"由环境变量决定（layoutkit 导入期定死）。
 FPSES = (24, 25, 30, 50, 60)
 HOLD_POLICIES = ("none", "readable", "long")
 SFX_DENSITIES = ("none", "sparse", "normal", "rich")
+
+
+def _canvas_size():
+    """当前一跑的画布尺寸字符串（横屏 1920x1080 / 竖屏 1080x1920）。
+
+    为什么采样器不再写死 "1920x1080"：visual.size 是设计的一部分，写死横屏等于
+    "竖屏片子的设计里写着横屏尺寸"——design_to_plan 不读它、但 validate_design 会校验，
+    用户手改会撞枚举。跟随 layoutkit 的 profile 才是同一份事实。
+    """
+    try:
+        import layoutkit                              # noqa: PLC0415
+        return "%dx%d" % (int(layoutkit.W), int(layoutkit.H))
+    except Exception:                                 # noqa: BLE001 —— 只读旁路
+        return "1920x1080"
 
 # 配色：**没有命名家族**。
 #
@@ -2042,7 +2059,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
             "layout": layout,
             "layout_cycle": list(layout_cycle),
             "hud": hud,
-            "size": "1920x1080",
+            "size": _canvas_size(),
             "fps": 30,
             "subtitle": subtitle,
         },

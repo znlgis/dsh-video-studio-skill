@@ -779,7 +779,7 @@
     "video": {
       "type": "object",
       "additionalProperties": true,
-      "description": "画幅/帧率（**只支持 16:9 横屏**）。内部构图恒为 1920x1080，输出只能更小（编码时 lanczos 下采样）；竖屏 / 非 16:9 / 上采样 / 非法 fps 会被 filmkit.video_plan 直接报错。",
+      "description": "画幅/帧率。**横屏 16:9 与竖屏 9:16 都支持**：内部构图跟随 layoutkit 的 profile（--layout portrait 切到 1080x1920），输出只能同比例下采样（编码时 lanczos）。竖屏是 experimental：版式骨架与 compare/process/chart 已竖屏原生，排版节奏未按竖屏复核。非当前画布比例 / 上采样 / 非法 fps 会被 filmkit.video_plan 直接报错。",
       "properties": {
         "width": {
           "type": "integer",
@@ -787,9 +787,12 @@
             1920,
             1280,
             960,
-            2560
+            2560,
+            1080,
+            720,
+            540
           ],
-          "description": "输出宽（16:9 横屏）"
+          "description": "输出宽：横屏 1920/1280/960/2560；竖屏 1080/720/540"
         },
         "height": {
           "type": "integer",
@@ -797,9 +800,12 @@
             1080,
             720,
             540,
-            1440
+            1440,
+            1920,
+            1280,
+            960
           ],
-          "description": "输出高（16:9 横屏）"
+          "description": "输出高：横屏 1080/720/540/1440；竖屏 1920/1280/960"
         },
         "fps": {
           "type": "integer",
@@ -811,6 +817,18 @@
             60
           ],
           "description": "帧率，缺省 30"
+        }
+      }
+    },
+    "mux": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "合成参数（可选）。true_peak_db 覆盖 mux 阶段 loudnorm 的真峰目标（默认 -1.5 dBTP）：AAC 编码会把真峰再抬约 0.9-1.2 dB，竖屏片或换配乐后叠加峰值更高时，默认目标可能让 G5 报 -0.0 dBTP fail。",
+      "properties": {
+        "true_peak_db": {
+          "type": "number",
+          "maximum": -0.1,
+          "description": "真峰目标（dBTP，必须 < 0，默认 -1.5）。G5 判据是 <= -1 dBTP；-3.0 通常能在竖屏片上留够余量"
         }
       }
     },

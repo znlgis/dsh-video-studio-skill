@@ -58,7 +58,7 @@
 | `layout` | `left-stack` / `center-stack` / `split-right` | 默认版式 |
 | `layout_cycle` | 版式数组（≥2 种不同） | 按章节轮换版式；不写则自动派生 2–3 种 |
 | `hud` | `chip-left` / `corner-line` / `none`（默认 `none`） | 页眉/角落装饰。默认关闭（这两种都靠细线构形） |
-| `size` / `fps` | `1920x1080` / `30` | 只支持 16:9 横屏（编码时可下采样到 720p） |
+| `size` / `fps` | `1920x1080` / `30` | 横屏 16:9（1920x1080，可下采样 720p/540p）与竖屏 9:16（1080x1920，experimental）都支持；竖屏要配 `--layout portrait`（render / propose / filmcheck 都认） |
 | `subtitle` | 见 §3 | 字幕字号/位置/对齐/背板/圆角/字族/颜色/行数 |
 
 > **能组合出多少种画面？** 离散维度是 9 母题 × 6 转场 × 4 缓动 × 8 编号 × 3 版式 × 3 HUD × 4 字族

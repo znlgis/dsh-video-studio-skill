@@ -512,9 +512,12 @@
      "enum": [
       "1920x1080",
       "1280x720",
-      "960x540"
+      "960x540",
+      "1080x1920",
+      "720x1280",
+      "540x960"
      ],
-     "description": "画幅。本版**仅支持 16:9 横屏**（1920x1080 内部构图，可 lanczos 下采样到 1280x720 / 960x540）；竖屏、非 16:9 或上采样一律拒绝。与 film.json 的 video 块（width/height/fps）冲突时报错（fail-closed，绝不静默取其一）。"
+     "description": "画幅。**横屏 16:9（1920x1080 / 1280x720 / 960x540）与竖屏 9:16（1080x1920 / 720x1280 / 540x960）都支持**：内部构图跟随 layoutkit 的 profile（--layout portrait 切到 1080x1920），只允许 lanczos 下采样，非当前画布比例或上采样一律拒绝。竖屏是 experimental：版式骨架与 compare/process/chart 已竖屏原生，排版节奏未按竖屏复核。与 film.json 的 video 块（width/height/fps）冲突时报错（fail-closed，绝不静默取其一）。"
     },
     "fps": {
      "type": "integer",

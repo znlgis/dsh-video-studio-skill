@@ -508,8 +508,23 @@ def _theme_of(plan):
     return th if isinstance(th, dict) else None
 
 
-COMPARED_ASPECT = 16.0 / 9.0      # 只支持 16:9 横屏（与 filmkit.VIDEO_ASPECT 同口径）
+COMPARED_ASPECT = 16.0 / 9.0      # 缺省 16:9；实际比较时按当前画布取（见 canvas_aspect()）
 ASPECT_TOL = 0.01                 # 宽高比容差（与 filmkit.video_plan 一致）
+
+
+def canvas_aspect():
+    """当前画布的宽高比（横屏 16:9 / 竖屏 9:16），以 layoutkit 为准。
+
+    为什么不再写死 16:9：竖屏片（--layout portrait）成片是 1080x1920，写死 16:9 的话
+    G11 会在"分辨率结构性不符"这一档直接 fail——而这不是画质问题，是版式问题。
+    取不到画布时回落到 16:9（与历史行为一致，绝不因为读不到就判 fail）。
+    """
+    try:
+        import layoutkit                                # noqa: PLC0415
+        return float(layoutkit.W) / float(layoutkit.H)
+    except Exception:                                   # noqa: BLE001
+        return COMPARED_ASPECT
+
 
 
 def _declared_out_size(tl, script):
@@ -565,11 +580,12 @@ def _judge_sizes(info, tl, script, comp_w, comp_h):
         return "fail", None, (
             "成片分辨率 %dx%d 与内部构图 %dx%d 交叉（一维大、一维小）："
             "没有任何合法的渲染路径会产生这个尺寸" % (fw, fh, comp_w, comp_h))
-    if abs(fw / float(fh) - COMPARED_ASPECT) > ASPECT_TOL:
+    want_aspect = canvas_aspect()
+    if abs(fw / float(fh) - want_aspect) > ASPECT_TOL:
         return "fail", None, (
-            "成片分辨率 %dx%d 不是 16:9（%.3f:1）：本项目只支持 16:9 横屏的缩放交付；"
-            "非 16:9 说明成片被裁切/变形了，不能当合格交付"
-            % (fw, fh, fw / float(fh)))
+            "成片分辨率 %dx%d 宽高比 %.3f:1，与当前画布不符（期望 %.3f:1）："
+            "横屏片只交付 16:9、竖屏片只交付 9:16 的缩放结果；比例不符说明成片被裁切/变形了"
+            % (fw, fh, fw / float(fh), want_aspect))
     return ("scale", {"from": [comp_w, comp_h], "to": [fw, fh]},
             "参考流 %dx%d lanczos -> 成片 %dx%d" % (comp_w, comp_h, fw, fh))
 

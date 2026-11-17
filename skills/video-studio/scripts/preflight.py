@@ -50,6 +50,34 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _early_layout(argv=None):
+    """在 import filmkit/previewkit **之前**把 --layout 落到环境变量。
+
+    为什么要在模块顶部做：scenes.py 写的是 `from filmkit import W, H`，而 filmkit 的 W/H
+    来自 layoutkit —— 值在导入那一刻就绑死了。等 argparse 解析完再设环境变量，此时画布
+    早就定了，`--layout portrait` 会静默失效（最坏的那种 bug：以为在出竖屏，实际是横屏）。
+    与 render.py 同一条纪律（那边是为了 `--stage frames`，这边是为了提案/校验）。
+
+    只认 `--layout X` 与 `--layout=X` 两种写法；别的参数一概不碰。
+    """
+    import os as _os, sys as _sys
+    args = list(_sys.argv[1:] if argv is None else argv)
+    want = ""
+    for i, tok in enumerate(args):
+        if tok == "--layout" and i + 1 < len(args):
+            want = args[i + 1]
+            break
+        if tok.startswith("--layout="):
+            want = tok.split("=", 1)[1]
+            break
+    if want:
+        _os.environ["VIDEO_STUDIO_LAYOUT"] = want
+
+
+_early_layout()
+
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
@@ -758,6 +786,10 @@ def main(argv=None):
                     help="渲染引擎；缺省读 film.json 的 engine 字段（再缺省 pil）")
     ap.add_argument("--timeline", default="", help="work/timeline.json（可选；补扫场景文本/查过时）")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON（机读）")
+    ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
+                    help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920"
+                         "（experimental：版式骨架与 compare/process/chart 已竖屏原生，"
+                         "排版节奏未按竖屏复核）。必须与 film.json 的 video 块宽高比一致")
     ap.add_argument("--strict", action="store_true",
                     help="skipped 也算失败（对齐 render.py --strict-gates 语义）")
     a = ap.parse_args(argv)

@@ -105,7 +105,15 @@ AUDIO_PREVIEW_SECONDS = 12.0
 AUDIO_SR = 48000
 
 # 预览固定 1080p：方案比较的是"构图/配色/排版"，缩到 720p 会让字号与留白判断失真。
-CANVAS = (1920, 1080)
+# 预览画布跟随当前 layout profile（横屏 1920x1080 / 竖屏 1080x1920）。
+# 以前这里是常量 1920x1080：于是 `--layout portrait` 下 previewkit 的 _require_canvas
+# 会把每一帧都判成"尺寸不符"，竖屏提案根本出不来（实测 career 一次：propose.py
+# 不接受 --layout 就算绕过去了，出来的静帧仍是横屏——设计评审看的是错的东西）。
+try:
+    import layoutkit as _LK                        # noqa: PLC0415（导入期定死）
+    CANVAS = (int(_LK.W), int(_LK.H))
+except Exception:                                  # noqa: BLE001 —— 只读旁路
+    CANVAS = (1920, 1080)
 # 假语音时长：**从 2.0 提到 2.8**。
 # 为什么：段长 = lead + 假语音 + tail ≈ 2.0 + 1.4 = 3.4 s，而 chart 要求 ≥4.5 s、
 # compare/process 要求 ≥4.0 s —— 于是预览里这些构图**必然被 grammar 降级成 list**。

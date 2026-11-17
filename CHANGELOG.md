@@ -6,6 +6,39 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.5 — 竖屏不再是“藏在代码里、文档说没有”的能力（2026-11-18）
+
+> 一次真实会话暴露的问题：技能 1.5.0–1.8.0 已经把竖屏做到能出片（版式骨架、compare/process/chart、
+> 分 profile 金帧都有），但**所有面向 agent 的入口仍然写着“只做 16:9 横屏”**。于是用户在会话里要竖屏，
+> agent 照着问诊单与 SKILL.md 回答“本技能只做 16:9 横屏”；即使硬改，`propose.py` 也没有 `--layout`，
+> 预览按 1920x1080 校验尺寸，竖屏提案连静帧都出不来。**能力存在但入口不认，等于没有。**
+
+### P0：入口与能力对齐
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① 问诊单画幅题只有 3 个横屏选项、hint 写“只做 16:9 横屏”；② SKILL.md §5.5 / §7.5.1 与 design.schema.json 同样声称只做横屏；③ designkit.SIZES 无竖屏尺寸；④ `propose.py` / `filmcheck.py` 无 `--layout`；⑤ previewkit 的 CANVAS 写死 1920x1080 |
+| 根因 | 竖屏能力在 1.5–1.8 是**一层层往渲染器里加**的（layoutkit → stylekit → scenes → 分 profile 金帧），但“用户从哪知道它能竖屏”这条链路没人补齐：intake / SKILL / schema / propose / previewkit 全部停在横屏时代 |
+| 修法 | ① intake 画幅题加 3 个竖屏选项，hint 改成“两套都支持 + 竖屏要加 --layout portrait”；② SKILL.md §5.5 的 `size` 行与 §7.5.1 表格改写成两套画幅的真实行为；③ `designkit.SIZES` 与 `design.schema.json` 的 size 枚举补 `1080x1920/720x1280/540x960`，采样器 `visual.size` 跟随 layoutkit 的 profile（不再写死横屏）；④ `propose.py` / `filmcheck.py` / `preflight.py` 增加 `--layout` 并在 **import 之前**落到 `VIDEO_STUDIO_LAYOUT`（与 render.py 同一条纪律）；⑤ `previewkit.CANVAS` 从 layoutkit 取 |
+| 为什么必须 import 前设 | `scenes.py` 写的是 `from filmkit import W, H`，值在导入那一刻绑死；argparse 之后再设只会得到“画布已定、用户以为在出竖屏”的静默失效 |
+
+### P1：竖屏片真跑一遍暴露的两个门禁问题
+
+| 项 | 内容 |
+|---|---|
+| 真峰 G5 | 竖屏片 `audio.wav` 叠加峰值 0.872（同期横屏片 0.839），mux 默认 `target_tp=-1.5` 之后 AAC 编码把真峰抬到 **-0.0 dBTP**，G5（≤ -1 dBTP）直接 fail。修法：`film.json` 新增 `mux.true_peak_db`（必须 < 0），`st_mux` 透传给 `K.mux(target_tp=)`；默认值仍是 -1.5，行为不变 |
+| VMAF 宽高比 | `qavmaf` 把 `COMPARED_ASPECT = 16/9` 写死，“宽高比不是 16:9 → fail”。竖屏成片 1080x1920 会被判成“被裁切/变形”。修法：新增 `canvas_aspect()` 按 layoutkit 取，横屏片行为不变 |
+| web 引擎画布 | `webengine._validate_canvas` 直接拒绝 `w < h`。修法：接受 9:16，其它比例仍拒绝 |
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| selfcheck | **79 条**（新增 78 画幅开关 / 79 真峰目标覆盖）全绿 |
+| 竖屏端到端 | `filmcheck --layout portrait` 0 error；`propose --layout portrait` 出的静帧真的是 1080x1920、设计里 `visual.size=1080x1920` |
+| 横屏回归 | 同一份横屏剧本 filmcheck 仍 0 error；`--layout` 不传时行为与之前完全一致 |
+| ruff | 0 违规 |
+
 ## 1.8.4 — 3.9 标准库识别改用"问解释器"而不是"扫目录猜"（2026-11-17）
 
 > 1.8.3 让 py39 job 从"两项崩"缩到"一项错"：`5 三方依赖白名单` 把 `math` 判成第三方。

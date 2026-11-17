@@ -1596,8 +1596,26 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
 # ---------------------------------------------------------------- 合成 / 质检
 def st_mux(silent, audio, out, script):
     print("== Mux")
+    # 真峰目标可覆盖：默认 -1.5 dBTP 是**按横屏实测**定的（AAC 编码会再抬 ~0.9 dB）。
+    # 竖屏/换配乐后叠加峰值会变：实测一部竖屏片 audio.wav 峰值 0.872（横屏 0.839），
+    # 同样用 -1.5 目标，AAC 之后真峰报 -0.0 dBTP，G5 直接 fail。混音侧的 peak_guard
+    # 只保证"不削波"，管不到编码后的真峰——这个参数就是给那条差距留的出口。
+    # 只接受负数（>=0 没有物理意义，会把真峰目标推到满刻度）。
+    tp = -1.5
+    mux_cfg = script.get("mux") if isinstance(script.get("mux"), dict) else {}
+    if mux_cfg.get("true_peak_db") is not None:
+        try:
+            tp = float(mux_cfg["true_peak_db"])
+        except (TypeError, ValueError):
+            raise SystemExit("[mux] film.json 的 mux.true_peak_db 必须是数字，收到 %r"
+                             % (mux_cfg.get("true_peak_db"),)) from None
+        if tp >= 0:
+            raise SystemExit("[mux] mux.true_peak_db 必须 < 0（收到 %.2f）：真峰目标 >= 0 等于"
+                             "放弃余量，AAC 编码后必然超标" % tp)
+        print("   真峰目标: %.1f dBTP（film.json mux.true_peak_db）" % tp)
     K.mux(silent, audio, out, crf=int(script.get("crf", 18)),
           preset=script.get("preset", "medium"),
+          target_tp=tp,
           reencode_video=bool(script.get("reencode_video", False)))
     print("   ->", out)
     return out

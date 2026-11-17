@@ -174,19 +174,20 @@ def _validate_canvas(width, height):
         raise ValueError("画布尺寸必须是正数，收到 %dx%d" % (w, h))
     if w < _MIN_CANVAS[0] or h < _MIN_CANVAS[1]:
         raise ValueError("画布太小：%dx%d（下限 %dx%d）" % (w, h, _MIN_CANVAS[0], _MIN_CANVAS[1]))
-    if w < h:
-        raise ValueError(
-            "只支持 16:9 横屏，收到 %dx%d 是竖屏（9:16）。竖屏请在剧本/上游拒绝，"
-            "web 引擎这里不做静默裁切或拉伸。" % (w, h))
+    # 画布比例：横屏 16:9 或竖屏 9:16（与 layoutkit 的两套 profile 一致）。
+    # 其它比例仍然拒绝——web 页面由使用者自己写，但安全区/版式只做了这两套。
+    ratio = w / float(h)
+    ok_ratio = (abs(ratio - 16.0 / 9.0) <= _ASPECT_TOL
+                or abs(ratio - 9.0 / 16.0) <= _ASPECT_TOL)
     if w % 2 or h % 2:
         raise ValueError(
             "画布宽高必须是偶数（H.264 yuv420p 的子采样要求），收到 %dx%d。"
             "改成 %dx%d 即可。" % (w, h, w + (w % 2), h + (h % 2)))
-    ratio = w / float(h)
-    if abs(ratio - 16.0 / 9.0) > _ASPECT_TOL:
+    if not ok_ratio:
         raise ValueError(
-            "只支持 16:9 横屏；%dx%d 的宽高比是 %.4f:1，不是 %.4f:1。"
-            "常见合法尺寸：1920x1080 / 1280x720 / 2560x1440 / 3840x2160。" % (w, h, ratio, 16.0 / 9.0))
+            "画布只支持 16:9 横屏或 9:16 竖屏；%dx%d 的宽高比是 %.4f:1。"
+            "常见合法尺寸：横屏 1920x1080 / 1280x720，竖屏 1080x1920 / 720x1280。"
+            % (w, h, ratio))
     return w, h
 
 
