@@ -41,7 +41,7 @@ COMMANDS = {
     "propose":  ("propose.py",   "出候选方案 / 冻结设计 / 换方向重出"),
     "render":   ("render.py",    "生产线：14 个 stage、批量、预览、断点续跑"),
     "critic":   ("critic.py",    "审美质检：离线打分 + 可选 VLM 复评"),
-    "check":    ("selfcheck.py", "回归自检：74 条断言，不联网"),
+    "check":    ("selfcheck.py", "回归自检：75 条断言，不联网"),
     "lint":     ("designkit.py", "设计 DSL 体检（--lint design.json）"),
     "contract": ("filmcheck.py", "film.json 契约校验"),
     "explain":  ("render.py",    "哪些阶段过时了 + 最小重跑命令"),

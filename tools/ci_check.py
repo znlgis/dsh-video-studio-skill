@@ -62,6 +62,8 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  "grammar",
                  # 画布/安全区单一真源（filmkit 从这里取 W/H/SAFE/SUB_BAND）
                  "layoutkit",
+                 # 画布/安全区单一真源（filmkit 从这里取 W/H/SAFE/SUB_BAND）
+                 "layoutkit",
                  # 设计 DSL / 离线预览 / 提案器 / 出片前问诊
                  "designkit", "previewkit", "propose", "intake",
                  # 没有 presetkit（随预设目录一起移除）；这里不能再列它，

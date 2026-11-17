@@ -2621,6 +2621,75 @@ def t_critic_offline():
     return "确定性一致（%.1f）/ metrics 齐全 / 联系表跳过安全区" % sa
 
 
+def t_portrait_profile():
+    """75 竖屏 profile：画布/安全区/字号随画布折算，且文字不许出画。
+
+    竖屏是 **experimental**：安全区与字幕带按 1080x1920 算好、10 类构图都能出图，
+    但版式几何仍是横屏那套（按比例折算），不是竖屏原生排版。这条断言守的是
+    "能出片且文字不出画"这条底线，不是"好看"：
+    ① 竖屏画布真的是 1080x1920（不是被静默回落到横屏）；
+    ② 10 类构图全部能在竖屏渲出一张图，不抛异常；
+    ③ 把一段**明显过宽**的文字塞进去，必须被 `_fit_px` 钳进安全区并留下记录——
+       这是"文字不会出画"的**构造性保证**（横屏 W==1920 时该函数原样返回，零影响）。
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    assets = os.path.join(here, "..", "assets")
+    probe = os.path.join(here, "_portrait_probe.py")
+    body = chr(10).join([
+        "import os, sys, json",
+        "sys.path.insert(0, %r)" % here,
+        "sys.path.insert(0, %r)" % os.path.abspath(assets),
+        "import layoutkit as LK",
+        "import designkit as DK",
+        "import scenes as SC",
+        "design = json.load(open(os.path.join(%r, 'design_fixture.json'), encoding='utf-8'))"
+        % os.path.abspath(assets),
+        "plan = DK.design_to_plan(design)",
+        "script = {'title': 'T', 'lines': [], '_style': plan}",
+        "out = {'canvas': [SC.W, SC.H], 'safe': list(LK.SAFE), 'sizes': {}, 'err': {}}",
+        "kinds = {'hero':'hook','statement':'body','list':'body','stat':'body',",
+        "         'compare':'body','process':'body','quote':'quote','chapter':'body',",
+        "         'chart':'body','outro':'outro'}",
+        "for st in kinds:",
+        "    scene = {'id': 'p_' + st, 'kind': kinds[st], 'scene_type': st,",
+        "             'scene_layout': 'split-right',",
+        "             'text': '这是一句用来测试排版的正文，长度中等偏长。',",
+        "             'sub': '字幕一行', 'big': '标题在这里', 'chapter': '01',",
+        "             'items': [{'text': '条目一'}, {'text': '条目二'}],",
+        "             'chart': {'bars': [3, 5, 2]}}",
+        "    try:",
+        "        out['sizes'][st] = list(SC.draw_frame(scene, 1.0, 6.0, 1.0, script, 30).size)",
+        "    except Exception as e:",
+        "        out['err'][st] = str(e)[:120]",
+        "# 过宽文字必须被钳住并留痕（构造性保证，不是像素推断）",
+        "SC._CLAMPED.clear()",
+        "SC._fit_px(50, 5000.0, 'x' * 40, 96)",
+        "out['clamped'] = len(SC._CLAMPED)",
+        "print(json.dumps(out, ensure_ascii=False))",
+    ])
+    with open(probe, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    env = dict(os.environ, VIDEO_STUDIO_LAYOUT="portrait", PYTHONIOENCODING="utf-8")
+    try:
+        r = subprocess.run([sys.executable, probe], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env, timeout=300)
+        assert r.returncode == 0, "竖屏探针失败：%s" % (r.stderr or r.stdout)[-300:]
+        got = json.loads((r.stdout or "").strip().splitlines()[-1])
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+    assert got["canvas"] == [1080, 1920], \
+        "竖屏画布不是 1080x1920（被静默回落到横屏？）：%r" % (got["canvas"],)
+    assert not got["err"], "竖屏下有构图渲染失败：%r" % (got["err"],)
+    bad = {k: v for k, v in got["sizes"].items() if v != [1080, 1920]}
+    assert not bad, "这些构图在竖屏下尺寸不对：%r" % (bad,)
+    assert got.get("clamped", 0) >= 1, "过宽文字没有被钳住——`_fit_px` 的保证失效了"
+    return "10 类构图 1080x1920 全部出图 / 过宽文字被钳进安全区"
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -2696,6 +2765,7 @@ CASES = [
     ("72 前景不随镜头位移（1px 台阶回归）", t_foreground_pinned),
     ("73 画布/安全区单一真源（layoutkit）", t_layout_single_source),
     ("74 审美质检（离线/确定/联系表不误判）", t_critic_offline),
+    ("75 竖屏 profile（画布/出图/文字不出画）", t_portrait_profile),
 ]
 
 

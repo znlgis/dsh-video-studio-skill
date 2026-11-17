@@ -11,17 +11,28 @@
 这里做的第一件事很小：**把这三个常量收成一份**，默认 profile 的数值与原来逐字节相同。
 验收口径就是 `golden_frames --check` 三帧像素一致——不是"看起来一样"。
 
-刻意没做的事（见 references/portrait-and-motion.md 的第三步）
---------------------------------------------------------
-* **没有**把 `W/H` 做成运行时可切换：`scenes.py` 用 `from filmkit import W, H`
-  在导入期就把值绑死了，要真正支持竖屏得让构图代码接受 profile 参数，而不是改全局。
-  在这里假装"已经支持竖屏"只会让后面的人以为几何已经适配好了。
-* 10 类构图的**内部比例常量**仍是按 16:9 写的（`W*0.5`、`W-150` 这类）。
-  竖屏不是把它们乘以一个系数就对了——`list` 在竖屏该纵向堆叠、`compare` 该改上下对照。
+怎么选（**必须在任何 import scenes/filmkit 之前**）
+------------------------------------------------
+    VIDEO_STUDIO_LAYOUT=portrait-9x16    # render.py --layout portrait 会替你设这个变量
+
+为什么是环境变量而不是函数参数：`scenes.py` 写的是 `from filmkit import W, H`，
+值在**导入那一刻**就绑死了。想让它变，只能在导入之前定死——环境变量正好是这个时机的
+自然载体，也不会让 10 个构图函数都多一个 profile 参数（那会改掉 draw_frame 的签名契约）。
+
+竖屏的现状（务必读完再判断能不能用）
+-----------------------------------
+* 安全区、字幕带、画布尺寸**已经按竖屏算好**（1080x1920，字幕带上移避开系统 UI 区）。
+* 10 类构图的**内部比例常量**仍按 16:9 写（`W*0.5`、`W-150`）。竖屏下它们不会崩溃，
+  但排版会很挤——`list` 应纵向堆叠、`compare` 应改上下对照，这些是**版式重设计**，
+  不是改个系数。所以竖屏当前是 **experimental**：能出片、能过 preflight 的字形检测，
+  但**不建议直接交付**。`selfcheck` 第 75 条守住"竖屏下每类构图的内容不越出安全区"，
+  它一旦红，说明有一段画面会压到字幕带上——那正是要修的地方。
 
 本模块只依赖标准库：任何脚本（含 preflight / qa）都可以安全 import 它。
 """
 from __future__ import annotations
+
+import os
 
 # ---------------------------------------------------------------- 横屏 16:9（默认，唯一在用）
 # 这些数值**不要单独改**：改画布要连 SAFE / SUB_BAND 一起重算，并且必须重录金帧。
@@ -37,10 +48,40 @@ LANDSCAPE = {
     "sub_max_chars": 24,
 }
 
-# 当前生效的 profile。**运行期不要改它**：改动必须发生在任何 `import scenes` 之前，
-# 否则会得到"用 A 尺寸排版、用 B 尺寸绘制"的半新半旧状态（比报错更难查）。
-# 这里保留这个名字，是为了让"将来加第二套 profile"有一个明确的落点。
-PROFILE = LANDSCAPE
+# ---------------------------------------------------------------- 竖屏 9:16（experimental）
+# 安全区按"短边 6%"给，字幕带整体上移：竖屏的底部 15% 通常被系统 UI / 进度条 / 评论区盖住，
+# 而横屏的 SUB_BAND 是贴着画面底边的（1030/1080）。照抄横屏值 = 字幕被挡。
+PORTRAIT = {
+    "key": "portrait-9x16",
+    "w": 1080,
+    "h": 1920,
+    "safe": (65, 120, 1015, 1610),
+    "sub_band": (80, 1450, 1000, 1616),
+    "sub_max_chars": 14,      # 竖屏一行装不下 24 个中文字，14 字接近满行
+}
+
+_BY_KEY = {p["key"]: p for p in (LANDSCAPE, PORTRAIT)}
+_ALIASES = {
+    "landscape": "landscape-16x9", "16x9": "landscape-16x9", "horizontal": "landscape-16x9",
+    "portrait": "portrait-9x16", "9x16": "portrait-9x16", "vertical": "portrait-9x16",
+}
+
+
+def _select():
+    """按 VIDEO_STUDIO_LAYOUT 选 profile；未设置就是横屏（与历史行为一致）。"""
+    raw = (os.environ.get("VIDEO_STUDIO_LAYOUT") or "").strip().lower()
+    if not raw:
+        return LANDSCAPE
+    key = _ALIASES.get(raw, raw)
+    if key not in _BY_KEY:
+        raise RuntimeError("未知 VIDEO_STUDIO_LAYOUT=%r（可用：%s）"
+                           % (raw, ", ".join(sorted(_BY_KEY))))
+    return _BY_KEY[key]
+
+
+# 当前生效的 profile。**导入期定死**：`scenes.py` 的 `from filmkit import W, H` 会把值
+# 绑到模块上，运行期再改只会得到"用 A 尺寸排版、用 B 尺寸绘制"的半新半旧状态。
+PROFILE = _select()
 
 W = int(PROFILE["w"])
 H = int(PROFILE["h"])
@@ -61,7 +102,6 @@ def profile(key=None):
     return dict(src)
 
 
-_BY_KEY = {p["key"]: p for p in (LANDSCAPE,)}
 
 
 def verify_defaults():

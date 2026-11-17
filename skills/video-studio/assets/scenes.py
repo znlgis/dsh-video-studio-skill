@@ -60,7 +60,7 @@ except ImportError:
 import filmkit as K
 # 只 import 模板**当下真的用到**的名字（多余导入会被 pyflakes 记一笔，也容易让人以为哪都能用）。
 # 写自己的场景时，缓动/噪声直接走模块：K.lerp / K.ease_in / K.ease_in_out / K.vnoise / K.hash2 …
-from filmkit import W, H, clamp, smooth, ease_out, rng
+from filmkit import SAFE, W, H, clamp, smooth, ease_out, rng
 
 # ============================================================================
 # 零、legacy 绘制器（逐字节基线，别动这里的任何一行）
@@ -381,8 +381,20 @@ def _family_ok():
     return _FAMILY_OK
 
 
+# 竖屏是 1080 宽（横屏 1920 的 56%）：字号不缩就会溢出画布。
+# 只缩字号、**不动版式常量**——版式重排是另一件事（见 portrait-and-motion.md），
+# 这里的目的是"竖屏下字不超出画面"，不是"竖屏好看"。横屏 _TYPE_SCALE 恒为 1.0，
+# 因此这条分支对既有画面零影响（golden_frames 守这条）。
+_TYPE_SCALE = max(0.5, min(1.0, W / 1920.0))
+
+# 每次"文字被钳进安全区"都记一笔（文本片段/字号/宽度）。竖屏下它是**诊断表**：
+# 条目多说明该段版式在小画布上挤不下，该改的是版式，不是把字号再调小。
+# 横屏永远不写这个列表（`_fit_px` 在 W==1920 时直接返回），所以它对既有行为零影响。
+_CLAMPED = []
+
+
 def _font(th, size, weight="reg"):
-    size = max(6, int(size))
+    size = max(6, int(round(int(size) * _TYPE_SCALE)))
     fam = str(th.get("family") or "sans")
     key = (size, weight, fam)
     f = _FONT_CACHE.get(key)
@@ -688,12 +700,28 @@ def _bg_plate(th, s):
 # ---------------- 版式几何（全部从 ST.LAYOUTS 取） ----------------
 
 def _title_anchor(lay):
-    """标题锚点 + 对齐方式：left-stack 左对齐 / split-right 右对齐 / center-stack 居中。"""
+    """标题锚点 + 对齐方式：left-stack 左对齐 / split-right 右对齐 / center-stack 居中。
+
+    非横屏时把左对齐的锚点**钳进安全区**：`title_x=1030` 在 1920 宽里是"右栏起点"，
+    折算到 1080 宽是 579，而左对齐的标题要往后排 400+px，直接从右边出画——实测竖屏
+    的 split-right 会把标题切掉半个字。钳到 `SAFE[2] - title_w` 之后，右栏标题会往左让，
+    与右栏卡片的宽度对齐（`panel_w` 已按同一比例折算）。
+
+    横屏**逐字节不变**：W==1920 时直接走原路径（golden_frames 守这条）。
+    """
     if lay.get("center"):
         return W * 0.5, "center"
     if lay.get("title_x") is None:
         return float(W - 150), "right"
-    return float(lay["title_x"]), "left"
+    x = float(lay["title_x"])
+    if W != 1920:
+        try:
+            tw = float(lay.get("title_w") or 0.0)
+        except (TypeError, ValueError):
+            tw = 0.0
+        if tw > 0:
+            x = max(float(SAFE[0]), min(x, float(SAFE[2]) - tw))
+    return x, "left"
 
 
 def _panel_x(lay):
@@ -756,6 +784,28 @@ def _panel_boxes(lay, th, n, y_floor, v):
 
 # ---------------- 文字绘制（位置过视差，字号不重采样） ----------------
 
+def _fit_px(px, w, text_snippet="", size=0):
+    """把一段文字的左边界钳进安全区（只在非横屏生效），并记下每次钳位。
+
+    为什么把这个兜底放在 `_draw_text` 而不是各构图的锚点函数里：竖屏下每个构图都会用自己的
+    常量算 ax（`150+bdx+bins`、`W-150`、`W*0.5`…），逐个去改等于把"不出画"的责任散到 10 处，
+    漏一处就是一段文字被切掉——实测 split-right 的标题与 kicker 都是从 930 起向右排、被右边缘
+    切掉半个字。放在唯一的绘制入口，是**保证**而不是**猜测**。
+
+    横屏（W==1920）直接原样返回：这条路径必须逐字节不变（golden_frames 守）。
+    """
+    if W == 1920:
+        return px
+    x0, x1 = float(SAFE[0]), float(SAFE[2])
+    if w >= (x1 - x0):
+        _CLAMPED.append((text_snippet, size, float(w)))
+        return int(round(x0))
+    fitted = max(x0, min(float(px), x1 - w))
+    if abs(fitted - float(px)) > 0.5:
+        _CLAMPED.append((text_snippet, size, float(w)))
+    return int(round(fitted))
+
+
 def _draw_text(img, th, v, text, x, y, size, weight, color, align="left",
                alpha=1.0, tracking=0.0):
     text = "" if text is None else str(text)
@@ -774,6 +824,7 @@ def _draw_text(img, th, v, text, x, y, size, weight, color, align="left",
             px -= int(total * 0.5)
         elif align == "right":
             px -= int(total)
+        px = _fit_px(px, total, text[:16], size)
         for ch in text:
             d.text((px, py), ch, font=font, fill=fill)
             px += _text_w(ch, size, weight, th) + tr
@@ -783,6 +834,7 @@ def _draw_text(img, th, v, text, x, y, size, weight, color, align="left",
         px -= int(w * 0.5)
     elif align == "right":
         px -= int(w)
+    px = _fit_px(px, w, text[:16], size)
     d.text((px, py), text, font=font, fill=fill)
 
 
@@ -952,9 +1004,46 @@ def _variant(scene):
 
 
 def _scene_layout(scene, th):
-    """本段版式：grammar 按 chapter 写好的 scene_layout 优先，其次主题默认。"""
+    """本段版式：grammar 按 chapter 写好的 scene_layout 优先，其次主题默认。
+
+    竖屏下把 ST.LAYOUTS 的**几何**按画布比例折算（见 `_fit_layout`）。这是"几何缩放"，
+    不是"版式重设计"——`left-stack` 在竖屏仍然是左文右卡，只是两者都更窄、纵向更舒展。
+    真要做竖屏原生版式（list 纵向堆叠、compare 上下对照），那是 portrait-and-motion.md
+    的第三步，需要新录金帧、重算若干断言阈值，不能顺手塞在这里。
+    """
     name = str(scene.get("scene_layout") or th.get("layout") or "left-stack")
-    return ST.LAYOUTS.get(name) or ST.LAYOUTS["left-stack"]
+    return _fit_layout(ST.LAYOUTS.get(name) or ST.LAYOUTS["left-stack"])
+
+
+# 版式里 x 类字段（左上角坐标与宽度）按**画布宽比**折算；
+# y 类字段（坐标）按**画布高比**折算；高度/行距属于"一个文字行有多高"，跟字号走（宽比）。
+_LAY_X = ("title_x", "panel_x")
+_LAY_Y = ("title_y", "kicker_y", "sub_y", "panel_y")
+_LAY_W = ("title_w", "sub_w", "panel_w", "panel_h", "panel_gap")
+
+
+def _fit_layout(lay):
+    """把版式几何折算到当前画布。横屏时两个比例都是 1.0，**原样返回同一个对象**
+    （不是副本）：横屏路径上不能多出任何一次 float 往返，否则 golden_frames 会因为
+    浮点误差逐帧漂移——这条是像素级契约，不是洁癖。"""
+    if W == 1920 and H == 1080:
+        return lay
+    sx = W / 1920.0
+    sy = H / 1080.0
+    out = dict(lay)
+    for k in _LAY_X + _LAY_W:
+        if out.get(k) is not None:
+            try:
+                out[k] = float(out[k]) * sx
+            except (TypeError, ValueError):
+                out[k] = lay.get(k)
+    for k in _LAY_Y:
+        if out.get(k) is not None:
+            try:
+                out[k] = float(out[k]) * sy
+            except (TypeError, ValueError):
+                out[k] = lay.get(k)
+    return out
 
 
 def _typo(lang):

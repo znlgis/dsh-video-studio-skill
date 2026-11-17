@@ -44,6 +44,33 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+
+
+def _early_layout(argv=None):
+    """在 import filmkit **之前**把 --layout 落到环境变量。
+
+    为什么要在模块顶部做：`scenes.py` 写的是 `from filmkit import W, H`，而 filmkit
+    的 W/H 来自 layoutkit —— 值在**导入那一刻**就绑死了。等到 argparse 解析完再设
+    环境变量，此时画布早就定了，`--layout portrait` 会静默失效（最坏的那种 bug：
+    用户以为在出竖屏，实际出的是横屏）。所以这里先扫一遍 argv，argparse 后面照常解析。
+
+    只认 `--layout X` 与 `--layout=X` 两种写法；别的参数一概不碰。
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    want = ""
+    for i, tok in enumerate(args):
+        if tok == "--layout" and i + 1 < len(args):
+            want = args[i + 1]
+            break
+        if tok.startswith("--layout="):
+            want = tok.split("=", 1)[1]
+            break
+    if want:
+        os.environ["VIDEO_STUDIO_LAYOUT"] = want
+
+
+_early_layout()
+
 import filmkit as K
 import gates as GT
 import stagewatch as SW
@@ -2424,6 +2451,9 @@ def main():
     ap.add_argument("--engine", default="", choices=("", "pil", "web"),
                     help="渲染引擎：pil=逐帧 Pillow（默认）；web=无头浏览器（需 webengine.py + 页面）")
     ap.add_argument("--jobs", type=int, default=1, help="分块并行渲染进程数（frames 阶段）")
+    ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
+                    help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920（**实验性**，"
+                         "版式几何仍按横屏设计，能出片但不建议直接交付）")
     ap.add_argument("--resume", action="store_true", help="复用已存在的分块")
     ap.add_argument("--force-tts", action="store_true", help="丢弃 TTS 缓存重新合成")
     ap.add_argument("--force-music", action="store_true", help="丢弃配乐重出（score 阶段）")
@@ -2459,6 +2489,15 @@ def main():
     ap.add_argument("--run-id", default="",
                     help="本次运行的标签（写进 QC 报告，便于对照多版本）")
     a = ap.parse_args()
+    if a.layout:
+        _early_layout(["--layout", a.layout])    # 与顶部扫描同一逻辑（--batch 也走这里）
+    if (os.environ.get("VIDEO_STUDIO_LAYOUT") or "").strip().lower() in (
+            "portrait", "9x16", "vertical", "portrait-9x16"):
+        sys.stderr.write(
+            "[warn] 竖屏是实验性布局：安全区/字幕带已按 1080x1920 算好，但 10 类构图的"
+            "版式几何仍按横屏设计，画面会偏挤。\n"
+            "       能出片、能过字形检测，但不建议直接交付；版式重设计见 "
+            "references/portrait-and-motion.md\n")
 
     if a.batch:
         _setup_stdio()
