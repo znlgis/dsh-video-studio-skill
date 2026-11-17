@@ -1289,7 +1289,7 @@ class Score:
         """把主题动机铺到 lead 总线上：奇数段用钟、偶数段用钢片琴，音高按调内半音换算。"""
         names = kval["names"]
         root_pc = kval["root_pc"]
-        for idx, (pos_beats, semis, dur_beats) in enumerate(motif):
+        for idx, (pos_beats, semis, _dur_beats) in enumerate(motif):
             note = _semi_note(root_pc, 4, int(semis), names)
             tex = bank.bell(note, 2.6) if (bright or idx % 3 == 0) else bank.celesta(note, 3.0)
             pan = 0.18 if idx % 2 == 0 else -0.18

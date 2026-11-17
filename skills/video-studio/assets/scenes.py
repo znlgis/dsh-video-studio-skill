@@ -1122,7 +1122,6 @@ def _motif_layer(th, lang):
     accent = th["accent"]
     rule = th["rule"]
     ink = th["ink"]
-    dark = ST.is_dark(th)
 
     def a(v):
         return int(max(0, min(255, round(v))))
@@ -1689,7 +1688,6 @@ def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
     img = _plate(th, lang, scene, s_bg)
     var = _variant(scene)
     ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
-    trk = _tracking(th, lang)
     ph = _phase(scene)
 
     stats = scene.get("_stats")
@@ -1790,7 +1788,6 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
     img = _plate(th, lang, scene, s_bg)
     ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
     trk = _tracking(th, lang)
-    gap = _gap(th, lang)
     ph = _phase(scene)
 
     sides = scene.get("_sides")
@@ -1809,7 +1806,7 @@ def _draw_compare(scene, t, dur, tg, script, frame, plan, th):
     big = str(scene.get("big") or "")
     if big:
         pb = ease(rng(t, 0.0, 0.7))
-        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
+        for _j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
             _draw_text(img, th, v, ln, W * 0.5, 150.0 + _entrance_y(th, pb),
                        int(th["scale"]["heading"][0] - 6), "bold", th["ink"], "center", pb, trk)
 
@@ -1902,7 +1899,7 @@ def _draw_compare_portrait(scene, t, dur, tg, script, frame, plan, th, sides):
     big = str(scene.get("big") or "")
     pb = ease(rng(t, 0.0, 0.7))
     if big:
-        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 10), 900, "bold", th)[:1]):
+        for _j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 10), 900, "bold", th)[:1]):
             _draw_text(img, th, v, ln, W * 0.5, 210.0 + _entrance_y(th, pb),
                        int(th["scale"]["heading"][0] - 10), "bold", th["ink"], "center", pb, trk)
 
@@ -1917,7 +1914,6 @@ def _draw_compare_portrait(scene, t, dur, tg, script, frame, plan, th, sides):
     # 横中缝：从上栏底部向下栏顶部生长（0.35s），是「对照」最直接的符号。
     pg = ease(rng(t, 0.05, 0.40))
     mid_y = (top_y0 + rows_h + bot_y0) * 0.5 - 20.0
-    half = min(60.0, (bot_y0 - top_y0 - rows_h) * 0.5) * pg
     d = ImageDraw.Draw(img, "RGBA")
     d.line([v.x(x0 + 60), v.y(mid_y), v.x(x0 + 60 + (ww - 120) * pg), v.y(mid_y)],
            fill=_rgba(th["rule"], 90), width=_lw(2, lang))
@@ -1975,7 +1971,9 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
     img = _plate(th, lang, scene, s_bg)
     ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
     trk = _tracking(th, lang)
-    ph = _phase(scene)
+    # 这里**不**需要段相位：流程轴的持续运动来自 t/dur 的进度光点（见下面
+    # "持续动态"那段），不需要再叠一层呼吸。其余构图多数用 ph 做呼吸/扫描，
+    # 所以别照抄它们的开头——抄过来只会得到一个没人读的变量。
 
     steps = scene.get("_steps")
     if not steps:
@@ -1993,7 +1991,7 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
     big = str(scene.get("big") or "")
     pb = ease(rng(t, 0.0, 0.7))
     if big:
-        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
+        for _j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 6), 1500, "bold", th)[:1]):
             _draw_text(img, th, v, ln, 150.0, 210.0 + _entrance_y(th, pb),
                        int(th["scale"]["heading"][0] - 6), "bold", th["ink"], "left", pb, trk)
 
@@ -2061,12 +2059,11 @@ def _draw_process_portrait(scene, t, dur, tg, script, frame, plan, th, steps):
     img = _plate(th, lang, scene, s_bg)
     ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
     trk = _tracking(th, lang)
-    ph = _phase(scene)
 
     big = str(scene.get("big") or "")
     pb = ease(rng(t, 0.0, 0.7))
     if big:
-        for j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 8), 900, "bold", th)[:1]):
+        for _j, ln in enumerate(_wrap(big, int(th["scale"]["heading"][0] - 8), 900, "bold", th)[:1]):
             _draw_text(img, th, v, ln, 80.0, 230.0 + _entrance_y(th, pb),
                        int(th["scale"]["heading"][0] - 8), "bold", th["ink"], "left", pb, trk)
 
@@ -2628,7 +2625,7 @@ def cues(tl, script):
         has_next = (i + 1) < len(scenes)
         seg = []
 
-        def _at(off):
+        def _at(off, sid=sid):
             """本段相对时刻 -> cue 的 at 写法（id+偏移，保持返回 schema 不变）。"""
             return "%s+%.2f" % (sid, max(0.0, float(off)))
 

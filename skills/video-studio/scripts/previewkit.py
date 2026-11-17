@@ -275,7 +275,7 @@ def synthetic_timeline(script, fake_voice_dur=DEFAULT_FAKE_VOICE_DUR, fps=30):
     try:
         fake = float(fake_voice_dur)
     except (TypeError, ValueError):
-        raise ValueError("fake_voice_dur 必须是数字，收到 %r" % (fake_voice_dur,))
+        raise ValueError("fake_voice_dur 必须是数字，收到 %r" % (fake_voice_dur,)) from None
     if fake <= 0:
         raise ValueError("fake_voice_dur 必须 > 0，收到 %r" % (fake_voice_dur,))
 

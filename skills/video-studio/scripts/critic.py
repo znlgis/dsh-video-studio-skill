@@ -47,7 +47,7 @@ try:
     from PIL import Image
 except Exception as e:                                          # noqa: BLE001
     sys.stderr.write("critic 需要 numpy + Pillow：%s\n" % e)
-    raise SystemExit(2)
+    raise SystemExit(2) from None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROPOSALS = "proposals"

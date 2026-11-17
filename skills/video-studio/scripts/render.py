@@ -323,7 +323,7 @@ def _stylekit():
         return ST
     except Exception as e:                                  # noqa: BLE001
         raise SystemExit("[缺少 stylekit] render.py 需要同目录的 stylekit.py"
-                         "（skills/video-studio/scripts/stylekit.py）：%s" % e)
+                         "（skills/video-studio/scripts/stylekit.py）：%s" % e) from None
 
 
 def _design_path(work):
@@ -2453,8 +2453,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=1, help="分块并行渲染进程数（frames 阶段）")
     ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
                     help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920（**实验性**，"
-                         "版式骨架已原生（三套骨架各有一套竖屏坐标），但 compare/process 等构图内部"
-                         "仍是横屏结构）")
+                         "版式骨架与 compare/process/chart 的构图内部都已竖屏原生，"
+                         "但排版节奏（停留窗口、estimate 耗时基准）未按竖屏复核）")
     ap.add_argument("--resume", action="store_true", help="复用已存在的分块")
     ap.add_argument("--force-tts", action="store_true", help="丢弃 TTS 缓存重新合成")
     ap.add_argument("--force-music", action="store_true", help="丢弃配乐重出（score 阶段）")
@@ -2693,7 +2693,7 @@ def main():
         try:
             secs = float(a.preview)
         except ValueError:
-            raise SystemExit("[preview] 需要秒数，例如 --preview 15")
+            raise SystemExit("[preview] 需要秒数，例如 --preview 15") from None
         if secs <= 0:
             raise SystemExit("[preview] 秒数必须 > 0")
         tl = ensure_tl()

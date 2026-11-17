@@ -1377,7 +1377,6 @@ def t_dependency_drift():
     except Exception:                                       # noqa: BLE001
         return "skip（没装 edge-tts，只能用手工音频）"
     try:
-        mode = edge_tts.Communicate.__init__.__doc__ or ""
         import inspect
         params = inspect.signature(edge_tts.Communicate.__init__).parameters
     except (TypeError, ValueError):                         # noqa: BLE001
@@ -2410,7 +2409,7 @@ def _thin_strokes(mod, script, frame=180, stypes=None):
     for stype in (stypes or ("hero", "statement", "list", "stat", "compare",
                              "process", "quote", "chapter", "chart", "outro")):
         scene = _plain_scene(stype)
-        log = _record_draws(mod, lambda: mod.draw_frame(scene, 6.0, 12.0, 6.0, script, frame))
+        log = _record_draws(mod, lambda sc=scene: mod.draw_frame(sc, 6.0, 12.0, 6.0, script, frame))
         for rec in log:
             if rec[0] == "line" and rec[1] < 4:
                 bad_lines.append((stype, rec[1], rec[2]))
@@ -2625,8 +2624,8 @@ def t_portrait_profile():
     """75 竖屏 profile：画布/安全区/字号随画布折算，且文字不许出画。
 
     竖屏是 **experimental**：安全区与字幕带按 1080x1920 算好、10 类构图都能出图，
-    但版式几何仍是横屏那套（按比例折算），不是竖屏原生排版。这条断言守的是
-    "能出片且文字不出画"这条底线，不是"好看"：
+    **版式骨架与重点构图（compare/process/chart）都已竖屏原生**，剩下的只是
+    "排版节奏未按竖屏复核"。这条断言守的是"能出片且文字不出画"这条底线，不是"好看"：
     ① 竖屏画布真的是 1080x1920（不是被静默回落到横屏）；
     ② 10 类构图全部能在竖屏渲出一张图，不抛异常；
     ③ 把一段**明显过宽**的文字塞进去，必须被 `_fit_px` 钳进安全区并留下记录——
@@ -2635,7 +2634,13 @@ def t_portrait_profile():
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
     assets = os.path.join(here, "..", "assets")
-    probe = os.path.join(here, "_portrait_probe.py")
+    # 探针脚本写**系统临时目录**，不写源码树：写在 scripts/ 下时，进程被强杀
+    # （CI 超时、Ctrl-C 打断子进程）finally 就不会执行，于是仓库里留下一个
+    # `_portrait_probe.py`，被 ci_check 的打包卫生当成垃圾文件拦下——
+    # 同 filmkit 解码帧的处理理由（那种残留只有等下一次有人跑 npm pack 才暴露）。
+    import tempfile
+    _probe_dir = tempfile.mkdtemp(prefix="vs-selfcheck-")
+    probe = os.path.join(_probe_dir, "_portrait_probe.py")
     body = chr(10).join([
         "import os, sys, json",
         "sys.path.insert(0, %r)" % here,
@@ -2695,6 +2700,10 @@ def t_portrait_profile():
             os.remove(probe)
         except OSError:
             pass
+        try:
+            os.rmdir(_probe_dir)      # 只删自己建的空目录；失败说明有残留，不掩盖
+        except OSError:
+            pass
     assert got["canvas"] == [1080, 1920], \
         "竖屏画布不是 1080x1920（被静默回落到横屏？）：%r" % (got["canvas"],)
     assert not got["err"], "竖屏下有构图渲染失败：%r" % (got["err"],)
@@ -2738,12 +2747,75 @@ def t_compose_golden():
     try:
         got = json.loads((r.stdout or "").strip())      # --json 是整段 pretty JSON，不是单行
     except Exception as e:                                 # noqa: BLE001
-        raise AssertionError("构图层导出不是合法 JSON：%s" % e)
+        raise AssertionError("构图层导出不是合法 JSON：%s" % e) from None
     status = str(got.get("status") or "")
     if status == "skipped":
         return "skip（%s）" % (got.get("reason") or "环境不可比")
     assert status == "pass", "构图层金帧没有通过：%s" % (got.get("changed") or status)
     return "%s 的 10 类构图与基线逐类一致" % ("竖屏" if portrait else "横屏")
+
+
+def t_enum_enforced():
+    """77 枚举校验真的在执行（v1.0.2 删 style 动态 enum 时把通用段一起删掉的回归）。
+
+    filmcheck 的 9 个 *_SPEC 里一共 10 处 `enum` 声明。v1.0.2 删 style 动态校验时，
+    通用 enum 分支被一起删掉，于是 kind/type/engine/preset/mode 全部"写什么都通过"，
+    而 line 619 的注释仍写着"LINE_SPEC 里已经有 enum，那是 ERROR"——注释在、执行不在。
+    受影响的不只是报错难看：非法 kind 会让 voicekit 静默回落默认声线，
+    非法 type 会让 grammar 静默换构图，都是"跑得通但效果没了"。
+
+    做法：遍历**所有** SPEC（不是只看 SCRIPT_SPEC），对每处 enum 塞一个必然非法的值，
+    必须收到 bad_enum；数量也要对得上——枚举声明被删掉同样该红，否则"少查几处"永远无声。
+    """
+    import filmcheck as FC
+
+    # ---- 正向：夹具剧本的 engine 必须仍然通过（枚举加严不能误伤合法值） ----
+    fixture = os.path.join(os.path.dirname(HERE), "assets", "film.json")
+    if not os.path.exists(fixture):
+        return "skip（没有 assets/film.json）"
+    script = json.load(open(fixture, encoding="utf-8"))
+    rep = FC.Report()
+    FC._check(script.get("engine") or "pil", {"t": "str", "enum": FC.ENGINES},
+              "engine", rep, {})
+    assert not rep.errors, "合法的 engine 被误判：%r" % (rep.errors,)
+
+    # ---- 负向：SPEC 里每一处 enum 都必须真的拦截 ----
+    rules = []
+    for name in dir(FC):
+        if name.endswith("_SPEC"):
+            rules.extend(_walk_enum_rules(getattr(FC, name), name))
+    assert rules, "filmcheck 的 SPEC 里一处 enum 都没找到（SPEC 结构变了？）"
+    bad = "NOT_A_VALID_VALUE"
+    dead = []
+    for path, rule in rules:
+        enum = list(rule.get("enum") or [])
+        assert bad not in enum, "测试用的非法值竟然在枚举里：%r" % (bad,)
+        rep = FC.Report()
+        FC._check(bad, rule, path, rep, {})
+        if not any(c.get("code") == "bad_enum" for c in rep.errors):
+            dead.append("%s（enum=%r）" % (path, enum[:4]))
+    assert not dead, ("这些 enum 声明没有被执行，非法值能直接通过：%s"
+                      % "；".join(dead[:5]))
+    return "10 处 enum 全部拦截非法值（%d 处），合法夹具未误伤" % len(rules)
+
+
+def _walk_enum_rules(obj, path):
+    """泛化遍历 SPEC 的 dict/list 嵌套，产出 (路径, 带 enum 的规则字典)。
+
+    不用"只认 props/item 这些键名"的写法：SPEC 里将来加一层新容器就会静默漏检，
+    而这条断言的全部意义就是防止"声明了却没执行"。
+    """
+    if isinstance(obj, dict):
+        if "enum" in obj:
+            yield path, obj
+            return
+        for k, v in obj.items():
+            for got in _walk_enum_rules(v, "%s.%s" % (path, k)):
+                yield got
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            for got in _walk_enum_rules(v, "%s[%d]" % (path, i)):
+                yield got
 
 
 CASES = [
@@ -2823,6 +2895,7 @@ CASES = [
     ("74 审美质检（离线/确定/联系表不误判）", t_critic_offline),
     ("75 竖屏 profile（画布/出图/文字不出画）", t_portrait_profile),
     ("76 构图层金帧（10 类构图各自有像素基线）", t_compose_golden),
+    ("77 枚举校验真的在执行（enum 不许只写在 SPEC 里）", t_enum_enforced),
 ]
 
 

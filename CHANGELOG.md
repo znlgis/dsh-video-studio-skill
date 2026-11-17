@@ -6,6 +6,78 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.1 — 全面审查修复：枚举校验静默失效 + 导入即崩 + 把 lint 接进 CI（2026-11-17）
+
+> 本轮是「全项目审查 + 修复」，分四路并行（脚本 lint / 资产与工具 lint / 文档一致性 / 门禁覆盖）。
+> 结论：1.8.0 的功能面是完整的，问题集中在**"声明了却没执行"**——最贵的那一类。
+> 三个 P0 全部属于"注释/配置写着有，实际一行都没跑"，而 CI 从来没跑过 ruff 正是它们能活下来的原因。
+
+### P0：`filmcheck` 的枚举校验在 v1.0.2 被静默删掉
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `film.json` 里写 `"engine": "TOTALLY_BOGUS"`、`lines[0].type="NOT_A_SCENE_TYPE"`、`kind` 拼错 —— `filmcheck` 全部 **exit 0 / 0 error / 0 warning**，当作合法剧本放行 |
+| 根因 | v1.0.2（`b4378ca`）为了删掉 `style` 的 `enum_dynamic` 动态校验，把**紧挨着的通用 enum 分支一起删了**（`if enum and isinstance(val, str) and val not in enum`）。那一行注释保留至今："LINE_SPEC 里已经有 enum（KINDS 与 voicekit.TONE_IDS 是同一组 6 个），那是 ERROR 而不是 WARN"——注释在、执行不在 |
+| 为什么贵 | 非法 `kind` 会让 voicekit **静默回落**默认声线；非法 `type` 会让 grammar **静默换构图**。都是"跑得通、成片出来才发现不对"，属于本项目历史上最贵的一类缺陷 |
+| 修法 | 恢复通用 enum 校验（`rep.err(..., "bad_enum")` + `_suggest` 拼错建议）。**不**恢复 `enum_dynamic`：`style` 现在是 inert 键，那条动态分支已经不需要 |
+| 回归网 | 新增 selfcheck 第 77 条：泛化遍历 filmcheck 的**全部** `*_SPEC`，对每一处 `enum` 塞非法值，必须收到 `bad_enum`；同时验证夹具 `film.json` 不被误伤。已做负向验证：把通用 enum 段临时挪走后第 77 条立刻红 |
+
+### P0：`tools/estimate.py` 的兜底路径少一个 `import os`
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `python tools/estimate.py` 在 layoutkit 导入失败时**直接崩在导入期**：`NameError: name 'os' is not defined`（`_canvas()` 的 fallback 分支读 `os.environ`） |
+| 为什么长期没发现 | 只有"拿不到 layoutkit"时才走那条路——正常 checkout 里永远不触发。它恰好是 ruff `F821`（undefined name）**必然报出**的缺陷，而 CI 从没跑过 ruff |
+| 修法 | 补 `import os`；实测两条路都对：正常路径 `(1920,1080)`、屏蔽 layoutkit + `VIDEO_STUDIO_LAYOUT=portrait` 走 fallback 得 `(1080,1920)` |
+
+### P0：把 ruff 接进 CI（这三个缺陷的共同根因）
+
+`pyproject.toml` 里 ruff 从很早就有配置（`select = F,E9,B`，只挑"真 bug"级别），但**没有任何 job 跑它**。
+于是 F821（未定义名字）、F841（死赋值）、B023（闭包绑循环变量）这类缺陷一路跟着发布。
+配置存在却不执行，比没有配置更糟：它让人以为已经查过了。
+
+- `ci.yml` 的 `repo` job 新增两步：`pip install ruff==0.17.4` + `ruff check . --output-format=github`。
+  **独立 step 而不是塞进 ci_check**：ci_check 要能在裸机器（只装 python）上跑，这条需要先装 ruff。
+- 同时清掉存量 **61 条**违规（33 个文件）：B904×34（补 `from e`/`from None`，异常消息逐字未动）、
+  B007×12（循环变量改 `_` 前缀）、F841×10（死赋值删除）、B023×2（默认参数绑定）、
+  F401×1、B033×1（`ci_check` 的 `LOCAL_MODULES` 里 `"layoutkit"` 重复了一遍）、F821×1（上面那条）。
+
+### P1：`SUB_MAX_CHARS` 不是没用 —— 它是刻意的 re-export
+
+lint 清 F401 时把 `filmkit.py` 里 `from layoutkit import ... SUB_MAX_CHARS` 删了，selfcheck 第 73 条立刻
+`AttributeError`。第 73 条的职责正是"画布常量单一真源"：它把 filmkit 导出的 W/H/SAFE/SUB_BAND/
+SUB_MAX_CHARS **逐个**与 layoutkit 比对，防止有人把数字写回 filmkit 造成两处漂移。
+所以这处 F401 是误报，改为 `# noqa: E402,F401` + 中文注释说明为什么必须保留。
+
+### P1：补齐三处零覆盖的门禁
+
+| 覆盖 | 之前 | 现在 |
+|---|---|---|
+| `tools/silhouette_qa.py --selftest`（G13 剪影判据本体） | 从没进过 CI（selfcheck 第 55 条只验"场景类型集合一致"，验不到判据） | `skill` job 独立 step，约 1.1 秒 |
+| `tools/audio_similarity.py --strict`（A/B/C/D 四组音频阈值） | 一直是只读诊断工具，从没在 CI 里按阈值判过 | `skill` job 独立 step，约 4.5 秒 |
+| 英文口径的条数断言 | 只认中文"N 条/仓库体检 N 项" | 加 `N self-check assertions` / `N repo checks` 两条正则 |
+
+补第三条的直接动机：`marketplace-entry.json` 的英文简介长期写着"69 self-check assertions and 12 repo
+checks"，而中文简介已是 76/13 —— 同一份分发页的中英两半各说各话，第 13 项检查却一路 PASS。
+现在中英两边都会被核。
+
+### P1：文档与代码对齐（竖屏早已不是"横屏结构"）
+
+1.7.0 把 `compare`/`process` 改成竖屏原生、1.8.0 补了 `chart`，但四处描述停在 1.6.0 之前的说法：
+
+| 位置 | 修前 | 修后 |
+|---|---|---|
+| `render.py --help --layout` | "compare/process 等构图内部**仍是横屏结构**" | 版式骨架与 compare/process/chart 都已竖屏原生，剩下的是排版节奏未复核 |
+| `layoutkit.py` 模块 docstring | "10 类构图的内部比例常量仍按 16:9 写……是版式重设计，不是改个系数" | 说明版式骨架与重点构图都已原生，剩余边界是节奏 |
+| `selfcheck.py` 第 75 条 docstring | "版式几何仍是横屏那套（按比例折算）" | 同上 |
+| `SKILL.md` §9 | "compare/process 的构图内部仍是横屏结构" | 同上 |
+
+### 验收
+
+`selfcheck` **77 条全绿**（新增第 77 条）；`ci_check` **13 项全绿**；`ruff check .` **0 违规**
+（新接进 CI）；四份金帧基线（横屏/竖屏 × 整片/构图）**像素全部一致**；
+`estimate.py` 正常路径与 fallback 路径都能跑。
+
 ## 1.8.0 — 竖屏收尾：chart 原生 + 构图层金帧 + estimate 按 profile（2026-11-17）
 
 > 1.7.0 把 `compare` / `process` 的方向改对了。这一版补完剩下的三件：`chart` 的标签位置、

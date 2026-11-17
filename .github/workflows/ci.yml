@@ -5,7 +5,7 @@
 #               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
 #               film.json 契约、断言条数一致）。不需要 ffmpeg、字体、网络，
 #               任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
-#   skill    —— skills/video-studio/scripts/selfcheck.py：76 条针对真实缺陷的回归断言
+#   skill    —— skills/video-studio/scripts/selfcheck.py：77 条针对真实缺陷的回归断言
 #               （数为准的是 CASES 列表，不是文档里的任何数字）。
 #               需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #               webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
@@ -46,6 +46,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # ruff 是**独立 step**，不进 ci_check 的检查表：ci_check 要能在裸机器（只装 python）
+      # 上跑，而这条需要先装 ruff。分开的另一个好处是失败信息直指文件行号，
+      # 不用在 13 项汇总里再拆一层。
+      #
+      # 为什么必须有这一步：pyproject.toml 从很早就配了 ruff（select = F,E9,B），
+      # 但 CI 从来没跑过它——于是 F821（undefined name）这种"导入即崩"的缺陷
+      # 一路跟着发布：tools/estimate.py 的 fallback 分支少一个 `import os`，
+      # 只有 layoutkit 导入失败时才会踩到，属于"平时永远不跑"的路径。
+      # 配置存在却不执行，比没有配置更糟：它让人以为已经查过了。
+      - name: install ruff
+        run: python -m pip install --upgrade pip && pip install "ruff==0.17.4"
+      - name: lint (ruff)
+        run: python -m ruff check . --output-format=github
       - name: repo check
         env:
           # 与 skill job 同口径：ci_check 会 spawn filmcheck.py 子进程，
@@ -122,6 +135,24 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python qavmaf.py --selftest
+
+      # G13 剪影可区分门禁的**实现本体**：tools/silhouette_qa.py 有 --selftest
+      # （造 2 组设计现场验证判据，约 1 秒），但以前从没进过 CI——selfcheck 第 55 条
+      # 只验"场景类型集合一致"，验不到这个工具本身的判据对不对。
+      # 它跑在仓库根（要 import scripts/ 与 assets/），不需要 ffmpeg。
+      - name: 'selftest: silhouette_qa（G13 剪影判据正/负控制）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/silhouette_qa.py --selftest
+
+      # 音频"同质化"的四组验收（A 跨片配乐 / B 跨片音效 / C 片内分离 / D 旁白优先）
+      # 一直是**只读诊断工具**，从没在 CI 里按阈值判过。它 --strict 跑完约 4.5 秒，
+      # 是这套"听起来差不多"类缺陷唯一可自动化的判据（阈值出处：
+      # references/audio-variation.md §5）。
+      - name: '验收: audio_similarity --strict（配乐/音效/旁白四组阈值）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/audio_similarity.py --strict
 
       # 兜底路径也要测：用户没装 scipy 时所有 IIR 走"分块 FFT 卷积"，
       # 那才是他们真正跑的代码。屏蔽 scipy 再跑一遍，断言按路径自适应

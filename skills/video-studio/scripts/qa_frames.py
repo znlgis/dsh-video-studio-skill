@@ -330,7 +330,7 @@ def _iter_frames(path, w=SAMPLE_W, h=SAMPLE_H, from_s=0.0, to_s=None):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
     except FileNotFoundError:
         errf.close()
-        raise ValueError("找不到 ffmpeg（%s），请设置 FILMKIT_FFMPEG 或装 ffmpeg" % cmd[0])
+        raise ValueError("找不到 ffmpeg（%s），请设置 FILMKIT_FFMPEG 或装 ffmpeg" % cmd[0]) from None
     rem = b""
     try:
         while True:
@@ -1384,7 +1384,7 @@ def _draw_png(rep, film, fps, duration, events, out_png):
     if events:
         rows.append(("设计事件", c_event))
     row_h = (ev_bot - ev_top) / float(len(rows))
-    for i, (name, col) in enumerate(rows):
+    for i, (name, _col) in enumerate(rows):
         cy = ev_top + (i + 0.5) * row_h
         d.line([x0, cy, x1, cy], fill=(236, 238, 242), width=1)
         d.text((x0 - 8, cy), name, fill=axis, font=f_row, anchor="rm")

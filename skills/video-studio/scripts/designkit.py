@@ -1896,7 +1896,7 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
         else:
             hue = (h("palette") + index * 137.508) % 360.0
             banned_hues = pcon.get("banned_hues") or ()
-            for k in range(24):
+            for _k in range(24):
                 if not any(_hue_gap(hue, bh) < _HUE_WINDOW for bh in banned_hues):
                     break
                 hue = (hue + 37.0) % 360.0

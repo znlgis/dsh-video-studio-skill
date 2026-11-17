@@ -833,7 +833,7 @@ def main(argv=None):
                 try:
                     frames = [int(x) for x in a.frames.replace(" ", "").split(",") if x]
                 except ValueError:
-                    raise SystemExit("--frames 必须是逗号分隔的整数帧号，收到 %r" % a.frames)
+                    raise SystemExit("--frames 必须是逗号分隔的整数帧号，收到 %r" % a.frames) from None
                 if not frames:
                     raise SystemExit("--frames 里没有有效帧号")
             res = write_golden(a.script, a.scenes, a.golden, frames,

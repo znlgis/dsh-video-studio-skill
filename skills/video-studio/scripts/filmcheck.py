@@ -467,12 +467,24 @@ def _check(val, rule, path, rep, ctx):
                 % (_types_cn(types), _tname(val), val), "bad_type")
         return
 
-    enum = rule.get("enum")
     # 惰性键：schema 与 filmcheck 都认它，但代码里没有任何读取点。
     # 报 WARN 而不是 ERROR —— 老剧本里写了它不该变成硬失败；但也绝不能静默通过，
     # 否则"写对了却不生效"会一路带到交付（本项目历史上最贵的一类缺陷）。
     if rule.get("inert"):
         rep.warn(path, "这个键**当前不生效**：%s" % rule["inert"], "inert_key")
+
+    # 枚举校验：SPEC 里的 `enum` 声明必须真的被执行。
+    # 这里曾经是"通用 enum + style 动态 enum"的混合实现；v1.0.2 删 style 动态校验时
+    # 把**通用那段一起删掉了**（commit b4378ca），于是 kind/type/engine/preset/mode
+    # 全部退回"写什么都通过"。而 line 619 的注释仍写着"LINE_SPEC 里已经有 enum，
+    # 那是 ERROR"——注释在、执行不在，正是本项目最贵的一类缺陷。
+    enum = rule.get("enum")
+    if enum and isinstance(val, str) and val not in enum:
+        near = _suggest(val, [e for e in enum if isinstance(e, str)])
+        hint = ("；是不是想写 %r？" % near) if near else ""
+        rep.err(path, "枚举错误：%r 不是可用值（可用：%s）%s"
+                % (val, " / ".join(str(e) for e in enum), hint), "bad_enum")
+        return
 
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         if rule.get("positive") and val <= 0:

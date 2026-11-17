@@ -987,7 +987,7 @@ def _parse_frames(raw):
         try:
             v = float(part)
         except ValueError:
-            raise SystemExit("--frames 必须是逗号分隔的 0..1 比例，收到 %r" % part)
+            raise SystemExit("--frames 必须是逗号分隔的 0..1 比例，收到 %r" % part) from None
         if not (0.0 <= v <= 1.0):
             raise SystemExit("--frames 里 %r 超出 0..1（这是段内时刻占 dur 的比例）" % part)
         out.append(v)
@@ -1004,7 +1004,7 @@ def _seed_arg(raw):
     try:
         v = int(s)
     except ValueError:
-        raise SystemExit("--seed 必须是整数，或 -1/random 表示每次新设计；收到 %r" % raw)
+        raise SystemExit("--seed 必须是整数，或 -1/random 表示每次新设计；收到 %r" % raw) from None
     if v < 0:
         return None
     return v

@@ -43,7 +43,12 @@ if __package__ in (None, ""):
 # 以前 W/H/SAFE/SUB_BAND 在这个文件顶部各写一遍，而 scenes.py / preflight / qa_frames
 # 又各自 from filmkit import 复制一份值——"改画布尺寸"于是变成"找到所有副本"。
 # layoutkit 的默认 profile 与原来逐字节相同（golden_frames 守这条）。
-from layoutkit import H, SAFE, SUB_BAND, SUB_MAX_CHARS, W  # noqa: E402
+#
+# SUB_MAX_CHARS 在本文件里没有读取点（filmkit 自己算折行时用的是 layoutkit 的
+# 其它常量），但它是**刻意 re-export** 的：selfcheck 第 73 条要把 filmkit 导出的
+# 这几个画布常量逐个与 layoutkit 比对，防止有人把数字写回 filmkit 造成两处漂移。
+# 所以 lint 的 F401 在这里是误报——删掉它会让第 73 条直接 AttributeError。
+from layoutkit import H, SAFE, SUB_BAND, SUB_MAX_CHARS, W  # noqa: E402,F401
 
 FPS = 30
 SR = 48000
@@ -1579,7 +1584,7 @@ def _stylekit():
         return ST
     except Exception as e:                                  # noqa: BLE001
         raise RuntimeError("找不到 stylekit.py（scenes/render 都依赖它，"
-                           "请与 filmkit.py 放在同一目录）：%s" % e)
+                           "请与 filmkit.py 放在同一目录）：%s" % e) from e
 
 
 def resolve_theme(script, scene=None):
@@ -2051,7 +2056,7 @@ def video_plan(script=None):
     try:
         fps = int(v.get("fps") or (script or {}).get("fps") or FPS)
     except (TypeError, ValueError):
-        raise ValueError("video.fps 必须是整数，收到 %r" % (v.get("fps"),))
+        raise ValueError("video.fps 必须是整数，收到 %r" % (v.get("fps"),)) from None
     if fps not in VIDEO_FPS_ALLOWED:
         raise ValueError("video.fps=%d 不支持（可用：%s）"
                          % (fps, "/".join(str(x) for x in VIDEO_FPS_ALLOWED)))
@@ -2060,7 +2065,7 @@ def video_plan(script=None):
         oh = int(v.get("height") or v.get("out_height") or H)
     except (TypeError, ValueError):
         raise ValueError("video.width/height 必须是整数，收到 %r/%r"
-                         % (v.get("width"), v.get("height")))
+                         % (v.get("width"), v.get("height"))) from None
     if (ow, oh) == (W, H):
         return dict(fps=fps, w=W, h=H, out_w=ow, out_h=oh, scale=False,
                     label="%dx%d" % (ow, oh))

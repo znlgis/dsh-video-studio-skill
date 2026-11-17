@@ -169,7 +169,7 @@ def _validate_canvas(width, height):
         w = int(width)
         h = int(height)
     except (TypeError, ValueError):
-        raise ValueError("画布尺寸必须是整数，收到 %r x %r" % (width, height))
+        raise ValueError("画布尺寸必须是整数，收到 %r x %r" % (width, height)) from None
     if w <= 0 or h <= 0:
         raise ValueError("画布尺寸必须是正数，收到 %dx%d" % (w, h))
     if w < _MIN_CANVAS[0] or h < _MIN_CANVAS[1]:
@@ -199,7 +199,7 @@ def _hex_color(value, where):
         try:
             rgb = [int(value[0]), int(value[1]), int(value[2])]
         except (TypeError, ValueError):
-            raise ValueError("%s 的颜色不是三个整数：%r" % (where, value))
+            raise ValueError("%s 的颜色不是三个整数：%r" % (where, value)) from None
         if min(rgb) < 0 or max(rgb) > 255:
             raise ValueError("%s 的颜色分量必须在 0–255：%r" % (where, value))
         return "#%02x%02x%02x" % (rgb[0], rgb[1], rgb[2])
@@ -286,7 +286,7 @@ def normalize_style(style, *, width=W, height=H, fps=None):
         try:
             return float(v) if v is not None else float(default)
         except (TypeError, ValueError):
-            raise ValueError("style 字段 %r 不是数字：%r" % (v, v))
+            raise ValueError("style 字段 %r 不是数字：%r" % (v, v)) from None
 
     scale = {}
     raw_scale = theme.get("scale") if isinstance(theme.get("scale"), dict) else {}
@@ -317,7 +317,7 @@ def normalize_style(style, *, width=W, height=H, fps=None):
         try:
             fps_val = float(fps)
         except (TypeError, ValueError):
-            raise ValueError("fps 必须是数字，收到 %r" % (fps,))
+            raise ValueError("fps 必须是数字，收到 %r" % (fps,)) from None
         if not math.isfinite(fps_val) or fps_val <= 0:
             raise ValueError("fps 必须是正数，收到 %r" % (fps,))
 
@@ -483,7 +483,7 @@ async def page_number(page, key: str, *, default=None) -> float:
     try:
         val = float(raw)
     except (TypeError, ValueError):
-        raise RuntimeError("页面 window.%s 不是数字：%r（必须是数字）" % (key, raw))
+        raise RuntimeError("页面 window.%s 不是数字：%r（必须是数字）" % (key, raw)) from None
     if not math.isfinite(val) or val <= 0:
         raise RuntimeError("页面 window.%s 非法：%r（必须是正数）" % (key, raw))
     return val
@@ -756,7 +756,7 @@ def _finite_t(value, kind: str, label) -> float:
     try:
         t = float(value)
     except (TypeError, ValueError):
-        raise ValueError("%s 的 t 不是数字：%r（%r）" % (kind, value, label))
+        raise ValueError("%s 的 t 不是数字：%r（%r）" % (kind, value, label)) from None
     if not math.isfinite(t):
         raise ValueError("%s 的 t 不是有限秒数：%r（%r）—— NaN / Infinity 不是合法 JSON，"
                          "写进 work/cues.json 后下游时间轴会静默错位" % (kind, value, label))
@@ -1234,7 +1234,7 @@ def _check_qa_window(t0, t1, step):
         b = None if t1 is None else float(t1)
         s = float(step)
     except (TypeError, ValueError):
-        raise ValueError("文字质检参数必须是数字：t0=%r t1=%r step=%r" % (t0, t1, step))
+        raise ValueError("文字质检参数必须是数字：t0=%r t1=%r step=%r" % (t0, t1, step)) from None
     if not math.isfinite(a) or (b is not None and not math.isfinite(b)):
         raise ValueError("文字质检时间必须是有限秒数：t0=%r t1=%r" % (t0, t1))
     if not math.isfinite(s) or s <= 0:
@@ -2155,7 +2155,7 @@ def _parse_frames(text: str) -> list:
         try:
             out.append(int(part))
         except ValueError:
-            raise ValueError("--frames 里有不是整数的项：%r（要逗号分隔的帧号，如 45,270）" % (part,))
+            raise ValueError("--frames 里有不是整数的项：%r（要逗号分隔的帧号，如 45,270）" % (part,)) from None
     return out
 
 
@@ -2175,13 +2175,13 @@ def _resolve_style_spec(text):
         try:
             return json.loads(s)
         except json.JSONDecodeError as exc:
-            raise SystemExit("[错误] --style 的内联 JSON 解析失败：%s" % exc)
+            raise SystemExit("[错误] --style 的内联 JSON 解析失败：%s" % exc) from exc
     p = Path(s).expanduser()
     if p.is_file():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise SystemExit("[错误] --style 的 JSON 文件 %s 解析失败：%s" % (p, exc))
+            raise SystemExit("[错误] --style 的 JSON 文件 %s 解析失败：%s" % (p, exc)) from exc
     raise SystemExit(
         "[错误] --style %r 不是 JSON、也不是存在的文件——而**按内置风格 id 取外观这条路已经没有了**。\n"
         "  本技能不提供内置风格/主题表。现在注入外观只有两种写法：\n"

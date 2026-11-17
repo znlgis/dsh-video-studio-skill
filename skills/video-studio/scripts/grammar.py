@@ -378,7 +378,7 @@ def derive_stats(line, limit=3):
     got.append({"value": hit["raw"], "unit": hit["unit"],
                 "label": str(line.get("sub") or line.get("big") or ""),
                 "note": notes[0] if notes else ""})
-    for i, t in enumerate(notes[1:]):
+    for _i, t in enumerate(notes[1:]):
         got.append({"value": "", "unit": "", "label": t, "note": ""})
     return got[:limit]
 

@@ -177,7 +177,7 @@ def apply_theme_overrides(theme, overrides):
             try:
                 num = float(v)
             except (TypeError, ValueError):
-                raise ValueError("theme_overrides.%s 必须是数字，收到 %r" % (k, v))
+                raise ValueError("theme_overrides.%s 必须是数字，收到 %r" % (k, v)) from None
             out[k] = int(round(num)) if isinstance(base, int) else float(num)
             continue
         if isinstance(base, dict):

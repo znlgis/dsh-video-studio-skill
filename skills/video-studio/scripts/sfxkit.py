@@ -2462,7 +2462,7 @@ def text_stream(seed=0, times=(0.0, 0.04, 0.08, 0.12), base=1174.7, voice="tone"
     g = rng(seed)
     total = max(ts) + 0.30
     x = _bus(total, stereo=False)
-    for i, t in enumerate(ts):
+    for _i, t in enumerate(ts):
         if str(voice) == "soft":
             k = burst(0.028, seed=int(g.integers(1 << 30)), slope_db_oct=-1.5,
                       attack=0.004, t60=0.035)

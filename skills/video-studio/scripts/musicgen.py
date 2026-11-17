@@ -694,7 +694,7 @@ def _normalize_sections(duration, sections, mood, bpm=96.0):
             start = float(s.get("start", 0.0))
             energy = float(s.get("energy", 0.5))
         except (TypeError, ValueError):
-            raise ValueError("sections[%d] 的 start/energy 必须是数字：%r" % (i, s))
+            raise ValueError("sections[%d] 的 start/energy 必须是数字：%r" % (i, s)) from None
         _require(math.isfinite(start) and math.isfinite(energy),
                  "sections[%d] 的 start/energy 必须是有限数" % i)
         name = str(s.get("name") or ("sec%d" % (i + 1))).strip() or ("sec%d" % (i + 1))
@@ -760,7 +760,7 @@ def _normalize_motif(user, scale, mood):
             beat = float(item[0])
             dur = float(item[2])
         except (TypeError, ValueError):
-            raise ValueError("motif[%d] 的拍/时值必须是数字：%r" % (i, item))
+            raise ValueError("motif[%d] 的拍/时值必须是数字：%r" % (i, item)) from None
         _require(math.isfinite(beat) and math.isfinite(dur), "motif[%d] 拍/时值必须有限" % i)
         _require(beat >= 0.0, "motif[%d] 的拍不能为负：%r" % (i, beat))
         _require(dur > 0.0, "motif[%d] 的时值必须 > 0：%r" % (i, dur))
@@ -785,7 +785,7 @@ def _drum_positions(val, key):
         try:
             v = float(x)
         except (TypeError, ValueError):
-            raise ValueError("%s 的拍位置必须是数字，收到 %r" % (key, x))
+            raise ValueError("%s 的拍位置必须是数字，收到 %r" % (key, x)) from None
         _require(math.isfinite(v) and v >= 0.0, "%s 的拍位置必须是有限非负数：%r" % (key, x))
         out.append(round(v % 4.0, 4))
     uniq = []
@@ -862,7 +862,7 @@ def _energy_from_user(energy_curve, duration):
             t = float(p[0])
             e = float(p[1])
         except (TypeError, ValueError):
-            raise ValueError("energy_curve 点必须是数字：%r" % (p,))
+            raise ValueError("energy_curve 点必须是数字：%r" % (p,)) from None
         _require(math.isfinite(t) and math.isfinite(e), "energy_curve 点必须是有限数：%r" % (p,))
         pairs.append((min(dur, max(0.0, t)), _clip01(e)))
     pairs.sort()
@@ -945,7 +945,7 @@ def _build_plan(duration, bpm, key, scale, mood, seed, sections, progressions,
     try:
         dur = float(duration)
     except (TypeError, ValueError):
-        raise ValueError("duration 必须是数字，收到 %r" % (duration,))
+        raise ValueError("duration 必须是数字，收到 %r" % (duration,)) from None
     _require(math.isfinite(dur) and dur > 0.0, "duration 必须是有限正数，收到 %r" % (duration,))
     if bpm is None:
         bpm = 96.0
@@ -958,12 +958,12 @@ def _build_plan(duration, bpm, key, scale, mood, seed, sections, progressions,
     try:
         bpm_f = float(bpm)
     except (TypeError, ValueError):
-        raise ValueError("bpm 必须是数字，收到 %r" % (bpm,))
+        raise ValueError("bpm 必须是数字，收到 %r" % (bpm,)) from None
     _require(math.isfinite(bpm_f) and bpm_f > 0.0, "bpm 必须是有限正数，收到 %r" % (bpm,))
     try:
         seed_i = 0 if seed is None else abs(int(seed))
     except (TypeError, ValueError):
-        raise ValueError("seed 必须是整数，收到 %r" % (seed,))
+        raise ValueError("seed 必须是整数，收到 %r" % (seed,)) from None
     key_chroma, _minor_hint, key_disp, key_root = _parse_key(key)
     scale_s = _normalize_scale(scale)
     mood_s = _normalize_mood(mood)
@@ -1343,7 +1343,7 @@ def _arrange(plan):
             break
         shift = shifts[(ph + plan["seed"]) % len(shifts)]
         octv = _LEAD_OCTS[(plan["seed"] // 5 + ph) % len(_LEAD_OCTS)]
-        for mi, (beat, deg, ndur) in enumerate(motif):
+        for _mi, (beat, deg, ndur) in enumerate(motif):
             t = base_t + float(beat) * beat_s
             if t >= dur:
                 continue
@@ -1423,7 +1423,7 @@ def _arrange(plan):
                                             else (0.92 if abs(p - round(p)) < 1e-6 else 0.70))
             vel *= 0.94 + 0.12 * rng_h.rand()
             arr["kick"].append({"t": max(0.0, t + (rng_h.rand() - 0.5) * 0.003), "vel": vel})
-        for hi, p in enumerate(sorted(set(round(float(x), 4) for x in hat))):
+        for _hi, p in enumerate(sorted(set(round(float(x), 4) for x in hat))):
             t = start + p * beat_s
             if t >= dur:
                 continue
@@ -1518,7 +1518,6 @@ def _render_stems(plan, arr):
     """逐层合成（未做母线混音），QA 可直接量各层 RMS；render 只负责总线。"""
     n = int(plan["n"])
     voices = plan["voices"]
-    bright = float(_MOOD[plan["mood"]]["bright"])
     rng_phase = _rng("phase", plan["seed"])
     rng_noise = _rng("noise", plan["seed"])
 
@@ -1628,7 +1627,6 @@ def _make_report(plan, arr, samples):
     peak = float(np.max(np.abs(samples))) if samples.size else 0.0
     peak_db = 20.0 * math.log10(peak) if peak > 0.0 else -120.0
     dc_max = float(np.max(np.abs(samples.mean(axis=0)))) if samples.size else 0.0
-    e_bar = plan["bar_energy"]
     grid = np.linspace(0.0, plan["duration"], max(2, int(math.ceil(plan["duration"] * 8.0)) + 1))
     e_stat = np.interp(grid, plan["energy_x"], plan["energy_y"])
     secs = [{
@@ -1830,13 +1828,13 @@ def _load_json_arg(value, name):
         try:
             return json.loads(s)
         except json.JSONDecodeError as exc:
-            raise ValueError("%s 不是合法 JSON：%s" % (name, exc))
+            raise ValueError("%s 不是合法 JSON：%s" % (name, exc)) from exc
     p = Path(s)
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError("%s 读取失败：%s" % (name, exc))
+            raise ValueError("%s 读取失败：%s" % (name, exc)) from exc
     raise ValueError("%s 既不是 JSON 也不是存在的文件：%r" % (name, value))
 
 

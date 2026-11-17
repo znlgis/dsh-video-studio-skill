@@ -777,7 +777,7 @@ def _assign_text(scenes, segments) -> list:
         total = sum(r[3] for r in overlaps)
         cnt = len(chars)
         cum = 0.0
-        for i, lo, hi, dur in overlaps:
+        for i, lo, _hi, dur in overlaps:
             before = cum                                    # 本窗口之前的累计重叠时长
             c0 = int(round(before / total * cnt)) if total > 0 else 0
             cum += dur

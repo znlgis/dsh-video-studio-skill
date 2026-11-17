@@ -62,8 +62,6 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  "grammar",
                  # 画布/安全区单一真源（filmkit 从这里取 W/H/SAFE/SUB_BAND）
                  "layoutkit",
-                 # 画布/安全区单一真源（filmkit 从这里取 W/H/SAFE/SUB_BAND）
-                 "layoutkit",
                  # 设计 DSL / 离线预览 / 提案器 / 出片前问诊
                  "designkit", "previewkit", "propose", "intake",
                  # 没有 presetkit（随预设目录一起移除）；这里不能再列它，
@@ -174,7 +172,7 @@ def t_json():
         try:
             json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:                                  # noqa: BLE001
-            raise AssertionError("%s: %s" % (p.relative_to(ROOT), e))
+            raise AssertionError("%s: %s" % (p.relative_to(ROOT), e)) from None
     # 版本号三处必须一致：package.json / README 徽章 / marketplace-entry 描述里提到的 vX.Y。
     # 这条以前没人查，于是 README 的徽章停在 0.6.0、包已经是 0.7.1 也没人发现（真发生过）。
     ver = json.loads((ROOT / "package.json").read_text(encoding="utf-8")).get("version", "")
@@ -252,7 +250,7 @@ def t_pack():
     try:
         meta = json.loads(r.stdout)[0]
     except Exception as e:                                      # noqa: BLE001
-        raise AssertionError("解析 npm pack 输出失败：%s" % e)
+        raise AssertionError("解析 npm pack 输出失败：%s" % e) from None
     files = [f["path"] for f in meta.get("files", [])]
     # 垃圾文件可能出现在**包内任意位置**（实测踩过：队友的临时目录建在 skills/ 下，
     # 于是 skills/tmp_scratch_x/webtest/*.mp4 被一起打进包，体量翻倍）。
@@ -599,18 +597,24 @@ def t_case_count():
     selfcheck_re = re.compile("自检\\s*(\\d{2,3})\\s*条")
     # "仓库体检 12 项" 指的是本文件的检查项数，口径不同，单独核。
     ci_re = re.compile("仓库体检\\s*(\\d{1,2})\\s*项")
+    # 英文口径同样要核：marketplace-entry.json 的英文简介曾长期写着"69 self-check
+    # assertions and 12 repo checks"，而中文简介已是 76/13——旧正则只看中文句式，
+    # 于是同一份分发页里中英两半各说各话，检查却一路 PASS。
+    claim_en_re = re.compile("(\\d{2,3})\\s*self-check assertions?")
+    ci_en_re = re.compile("(\\d{1,2})\\s*repo checks?")
     bad = []
     for doc in docs:
         if not doc.is_file():
             continue
         for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
-            for m in list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line)):
+            for m in (list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line))
+                      + list(claim_en_re.finditer(line))):
                 n = int(m.group(1))
                 # 只认"具体条数"：<10 的多半是编号（第 5 条）或区间，不当作总数。
                 if n >= 10 and n != cases:
                     bad.append("%s:%d 写 %d 条（CASES 实际 %d 条）"
                                % (doc.name, ln_no, n, cases))
-            for m in ci_re.finditer(line):
+            for m in list(ci_re.finditer(line)) + list(ci_en_re.finditer(line)):
                 n = int(m.group(1))
                 if n != CI_CHECK_COUNT:
                     bad.append("%s:%d 写仓库体检 %d 项（实际 %d 项）"
