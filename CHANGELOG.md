@@ -6,6 +6,50 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.8.2 — CI 修复：把"从 v1.3.0 起就一直红的两个 job"才修好（2026-11-17）
+
+> 1.8.1 推送后 CI 有 5 个 job 失败。查下来只有 2 项是 1.8.1 自己的问题，另外 3 项是
+> **v1.3.0 引入、一直红到今天、没人发现**的老账——因为"红"被当成了常态。
+> 这一版把 5 项全部修掉，并修了 1 个"把能查的当成查不了"的真实设计缺陷。
+
+### P0：1.8.1 的提交**漏了 7 个文件**（本次最坑的一条）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 远端 `package.json` 还是 1.8.0、README 还是"76 条"、marketplace 中英各说各话，而 `CHANGELOG` 顶部已是 1.8.1 → `ci_check` 第 3/13 项红 |
+| 根因 | 这几处改动都是**等长替换**（`1.8.0`→`1.8.1`、`76`→`77`、`69`→`77`、`12`→`13`），文件大小不变；而编辑工具会**保留 mtime**。git 的 stat 缓存据此判断"文件没变"，`git add -A` 直接跳过 → 提交里没有它们。本地 `ci_check` 通过是因为**工作区**是对的，提交内容不对 |
+| 为什么本土检查抓不到 | 本地跑的是工作区，不是 `HEAD`。这类"提交与工作区不一致"只有远端才暴露 |
+| 修法 | 逐文件 `git hash-object` 与索引比对，把 7 个盲文件补进提交；并在本节记录这个陷阱 |
+
+### P0：`qavmaf` 把"能查的"当成"查不了"（真实设计缺陷）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | CI（apt 的 ffmpeg 不带 libvmaf）上 `qavmaf --selftest` 11 项里 7 项失败 |
+| 根因 | `report()` 的 **libvmaf 能力门禁排在结构性校验之前**。而"上采样 / 尺寸与声明不符 / 非 16:9"这三条是**纯几何判定**（只看 ffprobe 的宽高，连参考帧都不用画），跟 libvmaf 毫无关系，却被一起记成"未执行：ffmpeg 构建不含 libvmaf" |
+| 修法 | 把能力门禁挪到结构性校验**之后**（新的第 3.5 步）。几何问题该报 fail 就报 fail，不被"没装 libvmaf"挡在前面 |
+| 连带 | `--selftest` 改**三态**：依赖 VMAF 分数的 6 项在缺 libvmaf 时记 `SKIP`（不是 FAIL，也不是 PASS）；几何 3 项在任何机器上都给真实结论。退出码只看真实 FAIL——否则装了 apt ffmpeg 的机器永远红 |
+
+### P1：CI 的三个环境假设全部失效
+
+`ubuntu-latest` 已经是 **Ubuntu 26.04**（日志里的 `Image: ubuntu-26.04`），而 ci.yml 里三个假设都建立在旧镜像上：
+
+| job | 现象 | 修法 |
+|---|---|---|
+| `py39` | `The version '3.9' ... was not found for Ubuntu 26.04` | 钉 `ubuntu-22.04`（3.9 的生命周期快到期，注释里写明"不再支持 3.9 时连这个 job 一起删"） |
+| `web` | `FileNotFoundError: 'ffmpeg'`（35 项里唯一 FAIL） | 显式 `apt-get install ffmpeg` + 一条 `ffmpeg -version` 确认 |
+| `skill` | apt 的 ffmpeg **不带 libvmaf** → G11 只能 SKIP | 额外装 BtbN（现 `FFmpeg-Builds/FFmpeg-Builds`）的 **n8.1 gpl 静态构建**：gpl 变体才有 libx264，vmaf 由 `scripts.d/45-vmaf.sh` 编进所有变体。下载失败只 warn、不红（网络抖动不该让整个 job 红），但会打印能力探测结果——探测不到就是 SKIP，**绝不静默写成 pass** |
+
+### P1：行尾统一（`.gitattributes` 要求 eol=lf）
+
+仓库有 29 个文本文件在工作区是 CRLF（`.gitattributes` 明文 `* text=auto eol=lf`）。它们提交时会被归一化，所以仓库里一直是 LF；但工作区 CRLF 会让编辑器/工具反复产生"改了 5000 行"的假 diff。已全部归一化，内容不变（`git diff` 只有本版真实改动）。
+
+### 验收
+
+`selfcheck` **77 条全绿**；`ci_check` **13 项全绿**；`ruff` **0 违规**；
+`qavmaf --selftest` 本机 **11/11 PASS**（有 libvmaf）、模拟无 libvmaf **5 PASS / 0 FAIL / 6 SKIP**；
+四份金帧基线像素一致；CI 五个 job 全绿（见下）。
+
 ## 1.8.1 — 全面审查修复：枚举校验静默失效 + 导入即崩 + 把 lint 接进 CI（2026-11-17）
 
 > 本轮是「全项目审查 + 修复」，分四路并行（脚本 lint / 资产与工具 lint / 文档一致性 / 门禁覆盖）。

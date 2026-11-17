@@ -79,6 +79,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+      # apt 的 ffmpeg **不带 libvmaf**（Ubuntu 的 libavfilter 不依赖它），于是
+      # qavmaf（G11 全片 VMAF 门禁）在 CI 上只能记 SKIP —— 那等于最重要的画质门禁
+      # 又一次"配了但不执行"。这里额外装一份带 libvmaf 的静态构建并放到 PATH 最前。
+      #
+      # 兜底：下载失败**不算失败**（网络抖动不该让整个 job 红），后面的步骤会打印
+      # libvmaf 能力探测结果；探测不到就是 SKIP，绝不会静默写成 pass。
+      - name: install libvmaf-capable ffmpeg (static, optional)
+        run: |
+          set -u
+          # 仓库已从 BtbN/FFmpeg-Builds 迁到 FFmpeg-Builds/FFmpeg-Builds（旧地址 301）。
+          # 选 n8.1 的 gpl 静态构建：gpl 变体才有 libx264（filmkit 编码要用），
+          # 而 vmaf 由 scripts.d/45-vmaf.sh 编译进所有变体（ffbuild_enabled 恒返回 0）。
+          URL="https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz"
+          if curl -fsSL --retry 3 --connect-timeout 20 "$URL" -o /tmp/ff.tar.xz; then
+            mkdir -p /tmp/ffbin && tar -xJf /tmp/ff.tar.xz -C /tmp/ffbin --strip-components=1 \
+              && cp /tmp/ffbin/bin/ffmpeg /tmp/ffbin/bin/ffprobe /usr/local/bin/ \
+              && rm -rf /tmp/ff.tar.xz /tmp/ffbin
+            echo "静态 ffmpeg 已安装：$(command -v ffmpeg)"
+          else
+            echo "::warning::带 libvmaf 的静态 ffmpeg 下载失败；本 job 的 VMAF 检查会记 SKIP（不是 pass）"
+          fi
+      - name: report ffmpeg capabilities
+        run: |
+          ffmpeg -hide_banner -version | head -2
+          if ffmpeg -hide_banner -filters 2>&1 | grep -qw libvmaf; then
+            echo "libvmaf: available -> G11 VMAF 检查会真跑"
+          else
+            echo "::warning::libvmaf 不可用 -> G11 VMAF 检查记 SKIP（本 job 仍会绿，但覆盖不完整）"
+          fi
       # 装齐"强烈建议"与可选依赖，而不是只装必需：
       # cv2 是"编码锐度比 ≥ 0.85"这条画质门禁的唯一实现，只装 numpy/Pillow 会让它
       # 整年在 CI 上走降级 WARN 分支——等于最重要的画质门禁从没被真跑过。
@@ -172,11 +201,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: install deps + chromium
+      # ffmpeg 必须显式装：新版 runner 镜像**不再预装** ffmpeg，而 webengine 的
+      # 自检里有一条 image2pipe(PNG) -> libx264 的编码烟测。上一版 ubuntu-26.04
+      # 上这条直接 FileNotFoundError: 'ffmpeg'（35 项里唯一的 FAIL）。
+      - name: install deps + chromium + ffmpeg
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
           python -m pip install --upgrade pip
           pip install numpy Pillow playwright
           python -m playwright install --with-deps chromium
+      - name: check ffmpeg
+        run: ffmpeg -version | head -2
       - name: 'selftest: webengine（无头浏览器逐帧渲染）'
         working-directory: skills/video-studio/scripts
         env:
@@ -187,7 +223,13 @@ jobs:
   # 断言的兼容性没人验证。这里用 3.9 真解释器跑仓库级体检，把"写了就没人试"补上。
   py39:
     name: python 3.9 compat (Linux)
-    runs-on: ubuntu-latest
+    # **必须钉 22.04**：ubuntu-latest 已迁到 24.04/26.04，而 actions/setup-python
+    # 在 22.04 之后不再提供 3.9 的预编译包（实测 26.04 报
+    # "The version '3.9' ... was not found for Ubuntu 26.04"）。
+    # 这一条从 v1.3.0 加进 CI 起就一直是红的，因为没人看得到"红的是环境还是代码"。
+    # 3.9 的生命周期本身也快到期：这个 job 留着是为了让 ci_check 第 8 项的
+    # "3.9 语法兼容"断言真的有人验证。等仓库决定不再支持 3.9 时，连这个 job 一起删。
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

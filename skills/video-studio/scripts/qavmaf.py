@@ -915,13 +915,13 @@ def report(film_mp4, tl, scenes_mod, script, *, mode="full", out_json=None,
     except ValueError as e:
         return _skip(str(e))
     caps = _capabilities(ff)
-    if not caps.get("libvmaf"):
-        return _skip("ffmpeg 构建不含 libvmaf 滤镜（%s）：无法计算 VMAF，本次未检查画质"
-                     % ff)
-    has_ssim = bool(caps.get("ssim"))
-    if not has_ssim:
-        warnings.append("ffmpeg 构建不含 ssim 滤镜，本次只算 VMAF（SSIM 记为 skipped）")
     rep["ffmpeg"] = ff
+    # **顺序很重要**：libvmaf 能力门禁必须排在第 3 步"结构性校验"**之后**。
+    # 上采样 / 尺寸与声明不符 / 非 16:9 这三条是**纯几何判定**（只看 ffprobe 拿到的
+    # 宽高，连参考帧都不用画），跟有没有 libvmaf 毫无关系。以前能力门在它们前面，
+    # 于是 apt 构建的 ffmpeg（Ubuntu 的 ffmpeg 不带 libvmaf）会让这三条一起被记成
+    # "未执行：ffmpeg 构建不含 libvmaf"——**把能查的也当成查不了**，
+    # CI 上这三条因此永远拿不到真实结论（qavmaf 自检里 3 项长期漂移）。
 
     # ---- 3. 成片探测 + 结构性校验（含下采样交付） ----
     info = _probe_film(film)
@@ -943,6 +943,15 @@ def report(film_mp4, tl, scenes_mod, script, *, mode="full", out_json=None,
                         "成片分辨率后比较（与 FrameSink 编码口径一致）；VMAF 阈值仍按 "
                         "1080p 标定，分数与 1080p 交付不完全可比"
                         % (ref_scale["to"][0], ref_scale["to"][1]))
+
+    # ---- 3.5 VMAF 能力门禁（fail-closed：没有 libvmaf 才算 skipped） ----
+    # 放在结构性校验之后：几何问题该报 fail 就报 fail，不该被"没装 libvmaf"挡在前面。
+    if not caps.get("libvmaf"):
+        return _skip("ffmpeg 构建不含 libvmaf 滤镜（%s）：无法计算 VMAF，本次未检查画质"
+                     % ff)
+    has_ssim = bool(caps.get("ssim"))
+    if not has_ssim:
+        warnings.append("ffmpeg 构建不含 ssim 滤镜，本次只算 VMAF（SSIM 记为 skipped）")
 
     # ---- 4. 参考帧输入（含脚本/主题准备） ----
     try:
@@ -1251,13 +1260,31 @@ def selftest() -> int:
     results = []
 
     def check(name, fn):
+        """跑一条检查。fn 返回 (True|False, detail) 或 ("skip", detail)。
+
+        **三态**：环境不具备（比如这台机器的 ffmpeg 不带 libvmaf）记 SKIP，
+        不能记 FAIL —— 那是"没查"而不是"查出来有问题"，混为一谈会让真正的
+        代码回归被环境噪声淹没（本项目对 skipped != 通过 有明文约定）。
+        """
         try:
             ok, detail = fn()
         except Exception as e:          # noqa: BLE001
             ok, detail = False, "异常：%s" % e
+        if ok == "skip":
+            results.append((name, "skip", detail))
+            print("   [SKIP] %s%s" % (name, ("  —— " + detail) if detail else ""))
+            return
         results.append((name, bool(ok), detail))
         print("   [%s] %s%s" % ("PASS" if ok else "FAIL", name,
                                 ("  —— " + detail) if detail else ""))
+
+
+    def _no_libvmaf():
+        """本机 ffmpeg 是否缺 libvmaf（缺则由依赖 VMAF 的检查统一记 SKIP）。"""
+        try:
+            return not _capabilities(_ffmpeg()).get("libvmaf")
+        except Exception:               # noqa: BLE001 —— 探测失败也当"不具备"
+            return True
 
     tmp = tempfile.mkdtemp(prefix="qavmaf_selftest_")
     try:
@@ -1431,23 +1458,44 @@ def draw_frame(scene, t_local, dur, t_global, script, frame):
             ok = (rep["gate"]["status"] == "fail" and "16:9" in msg)
             return ok, rep["gate"]["detail"]
 
-        check("正常片 VMAF 高、不误判 fail", c_pass)
-        check("劣化片 VMAF 低、判 fail", c_bad)
-        check("好片/劣化片分数区分度 > 15", c_discriminate)
+        # 依赖 VMAF **分数**的检查：本机 ffmpeg 不带 libvmaf 时只能 SKIP
+        # （没分数就没法判"高/低/区分度"）。它们被单独列出来，是为了让
+        # "环境不具备"和"代码坏了"在输出上永远分得开。
+        def need_vmaf(fn, what="这条检查要算 VMAF 分数"):
+            def wrapped():
+                if _no_libvmaf():
+                    return "skip", "本机 ffmpeg 不带 libvmaf（%s），%s" % (_ffmpeg(), what)
+                return fn()
+            return wrapped
+
+        check("正常片 VMAF 高、不误判 fail", need_vmaf(c_pass))
+        check("劣化片 VMAF 低、判 fail", need_vmaf(c_bad))
+        check("好片/劣化片分数区分度 > 15", need_vmaf(c_discriminate))
         check("缺 scenes -> skipped（不是 pass）", c_skip_no_scenes)
         check("缺 timeline -> skipped（不是 pass）", c_skip_no_timeline)
-        check("sample 模式帧数按步长缩减", c_sample)
-        check("limit_seconds 生效并记 warning", c_limit)
-        check("720p 下采样交付 -> pass 且与 1080p 差 < 3 分", c_downscale_pass)
+        check("sample 模式帧数按步长缩减", need_vmaf(c_sample, "抽样帧数要靠真跑一轮比较得出"))
+        check("limit_seconds 生效并记 warning", need_vmaf(c_limit, "帧数统计要靠真跑一轮比较得出"))
+        check("720p 下采样交付 -> pass 且与 1080p 差 < 3 分", need_vmaf(c_downscale_pass))
+        # 下面三条是**纯几何判定**（只看 ffprobe 的宽高），与 libvmaf 无关，
+        # 所以在任何机器上都必须给出真实结论——这正是 report() 里把能力门
+        # 挪到结构性校验之后要保住的东西。
         check("上采样成片 -> fail（不是合法交付）", c_upscale_fail)
         check("成片尺寸与 timeline.video 声明不符 -> fail", c_declared_fail)
         check("非 16:9 成片 -> fail", c_aspect_fail)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    npass = sum(1 for _n, ok, _d in results if ok)
-    print("== 结果：%d/%d PASS" % (npass, len(results)))
-    return 0 if npass == len(results) else 1
+    npass = sum(1 for _n, ok, _d in results if ok is True)
+    nfail = sum(1 for _n, ok, _d in results if ok is False)
+    nskip = sum(1 for _n, ok, _d in results if ok == "skip")
+    print("== 结果：%d/%d PASS%s" % (
+        npass, len(results),
+        ("（FAIL %d / SKIP %d）" % (nfail, nskip)) if (nfail or nskip) else ""))
+    if nskip:
+        print("   SKIP = 本机环境不具备该能力（不是通过，也不是失败）；"
+              "要覆盖请装带 libvmaf 的 ffmpeg，见 references/quality-gates.md")
+    # 只有真实失败才返回非 0；SKIP 不影响退出码（否则装了 apt ffmpeg 的机器永远红）
+    return 0 if nfail == 0 else 1
 
 
 # ---------------------------------------------------------------- CLI
