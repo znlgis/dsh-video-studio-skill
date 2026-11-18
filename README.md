@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.3.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -18,6 +18,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 | 后半段静音 | numpy 采样级混音，不用一条 ffmpeg 命令喂上百个输入 |
 | 该有的淡入/字幕静默消失 | 质检门禁查"必须有"和"不能有"两类断言 |
 | 成片"像草稿" | -16 LUFS / 真峰 ≤ -1 dBTP / 编码锐度比 ≥ 0.85 |
+| 做完了才发现画面类型选错（该用实拍却全画成图表，或反过来） | 问诊第 2 题先定**制作方式**：自己画 / 网上素材剪辑 / 两者结合；按题材给推荐（纪录片→素材剪辑、数据科普→自己画、两边都占→结合），理由列出命中的题材词，`--recommend` 可单独查 |
 | 声音和画面对不上 | **提示点系统**：画面登记 cue → 音效按 cue 合成，改节奏不用重新对时间 |
 | 声音单薄、只有"叮叮咚咚" | `sfxkit` 物理建模音效 + `musicgen` 按参数现场编排配乐（没有现成曲风可选） |
 | 一帧白闪/两秒空窗没人发现 | `qa_frames` 帧级深检：单帧闪烁、画面空窗、音画同步、画面静止 |
@@ -104,11 +105,13 @@ mkdir -p myfilm && cd myfilm
 # 2) 环境自检（可选，85 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
-# 3) 先问诊：固定 7 题一次问完（题材/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
-python <SKILL_DIR>/scripts/intake.py --work work --questions --json
-python <SKILL_DIR>/scripts/intake.py --work work --set "topic:AI 大模型的三年" \
+# 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
+#    「制作方式」（自己画 / 网上素材剪辑 / 两者结合）按题材给推荐：--topic 随问诊单带出，或单独 --recommend
+python <SKILL_DIR>/scripts/intake.py --work work --questions --json --topic "AI 大模型的三年"
+python <SKILL_DIR>/scripts/intake.py --work work --recommend "中国高铁十年，纪录片"
+python <SKILL_DIR>/scripts/intake.py --work work --set "topic:AI 大模型的三年" --set mode:auto \
        --set duration:30s --set tone:bright-lively --set voice:female-bright --set music:upbeat
-python <SKILL_DIR>/scripts/intake.py --work work --finalize     # -> work/intake.brief.txt
+python <SKILL_DIR>/scripts/intake.py --work work --finalize     # -> work/intake.brief.txt + 下一步命令
 
 # 4) 再出方案：3 个候选，各带静帧联系表；2 秒级、全程离线（问诊没答完会被拒）
 python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科普" --script film.json --work work
@@ -175,7 +178,7 @@ skills/video-studio/
   references/                proposal · scene-grammar · pipeline · scene-authoring · audio · audio-variation
                              sfx-design · web-engine · frame-qa · quality-gates · word-timeline · delivery-gates
                              change-impact · appearance · pitfalls
-  scripts/intake.py          出片前问诊（固定 7 题 -> work/intake.json -> brief）
+  scripts/intake.py          出片前问诊（固定 8 题 -> work/intake.json -> brief；含制作方式推荐与产线路由）
   scripts/propose.py         提案器（--brief/--revise/--confirm/--diff + 片间去重台账）
   scripts/designkit.py       设计 DSL（采样/校验/转计划/设计距离/字幕参数）
   scripts/previewkit.py      离线预览（合成时间轴 + 联系表，不联网）

@@ -20,6 +20,11 @@
 > **素材不必提前准备好**：sources[] 可以直接写 url，--stage fetch 负责下载；
 > 也可以写本地 path（推荐用于回归与离线复现）。
 
+> **这条线由问诊第 2 题决定**：`intake.py` 的 `mode` 若解析成 `footage`（用户自己选了素材剪辑，
+> 或选了 `auto` 且题材是真实影像），`--finalize` 会直接给出 `footage.py` 的下一步命令，
+> 并提醒**提案层不适用**。走到这里说明产线已经定过了，别再回头跑 `propose.py` 给素材线定外观。
+> `mode=hybrid` 时：素材段走本线，图文段走 `render.py`，最后 ffmpeg 拼接/叠加（没有一键命令）。
+
 ## 1. 契约：footage.json
 
 与 film.json **并列、不通用**。完整字段见 schemas/footage.schema.json，

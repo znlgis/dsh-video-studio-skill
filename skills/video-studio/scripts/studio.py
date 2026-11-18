@@ -37,7 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # 子命令 -> (目标脚本, 一句话说明)
 # 只收“高频且名字与脚本对得上”的几个；冷门脚本直调更清楚，硬塞进来等于多一层要记的映射。
 COMMANDS = {
-    "intake":   ("intake.py",    "出片前问诊：7 个问题一次问完"),
+    "intake":   ("intake.py",    "出片前问诊：8 个问题一次问完（含制作方式推荐）"),
     "propose":  ("propose.py",   "出候选方案 / 冻结设计 / 换方向重出"),
     "render":   ("render.py",    "生产线：14 个 stage、批量、预览、断点续跑"),
     "critic":   ("critic.py",    "审美质检：离线打分 + 可选 VLM 复评"),

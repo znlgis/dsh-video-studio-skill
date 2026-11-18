@@ -80,7 +80,7 @@
   67  时长要求真的被接住（brief -> duration_target -> 渲染对账）
   68  缩放取景的帧间稳定性（NEAREST 回归：grain 图案不许整屏错位）
   69  ASR 掉分可定位（lost_top / 最差段落）
-  70  出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）
+  70  出片前问诊（固定 8 题 / 制作方式按题材推荐并落地 / 明亮点排第一）
   71  默认设计不画装饰细线：母题层全透明、纹理 none、HUD none；
       10 类构图的绘制调用里没有 width<4 的 line、没有「长>=40 且厚<=3」的色条
   72  前景不随镜头位移：`_view` 与 s 无关、push=0 时缩放恒 1.0、
@@ -2202,10 +2202,13 @@ def t_intake_gate():
 
     用户的真实抱怨是"有时一个问题不问就一路跑完，有时只问一两个"——根因是"问不问"
     全靠 agent 当场发挥。这条把它变成可执行的门：
-      ① 问诊单是固定的 7 题，每一项都有推荐默认值，且**任何题材的推荐默认都是明亮活泼**；
-      ② 没答完时首次提案直接失败，并给出"怎么问、怎么答、怎么定稿"三步；
-      ③ 答完后提案里必须留痕（intake.status = complete，答案随提案落盘）；
-      ④ --no-intake 是显式逃生口，用掉时留 bypassed 痕迹（事后能查"这片子问没问过"）。
+      ① 问诊单是固定的 8 题，每一项都有推荐默认值，且**任何题材的推荐默认都是明亮活泼**；
+      ② 制作方式题（自己画/网上素材剪辑/两者结合）是必答题：题材给得出推荐值
+         （真实影像 -> footage、数据/原理 -> draw、两边都占 -> hybrid），auto 档按题材落地；
+         显式选择优先，且 finalize 必须打印该产线的下一步命令（素材线不许再套 propose）；
+      ③ 没答完时首次提案直接失败，并给出"怎么问、怎么答、怎么定稿"三步；
+      ④ 答完后提案里必须留痕（intake.status = complete，答案 + mode 随提案落盘）；
+      ⑤ --no-intake 是显式逃生口，用掉时留 bypassed 痕迹（事后能查"这片子问没问过"）。
     """
     import subprocess as _sp
     tmp = tempfile.mkdtemp(prefix="vs_intake_selfcheck_")
@@ -2225,18 +2228,50 @@ def t_intake_gate():
         return _sp.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=env, timeout=300)
 
-    # ① 题目包：固定 7 题、每题带默认值、气质题默认明亮活泼且排第一
+    # ① 题目包：固定 8 题、每题带默认值、气质题默认明亮活泼且排第一；
+    #    制作方式题（mode）必须在：必答、默认 auto、三个产线选项齐全
     r = _run([intake_py, "--work", "work", "--questions", "--json"], tmp)
     assert r.returncode == 0, "intake.py --questions 失败：%s" % (r.stderr or r.stdout)[-300:]
     payload = json.loads(r.stdout[r.stdout.find("{"):])
     qs = payload.get("questions") or []
-    assert len(qs) == 7, "问诊单应有 7 题（题材/时长/气质/画幅/声线/配乐/补充），实际 %d" % len(qs)
+    assert len(qs) == 8, \
+        "问诊单应有 8 题（题材/制作方式/时长/气质/画幅/声线/配乐/补充），实际 %d" % len(qs)
     byid = {q["id"]: q for q in qs}
-    for qid in ("topic", "duration", "tone", "voice", "music"):
+    for qid in ("topic", "mode", "duration", "tone", "voice", "music"):
         assert byid.get(qid) and byid[qid].get("required"), "必答题缺 %r" % qid
     assert byid["tone"].get("default") == "bright-lively", "气质题默认必须是 bright-lively"
     assert byid["tone"]["options"][0]["value"] == "bright-lively", \
         "气质题第一项必须是明亮活泼（推荐项排最前）"
+    mode_q = byid["mode"]
+    assert mode_q.get("default") == "auto", "制作方式题默认必须是 auto（按题材推荐）"
+    vals = [o["value"] for o in mode_q.get("options") or []]
+    assert vals == ["draw", "footage", "hybrid", "auto"], \
+        "制作方式题选项应为 draw/footage/hybrid/auto，实际 %r" % (vals,)
+    # 推荐值必须随题材变化（"根据要做的视频内容推荐"——不是恒定的一个值）
+    import intake as IT
+    assert IT.recommend_mode("中国高铁十年，纪录片，用真实影像")["mode"] == "footage", \
+        "真实影像题材应推荐 footage：%r" % (IT.recommend_mode("中国高铁十年，纪录片，用真实影像"),)
+    assert IT.recommend_mode("AI 大模型的三年，数据图表科普")["mode"] == "draw", \
+        "数据/原理题材应推荐 draw：%r" % (IT.recommend_mode("AI 大模型的三年，数据图表科普"),)
+    assert IT.recommend_mode("城市纪录片里穿插数据图表")["mode"] == "hybrid", \
+        "两边都占时应推荐 hybrid：%r" % (IT.recommend_mode("城市纪录片里穿插数据图表"),)
+    assert IT.recommend_mode("随便讲个故事")["mode"] == "draw", \
+        "没有线索时应默认 draw（零素材线）：%r" % (IT.recommend_mode("随便讲个故事"),)
+    # 否定句不该把推荐带偏："不要真实影像，纯数据科普" 仍应推荐 draw
+    neg_draw = IT.recommend_mode("不要真实影像，纯数据科普")
+    assert neg_draw["mode"] == "draw" and not neg_draw["hits"]["footage"], \
+        "否定句里的影像词被算进了推荐：%r" % (neg_draw,)
+    neg_footage = IT.recommend_mode("不要数据图表，用真实影像讲城市")
+    assert neg_footage["mode"] == "footage" and not neg_footage["hits"]["draw"], \
+        "否定句里的数据词被算进了推荐：%r" % (neg_footage,)
+    r = _run([intake_py, "--work", "work", "--questions", "--json", "--topic",
+              "中国高铁十年，纪录片"], tmp)
+    assert r.returncode == 0, "带 --topic 的问诊单失败：%s" % (r.stderr or r.stdout)[-300:]
+    rows = json.loads(r.stdout[r.stdout.find("{"):]).get("questions") or []
+    mode_row = [q for q in rows if q["id"] == "mode"][0]
+    assert mode_row.get("recommended") == "footage", \
+        "问诊单没带出题材推荐值：%r" % (mode_row,)
+    assert str(mode_row.get("recommend_reason") or "").strip(), "推荐没给理由：%r" % (mode_row,)
 
     # ② 没答完：首次提案必须失败，并且说清三步怎么做
     work1 = os.path.join(tmp, "work1")
@@ -2246,16 +2281,25 @@ def t_intake_gate():
     msg = (r.stderr or "") + (r.stdout or "")
     assert "intake.py" in msg and "还没" in msg, "拦截时要给出 intake.py 指引：%r" % msg[-300:]
 
-    # ③ 答完 + 定稿：提案放行，并留 complete 痕迹
+    # ③ 答完 + 定稿：提案放行，并留 complete 痕迹；auto 制作方式按题材落地
     r = _run([intake_py, "--work", work1,
-              "--set", "topic:AI 大模型的三年", "--set", "duration:at_least_1m",
+              "--set", "topic:AI 大模型的三年", "--set", "mode:auto",
+              "--set", "duration:at_least_1m",
               "--set", "tone:bright-lively", "--set", "voice:female-bright",
               "--set", "music:upbeat"], tmp)
     assert r.returncode == 0, "写答答案失败：%s" % (r.stderr or r.stdout)[-300:]
     r = _run([intake_py, "--work", work1, "--finalize"], tmp)
     assert r.returncode == 0, "--finalize 失败：%s" % (r.stderr or r.stdout)[-300:]
+    intake_json = json.load(open(os.path.join(work1, "intake.json"), encoding="utf-8"))
+    mode_dec = intake_json.get("mode") or {}
+    assert mode_dec.get("chosen") == "auto" and mode_dec.get("resolved") == "draw", \
+        "auto 制作方式没按题材落地：%r" % (mode_dec,)
+    assert "propose.py" in r.stdout and "footage.py" not in r.stdout, \
+        "draw 档的下一步应指向 propose.py：%r" % r.stdout[-300:]
     brief_txt = open(os.path.join(work1, "intake.brief.txt"), encoding="utf-8").read()
     assert "明亮活泼" in brief_txt, "气质答案没进 brief：%r" % brief_txt
+    assert "自己画" not in brief_txt and "素材" not in brief_txt, \
+        "制作方式被写进了外观 brief（它是路由，不是外观约束）：%r" % brief_txt
     r = _run([propose_py, "--work", work1, "--n", "2", "--json"], tmp)
     assert r.returncode == 0, "答完问诊后提案失败：%s" % (r.stderr or r.stdout)[-300:]
     data = json.loads(r.stdout[r.stdout.find("{"):])
@@ -2279,7 +2323,29 @@ def t_intake_gate():
     data2 = json.loads(r.stdout[r.stdout.find("{"):])
     assert (data2.get("intake") or {}).get("status") == "bypassed", \
         "--no-intake 没留 bypassed 痕迹：%r" % (data2.get("intake"),)
-    return "7 题固定 / 没答完必拦 / 答完留痕且首候选明亮活泼 / --no-intake 留痕"
+
+    # ⑤ 制作方式=素材剪辑：finalize 的下一步必须是 footage.py，提案层要明确说"不适用"
+    work3 = os.path.join(tmp, "work3")
+    r = _run([intake_py, "--work", work3,
+              "--set", "topic:中国高铁十年纪录片，用真实影像", "--set", "mode:footage",
+              "--set", "duration:at_least_3m", "--set", "tone:bright-lively",
+              "--set", "voice:female-bright", "--set", "music:upbeat"], tmp)
+    assert r.returncode == 0, "写素材线答案失败：%s" % (r.stderr or r.stdout)[-300:]
+    r = _run([intake_py, "--work", work3, "--finalize"], tmp)
+    assert r.returncode == 0, "素材线 --finalize 失败：%s" % (r.stderr or r.stdout)[-300:]
+    assert "footage.py" in r.stdout, "素材线的下一步没给 footage.py：%r" % r.stdout[-300:]
+    assert "提案层不适用" in r.stdout, \
+        "素材线 finalize 没写明\"提案层不适用\"：%r" % r.stdout[-300:]
+    r = _run([propose_py, "--work", work3, "--n", "2"], tmp)
+    assert r.returncode == 0, "素材线仍要能跑提案（hybrid 叠加层用）：%s" % (r.stderr or r.stdout)[-300:]
+    msg = (r.stdout or "") + (r.stderr or "")
+    assert "素材剪辑" in msg and "提案层不适用" in msg, \
+        "素材线跑提案时没提示\"提案层不适用\"：%r" % msg[-300:]
+    proposal = json.load(open(os.path.join(work3, "proposal.json"), encoding="utf-8"))
+    assert (proposal.get("intake") or {}).get("mode", {}).get("resolved") == "footage", \
+        "提案里没记下制作方式：%r" % (proposal.get("intake"),)
+    return ("8 题固定 / 制作方式推荐（footage·draw·hybrid）/ auto 按题材落地 / "
+            "素材线下一步走 footage.py 且提案层提示不适用 / 没答完必拦 / --no-intake 留痕")
 
 
 def t_duration_target():
@@ -3410,7 +3476,7 @@ CASES = [
     ("67 时长要求真的被接住（brief -> design -> 渲染对账）", t_duration_target),
     ("68 缩放取景的帧间稳定性（抖动回归）", t_zoom_stability),
     ("69 ASR 掉分可定位（lost_top / 最差段落）", t_asr_lost_diagnostics),
-    ("70 出片前问诊（固定 7 题 / 首次提案必须答完 / 明亮点排第一）", t_intake_gate),
+    ("70 出片前问诊（固定 8 题 / 制作方式推荐与产线路由 / 明亮点排第一）", t_intake_gate),
     ("71 默认设计不画装饰细线（母题/底纹/HUD 全关）", t_plain_design_has_no_hairlines),
     ("72 前景不随镜头位移（1px 台阶回归）", t_foreground_pinned),
     ("73 画布/安全区单一真源（layoutkit）", t_layout_single_source),

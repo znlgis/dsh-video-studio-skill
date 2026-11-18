@@ -394,7 +394,10 @@ def intake_path(work):
 
 
 def _intake_state(work):
-    """读问诊结果：返回 {"present", "status", "missing", "brief", "path"}。
+    """读问诊结果：返回 {"present", "status", "missing", "brief", "path", "mode"}。
+
+    mode 是问诊「制作方式」题的落地结果（chosen / resolved / route）；素材剪辑线（footage）
+    下提案层不适用，上层据此提示，不再假装"这个方案能直接套到成片"。
 
     读不出/不是 JSON 一律当"没有问诊"处理——问诊文件坏掉不该让上层看到一个
     可疑的"已答完"，那会跳过提问直接出方案（正是这一刻要避免的事）。
@@ -404,15 +407,19 @@ def _intake_state(work):
         with open(p, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, json.JSONDecodeError):
-        return {"present": False, "status": "absent", "missing": [], "brief": "", "path": p}
+        return {"present": False, "status": "absent", "missing": [], "brief": "",
+                "path": p, "mode": {}}
     if not isinstance(data, dict):
-        return {"present": False, "status": "broken", "missing": [], "brief": "", "path": p}
+        return {"present": False, "status": "broken", "missing": [], "brief": "",
+                "path": p, "mode": {}}
     answers = data.get("answers") if isinstance(data.get("answers"), dict) else {}
     missing = [str(x) for x in (data.get("missing") or [])]
     status = str(data.get("status") or ("complete" if not missing else "draft"))
+    mode = data.get("mode") if isinstance(data.get("mode"), dict) else {}
     return {"present": True, "status": status, "missing": missing,
             "brief": str(data.get("brief") or ""), "path": p,
-            "answers": dict(answers)}
+            "schema": int(data.get("schema") or 0),
+            "answers": dict(answers), "mode": dict(mode)}
 
 
 def _intake_gate(work, brief_text, no_intake):
@@ -430,11 +437,11 @@ def _intake_gate(work, brief_text, no_intake):
     miss = " / ".join(state.get("missing") or []) or "题材"
     raise SystemExit(
         "[proposal] 还没完成出片前问诊（%s）。\n"
-        "  这是刻意的：素材/时长/气质/声线/配乐这些只有用户能定，先问完再出方案，"
+        "  这是刻意的：题材/制作方式/时长/气质/声线/配乐这些只有用户能定，先问完再出方案，"
         "返工才不会落在渲染之后。\n"
         "  怎么做：\n"
         "    1) python intake.py --work %s --questions --json   # 拿去问用户（一次问完）\n"
-        "    2) python intake.py --work %s --set topic:\"...\" --set tone:bright-lively ...\n"
+        "    2) python intake.py --work %s --set topic:\"...\" --set mode:auto --set tone:bright-lively ...\n"
         "    3) python intake.py --work %s --finalize          # 合成 brief\n"
         "  确实不需要问（批量补渲 / 已在别处答过）：加 --no-intake，会记进提案留痕。\n"
         "  当前状态：%s；还没答：%s" % (state.get("status"), work, work, work,
@@ -577,6 +584,19 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
             print("   问诊: 已答完（%s）" % intake_state.get("path"))
         if not json_out and intake_bypassed:
             print("   问诊: 已用 --no-intake 跳过（本次提案里会留痕）")
+        # 旧问诊单（schema 1）没有「制作方式」：不拦（向后兼容），但要提示补问——
+        # 否则这片子的产线是"没有记录"的，事后查不出当初选的是哪条线。
+        if (not json_out and intake_state.get("present")
+                and 0 < int(intake_state.get("schema") or 0) < 2
+                and not (intake_state.get("mode") or {}).get("resolved")):
+            print("   问诊: 问诊单是旧版（schema 1），缺「制作方式」（mode）——建议补问一次；"
+                  "本次提案照旧出方案，但 proposal.intake.mode 会是空的。")
+        # 制作方式=素材剪辑时，提案层本身不适用：素材线的外观由素材调色/遮幅决定。
+        # 不失败（hybrid 的图文叠加层仍要设计），但必须说清楚，别让人以为提案能直接套到成片。
+        if not json_out and (intake_state.get("mode") or {}).get("resolved") == "footage":
+            print("   问诊: 制作方式=网上素材剪辑（footage 线）——提案层不适用；"
+                  "出片请用 footage.py（footage.json 契约见 references/footage.md），"
+                  "本提案仅供 hybrid 叠加层参考。")
     else:
         intake_state, intake_bypassed = _intake_state(work), False
     brief = _brief_of(brief_text, script)
@@ -673,7 +693,10 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
         "intake": {"path": intake_state.get("path"),
                    "status": intake_state.get("status"),
                    "bypassed": bool(intake_bypassed),
-                   "answers": intake_state.get("answers") or {}},
+                   "answers": intake_state.get("answers") or {},
+                   # 制作方式（问诊第 2 题）的落地结果：chosen / resolved / route。
+                   # 素材线（footage）下提案层不适用，这里留痕，事后可查"为什么还出了方案"。
+                   "mode": intake_state.get("mode") or {}},
         # 片间去重证据：这批候选与"最近交付过的设计"的最小维度距离。
         # None = 没有台账（第一次出片 / 已用 --no-ledger 关闭）。
         "ledger": {"path": ledger_path() or None, "recent": len(recent),

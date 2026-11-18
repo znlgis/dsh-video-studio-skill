@@ -1,6 +1,6 @@
 ---
 name: video-studio
-description: 做中文视频的两条生产线：(A) 素材剪辑 footage——有素材（本地文件/链接/网上下载）就按文案剪成片，自带素材检索、转写定位镜头、字幕水印治理；(B) 零素材——没有素材且找不到时用代码逐帧画。两条都走 edge-tts 实测时长排轴 + 采样级混音 + 自动质检。做视频/宣传片/纪录片/配音配字幕/把报告变成视频/修音画不同步/修画面糊，或提到 ffmpeg、字幕、分镜、混音时使用；开工先跑 intake.py 问完 7 个问题。 | Two pipelines for Chinese videos: footage-cut (source clips -> narration -> timeline) or code-generated frames; ffmpeg, edge-tts, subtitles, QA gates.
+description: 做中文视频的两条生产线：(A) 素材剪辑 footage——有素材（本地文件/链接/网上下载）就按文案剪成片，自带素材检索、转写定位镜头、字幕水印治理；(B) 零素材——没有素材且找不到时用代码逐帧画。两条都走 edge-tts 实测时长排轴 + 采样级混音 + 自动质检。做视频/宣传片/纪录片/配音配字幕/把报告变成视频/修音画不同步/修画面糊，或提到 ffmpeg、字幕、分镜、混音时使用；开工先跑 intake.py 问完 8 个问题。 | Two pipelines for Chinese videos: footage-cut (source clips -> narration -> timeline) or code-generated frames; ffmpeg, edge-tts, subtitles, QA gates.
 ---
 
 # 视频工作室（video-studio）
@@ -43,12 +43,19 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 | 2 | 没给素材，但**网上能找到**可用画面（纪录片、新闻片、公有领域影像） | **先 `--stage fetch` 下载，再走 footage 线** |
 | 3 | 找不到，或题材不该用现成画面（数据、抽象、品牌、动画） | **零素材线**：`scripts/render.py` + `design.json` |
 
+> **这张表现在由问诊第 2 题「制作方式」直接问用户**（自己画 / 网上素材剪辑 / 两者结合），
+> 并按题材给推荐值（`--recommend`）：真实影像题材 → footage、数据/原理题材 → 自己画、
+> 两边都占 → 两者结合。用户怎么选就怎么走；显式选择永远优先于推荐。
+> 上表的"顺序"是**推荐逻辑**，不是"agent 自己猜"——别跳过这一问替用户定产线。
+
 - **footage 线的契约是 `footage.json`**（不是 `film.json`）：见 [references/footage.md](references/footage.md)。
 - **素材不必提前准备好**：`sources[]` 可以写 `url`，`--stage fetch` 负责下载；
   本地 `path` 更可复现。
 - 两条线都遵守 §0 的其它铁律（音频先做、时间轴由实测驱动、采样级混音、交付前跑门禁）。
 - 走了素材线，**提案层（`propose.py` / 设计 DSL）不适用**——外观由素材本身的调色与遮幅决定，
-  不是"采样几个设计选一个"。
+  不是"采样几个设计选一个"（`propose.py` 会在问诊记录 `mode=footage` 时明确提示这一点）。
+- **"两者结合"没有一键命令**：素材段走 `footage.py`、图文段走 `render.py`，最后用 ffmpeg
+  拼接（或素材打底 + 代码叠加信息层）。先定每一段用哪条线，再分别出片——别指望一个 stage 全包。
 
 ## 0. 铁律（违反任意一条，成片一定会出问题）
 
@@ -73,30 +80,35 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 **固定动作（排在 §0.5 提案之前）**：
 
 ```bash
-# 1) 生成问诊单：固定 7 题（题材 / 时长 / 主题气质 / 画幅 / 旁白声线 / 配乐 / 补充硬要求）
-python <SKILL_DIR>/scripts/intake.py --work work --questions --json
+# 1) 生成问诊单：固定 8 题（题材 / 制作方式 / 时长 / 主题气质 / 画幅 / 旁白声线 / 配乐 / 补充）
+#    带 --topic 时，「制作方式」题会附 recommended / recommend_reason（按题材算好）
+python <SKILL_DIR>/scripts/intake.py --work work --questions --json --topic "AI 大模型的三年"
+#    想先单独看推荐也可以（不给文本就用问诊单里已写的题材）：
+python <SKILL_DIR>/scripts/intake.py --recommend "中国高铁十年，纪录片"
 
 # 2) 把 questions 里的每一题用 ask_user_question **一次问完**（不要一句一轮），再写回：
 python <SKILL_DIR>/scripts/intake.py --work work \
-       --set "topic:AI 大模型的三年，讲给普通观众" --set duration:45s \
+       --set "topic:AI 大模型的三年，讲给普通观众" --set mode:auto --set duration:45s \
        --set tone:bright-lively --set voice:female-bright --set music:upbeat \
        --set "note:不要放射线，结尾放二维码"
 
-# 3) 定稿：校验必答题并合成 --brief 文本（work/intake.brief.txt）
+# 3) 定稿：校验必答题、合成 --brief 文本（work/intake.brief.txt），并按制作方式打印下一步
 python <SKILL_DIR>/scripts/intake.py --work work --finalize
 ```
 
 | 规则 | 说明 |
 |---|---|
-| **一次问完** | 7 题在同一次 ask_user_question 里给出，每题都带推荐项；用户只需勾选/一句话补充 |
+| **一次问完** | 8 题在同一次 ask_user_question 里给出，每题都带推荐项；用户只需勾选/一句话补充 |
+| **制作方式先定产线** | 第 2 题问「自己画 / 网上素材剪辑 / 两者结合」：自己画走 `render.py`、素材剪辑走 `footage.py`、两者结合按段拼。选错产线整片返工，所以它是必答题；`auto` 档按题材推荐落地（真实影像→footage、数据/原理→draw、两边都占→hybrid），显式选择优先 |
+| **推荐要有理由** | `--recommend` / 问诊单的 `recommend_reason` 会列出命中的题材词；把推荐说给用户听，但用户不同意就按用户的来——不看理由直接默认等于替用户拍板 |
 | **明亮活泼是默认** | 任何题材（科普、纪录片、宣传片、动画短片、复盘汇报）的气质题推荐项都是「明亮活泼」，且它排在第一位 |
 | **首个候选必亮** | 没点名气质时，提案的候选 A 固定落到明亮活泼档；其余候选保留完整空间（含暗色）——"优先明亮"不等于"只有一种口味" |
 | **没答完不许出方案** | 首次 `propose.py` 会因问诊未完成而失败，并打印"怎么问 / 怎么答 / 怎么定稿"三步 |
 | **逃生口留痕** | 确实不需要问（批量补渲、已在别处答过）用 `propose.py --no-intake`，提案里会记 `intake.status = bypassed`，事后查得到 |
-| **回答进 brief** | 答案合成 `intake.brief.txt`，再喂给 `--brief`：气质→tone、声线→voice、时长→duration_target，`不要 X` 进 avoid |
+| **回答进 brief** | 答案合成 `intake.brief.txt`，再喂给 `--brief`：气质→tone、声线→voice、时长→duration_target，`不要 X` 进 avoid。**制作方式不进 brief**：它是产线路由，写进去只会污染 `propose._brief_of` 的关键词解析 |
 
 有用户直接说"你替我定"时：**仍然先问诊**（用推荐项作为各题默认，只让用户确认一次），
-再出提案；不要因为"用户没意见"就把 7 个决策全部改成程序默认值。
+再出提案；不要因为"用户没意见"就把 8 个决策全部改成程序默认值。
 
 ## 0.5 【铁律】先提案，再出片（不论用户是否要求）
 
@@ -1165,7 +1177,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 | 你要干的事 | 用哪个 |
 |---|---|
-| 出片前把 7 个问题问完 | `scripts/intake.py` |
+| 出片前把 8 个问题问完（含制作方式与产线推荐） | `scripts/intake.py` |
 | 出候选 / 冻结设计 / 换方向重出 / 手改设计后 `--adopt` 重绑指纹 | `scripts/propose.py` |
 | 排轴 / 渲染 / 混音 / 质检 / 批量 / 断点续跑 | `scripts/render.py`（14 个 stage） |
 | 评候选静帧"好不好看"（离线打分 + 可选 VLM） | `scripts/critic.py` |

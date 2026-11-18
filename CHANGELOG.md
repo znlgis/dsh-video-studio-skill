@@ -6,6 +6,49 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.4.0 — 问诊新增「制作方式」：自己画 / 网上素材剪辑 / 两者结合，按题材给推荐（2026-11-19）
+
+> 起因是「给用户的提问里增加一个问题，明确视频制作方式，并能根据要做视频的内容推荐用哪种」。
+> 之前的问诊 7 题问到了题材、时长、气质、画幅、声线、配乐、补充要求，**唯独没问"画面从哪来"**——
+> 而这一条决定的不是外观，是**产线**：自己画走 `render.py`（design.json），网上素材剪辑走
+> `footage.py`（footage.json）。这条走错，后面每一步都是白做，而且往往到成片才暴露。
+
+### 新增：问诊第 2 题「制作方式」（mode，必答）
+
+| 项 | 行为 |
+|---|---|
+| 选项 | `draw` 自己画（代码逐帧生成）/ `footage` 网上素材剪辑 / `hybrid` 两者结合 / `auto` 你替我挑 |
+| 位置 | 紧跟在「题材」之后：推荐值由题材推出来，且它决定后续走哪条产线 |
+| 推荐逻辑 | `intake.recommend_mode()` 按题材关键词计数：真实影像词（纪录片/实拍/历史影像/人物…）→ footage；数据/原理/抽象词（数据/图表/科普/算法…）→ draw；两边命中且差距不到 2 倍 → hybrid；都没命中 → draw（零素材线兜底）。理由里列出命中的词，可解释、不联网；**否定句不计入**（「不要真实影像」里的影像词不会被算成 footage） |
+| 推荐怎么给用户 | `--questions --json --topic "<题材>"` 时，mode 题带 `recommended` + `recommend_reason`；也可单独跑 `--recommend "题材"`。agent 把推荐与理由说给用户听，但**用户可以不同意** |
+| 落地 | `--finalize` 时 `auto` 解析成具体产线，写进 `intake.json` 的 `mode`（chosen/resolved/recommended/route/how），并打印下一步命令：draw→`propose.py`、footage→`footage.py`、hybrid→两条线按段拼（明确"没有一键 hybrid 命令"） |
+| 不污染 brief | 制作方式是**路由**不是外观约束：`intake.brief.txt` 不含它，避免"素材/自己画"污染 `propose._brief_of` 的 must_have 解析 |
+| 旧问诊单 | schema 1 → 2：读到旧文件会打印"新增制作方式题，请补问一次"；再跑 `--finalize` 因缺 mode 被拦（不静默补默认值） |
+
+### 联动
+
+- `propose.py`：读问诊的 `mode` 并记进 `proposal.intake.mode`；`mode=footage` 时明确提示
+  「提案层不适用」，但仍允许跑（hybrid 的图文叠加层需要用设计层）。不失败——素材线本来就该走 footage.py。
+  旧问诊单（schema 1，缺 mode）不拦但要提示补问，`proposal.intake.mode` 会记成空。
+- `selfcheck` 第 70 条扩展：8 题固定、制作方式必答且默认 auto、推荐值随题材变化（footage/draw/hybrid 三例）、
+  auto 按题材落地、素材线 `--finalize` 给 `footage.py` 且 `propose.py` 输出"提案层不适用"、brief 不含制作方式词。
+  用例总数不变（仍是 85 条；本次是在第 70 条里加断言）。
+- 文档同步：SKILL.md §0.1（分诊表由问诊第 2 题接管）、§0.4（8 题 + 制作方式规则）、§10；
+  `references/proposal.md` §1.5、`references/footage.md` §0、`references/script-index.md`、README 最短路径、`studio.py` 门面文案。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `intake.py --questions --json --topic "中国高铁十年纪录片"` | 8 题；mode 题 `recommended=footage`，带理由 |
+| `--recommend` 四例 | 真实影像→footage / 数据图表→draw / 混合题材→hybrid / 无线索→draw |
+| `--finalize`（auto + 纪录片题材） | `mode.resolved=footage`，下一步给 `footage.py`，并写明"提案层不适用" |
+| 否定句 | 「不要真实影像，纯数据科普」→ draw（影像词被否定，不计入）；「不要数据图表，用真实影像讲城市」→ footage |
+| `--finalize`（auto + 数据科普题材） | `mode.resolved=draw`，下一步给 `propose.py` |
+| brief 纯净性 | `intake.brief.txt` 不含"自己画/素材/结合"等制作方式词 |
+| `python selfcheck.py` | 第 70 条通过（8 题 / 推荐 / 落地 / 素材线路由 / brief 纯净） |
+| `python tools/ci_check.py` | 14 项全绿（含文档路径、断言条数口径） |
+
 ## 2.3.0 — 适配 DSH 0.2.x：技能注册改用 registerProvider（修「插件装了但技能没挂上」）（2026-11-19）
 
 > 起因是「适配 DSH 最新版本」。本机 DSH 是 **0.2.2-rc.5**，实测本插件（v2.2.0 与已安装的 v2.1.1）
