@@ -875,6 +875,7 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
     assigned = _assign_text(scenes, segments)
     per_line, missing, offsets, offset_ref = [], [], {}, {}
     offset_straddle = {}
+    offset_uncertain = {}
     offset_ref_extra = {}
     tot_ref, tot_hit = 0, 0
     lost_counter = Counter()                            # 全片"ref 有、ASR 没对上"的字符
@@ -936,7 +937,28 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
             seg_start = got.get("seg_start")
             straddle = (seg_start is not None
                         and float(seg_start) < expected - float(offset_warn) - 1e-9)
-            if straddle:
+            # 第二种不可判：期望开口时刻**没有任何 ASR 片段覆盖**，而本段首个片段从更晚开始。
+            # 意思是 ASR 把这一段开头的弱起/气口判成了非语音，片段起点不能代表开口时刻；
+            # 此时「first_t - 期望」既可能是真的晚开，也可能是 ASR 边界切错。
+            # 实测 l21：raw +0.70s（片段从 166.80 起，而期望 166.10），但混音能量在 166.20 就起跳了。
+            # 判据要求「期望时刻没被覆盖 + 首个片段晚于期望 + 晚出阈值以上」，三者缺一不可。
+            covered = any(float(sg["start"]) <= expected < float(sg["end"])
+                          for sg in segments or ()
+                          if sg.get("start") is not None and sg.get("end") is not None)
+            # 只把「缺口不大」的算不可判：缺口 <= 2 倍阈值时，更像弱起被切掉；
+            # 缺口更大（比如整句晚了 1.7s）说明是真错位，必须报出来。
+            late_onset = (not covered
+                          and float(got["first_t"]) > expected + float(offset_warn)
+                          and float(got["first_t"]) - expected
+                          <= float(offset_warn) * 3.0 + 1e-9)
+            if late_onset:
+                offset_uncertain[sc["id"]] = {
+                    "first_t": round(float(got["first_t"]), 3),
+                    "seg_start": round(float(seg_start), 3),
+                    "expected": round(float(expected), 3),
+                    "reason": "ASR 首字晚于片段起点，边界不可信"}
+                offset_ref[sc["id"]] = "片段边界不清晰（偏移不可判）"
+            elif straddle:
                 offset_straddle[sc["id"]] = {"first_t": round(float(got["first_t"]), 3),
                                               "seg_start": round(float(seg_start), 3),
                                               "expected": round(float(expected), 3)}
@@ -957,6 +979,12 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
             warnings.append("段落 %s 的字符召回只有 %.2f（%d/%d），疑似丢句/错词：ASR=%r"
                             % (lid, row["recall"], row["hit_chars"], row["ref_chars"],
                                row["asr_text"][:60]))
+    # 判不了的段落要**说出来**，不能静默丢：观众若真觉得某句对不上，
+    # 这条提示能直接告诉他是哪几句没法自动判。
+    if offset_uncertain:
+        warnings.append("这些段落的偏移无法自动判定（ASR 在期望开口处没有片段覆盖，"
+                        "片段边界不可信）：%s —— 需人工试听确认"
+                        % "、".join(sorted(offset_uncertain)[:8]))
     for lid, dt in sorted(offsets.items()):
         if abs(float(dt)) > float(offset_warn) + 1e-9:
             warnings.append("段落 %s 的旁白首字比 timeline 的 %s 偏 %+.2fs（阈值 ±%.2fs）："
@@ -1000,6 +1028,7 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
         "per_line": per_line, "missing_lines": missing,
         "offsets": offsets, "offset_ref": offset_ref, "offset_warn_s": float(offset_warn),
         "offset_straddle": offset_straddle,
+        "offset_uncertain": offset_uncertain,
         "gate": {"id": "asr", "title": "ASR 回读（原稿 vs 成片旁白）",
                  "status": status, "detail": detail},
         "warnings": warnings, "errors": errors,

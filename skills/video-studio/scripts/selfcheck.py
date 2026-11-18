@@ -3145,6 +3145,104 @@ def t_asr_offset_straddle():
         "真实的不同步被一起放过了：%r" % (j2["offsets"],)
     assert [w for w in j2["warnings"] if "偏" in w], "真实不同步没报警告"
     return "跨句伪偏移被剔除并留痕；真实不同步照旧报"
+
+def t_portrait_type_scale_and_hold():
+    """84 竖屏字号档与逐类停留：字号不是几何缩放，停留按构图类型分配。
+
+    两件事都只作用于竖屏，横屏必须零变化（既有横屏片时长与像素都不许动）：
+      ① 字号档：竖屏 type_scale=0.68，而不是 W/1920=0.5625——手机上纯几何缩放的正文
+         只有 ~26px，小于舒适阅读尺寸；档位定义单一真源在 layoutkit 的 profile 里；
+      ② 逐类停留：chart/list/compare/process 这类「要读」的构图多停，hero/statement/quote
+         不停（句子本身已经给了时间），总量有上限（片长的 6%）防止把长片拖慢。
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    assets = os.path.abspath(os.path.join(here, os.pardir, "assets"))
+    probe = os.path.join(tempfile.mkdtemp(prefix="vs-portrait4-"), "_probe.py")
+    body = chr(10).join([
+        "import json, os, sys",
+        "sys.path.insert(0, %r)" % here,
+        "sys.path.insert(0, %r)" % assets,
+        "import layoutkit as LK",
+        "print(json.dumps({'canvas': [LK.W, LK.H], 'type_scale': LK.TYPE_SCALE,",
+        "                    'prof': LK.PROFILE.get('key')}, ensure_ascii=False))",
+    ])
+    io.open(probe, "w", encoding="utf-8").write(body)
+
+    def _run(env_extra):
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env.pop("VIDEO_STUDIO_LAYOUT", None)
+        env.update(env_extra or {})
+        r = subprocess.run([sys.executable, probe], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env, timeout=120)
+        assert r.returncode == 0, "字号档探针失败：%s" % (r.stderr or r.stdout)[-300:]
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    land = _run({})
+    port = _run({"VIDEO_STUDIO_LAYOUT": "portrait-9x16"})
+    assert land["canvas"] == [1920, 1080] and abs(land["type_scale"] - 1.0) < 1e-6, \
+        "横屏字号档必须是 1.0：%r" % (land,)
+    assert port["canvas"] == [1080, 1920], "竖屏画布不对：%r" % (port,)
+    assert abs(port["type_scale"] - 0.68) < 1e-6, \
+        "竖屏字号档变了（文档写 0.68）：%r" % (port["type_scale"],)
+    # 竖屏字号必须**大于**纯几何缩放 W/1920（否则等于没做这个档位）
+    geo = float(port["canvas"][0]) / 1920.0
+    assert port["type_scale"] > geo + 1e-6, \
+        "竖屏字号档 %.3f 不大于几何缩放 %.3f，等于没有单独标定" % (port["type_scale"], geo)
+
+    # 逐类停留：用一个小 timeline 直接调 render._apply_type_hold（横屏必须原样返回）
+    import render as R
+    def _mk()->dict:
+        return {"fps": 30, "total": 20.0, "frames": 600, "scenes": [
+            {"id": "a", "start": 0.0, "end": 5.0, "voice_start": 0.5, "voice_end": 4.5,
+             "scene_type": "chart"},
+            {"id": "b", "start": 5.0, "end": 10.0, "voice_start": 5.5, "voice_end": 9.5,
+             "scene_type": "hero"},
+        ]}
+
+    land_tl = R._apply_type_hold(_mk(), {}, {"legacy": False})
+    assert land_tl["total"] == 20.0 and "type_hold" not in land_tl, \
+        "横屏被逐类停留改了：%r" % (land_tl.get("type_hold"),)
+    return "横屏 1.0 / 竖屏 0.68（大于几何缩放 %.3f）；横屏 timeline 未被逐类停留改动" % geo
+
+def t_asr_offset_uncertain():
+    """85 ASR 偏移：ASR 片段在期望开口处没有覆盖 -> 判「不可判」并说出来。
+
+    实测事故（第二现场）：竖屏片重建时间轴后 l21 报 `+0.70s`。查下来 ASR 首个片段从
+    166.80 开始，而期望开口是 166.10——**缺口 0.7s 里混音是有声音的**（实测能量在
+    166.20 起跳），是 ASR 把弱起判成了非语音。这种既不是「真错位」也不是「跨句尾音」，
+    官方口径是「自动判不了」：不进 offsets 报超差，但要有一条聚合 warning 点名，
+    让人去人工试听——静默丢弃等于骗自己。
+
+    同时**真错位必须照旧报**：缺口 > 3 倍阈值（例如整句晚 1.7s）时不是弱起，是错位。
+    """
+    import qaasr
+    scenes = [
+        {"id": "a", "start": 0.0, "end": 5.0, "voice_start": 0.5, "voice_end": 4.5,
+         "text": "第一句旁白"},
+        {"id": "b", "start": 5.0, "end": 10.0, "voice_start": 5.5, "voice_end": 9.8,
+         "text": "第二句旁白"},
+    ]
+    # 弱起被切：期望 5.5 没有片段覆盖，首个片段 5.9 才开始（缺口 0.4s < 3x0.35）
+    weak = [
+        {"start": 0.5, "end": 4.9, "text": "第一句旁白"},
+        {"start": 5.9, "end": 9.8, "text": "第二句旁白", "first_word_t": 5.9},
+    ]
+    j = qaasr._judge(scenes, weak)
+    assert "b" not in j["offsets"], "弱起被切不该报超差：%r" % (j["offsets"],)
+    assert "b" in (j.get("offset_uncertain") or {}), "弱起被切应记为不可判并留痕"
+    assert any("无法自动判定" in w for w in j["warnings"]), \
+        "不可判的段落必须有聚合 warning 点名（不能静默丢弃）"
+    # 真错位：缺口 1.7s > 3x0.35，必须报
+    real = [
+        {"start": 0.5, "end": 4.9, "text": "第一句旁白"},
+        {"start": 7.2, "end": 9.8, "text": "第二句旁白", "first_word_t": 7.2},
+    ]
+    j2 = qaasr._judge(scenes, real)
+    assert "b" in j2["offsets"] and abs(float(j2["offsets"]["b"])) > 1.0, \
+        "真错位被当成不可判放过了：%r" % (j2["offsets"],)
+    assert any("偏" in w for w in j2["warnings"]), "真错位必须报警告"
+    return "弱起判不可判并聚合点名；1.7s 真错位仍报"
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3229,6 +3327,8 @@ CASES = [
     ("81 竖屏节奏与三类原生构图（stat/quote/chapter）", t_portrait_pacing_and_drawers),
     ("82 竖屏纵向重排（hero/statement/list/outro 不是缩放）", t_portrait_vertical_layout),
     ("83 ASR 偏移：跨句片段伪偏移被识别", t_asr_offset_straddle),
+    ("84 竖屏字号档与逐类停留（横屏零变化）", t_portrait_type_scale_and_hold),
+    ("85 ASR 偏移不可判（弱起被切 vs 真错位）", t_asr_offset_uncertain),
 ]
 
 

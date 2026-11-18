@@ -48,6 +48,8 @@ LANDSCAPE = {
     "sub_band": (180, 872, 1740, 1030),
     # 单行字幕中文字数上限（超过就折行，折行会改变排版本，属于版式契约）
     "sub_max_chars": 24,
+    # 字号档：横屏按 1920 宽标定，1.0 = 原样。
+    "type_scale": 1.0,
 }
 
 # ---------------------------------------------------------------- 竖屏 9:16（experimental）
@@ -60,6 +62,11 @@ PORTRAIT = {
     "safe": (65, 120, 1015, 1610),
     "sub_band": (80, 1450, 1000, 1616),
     "sub_max_chars": 14,      # 竖屏一行装不下 24 个中文字，14 字接近满行
+    # 字号档（竖屏）：竖屏不是"把横屏缩小 0.56 倍"，而是**换一个观看距离**。
+    # 手机上 1920px 高的画面按 12cm 算，观看 30cm，角分辨率比横屏电视/显示器更细；
+    # 纯按 W/1920=0.5625 缩字会让正文在手机上小于舒适阅读尺寸（实测 46px 的正文
+    # 在 1080 宽里只剩 26px）。0.68 是首轮标定：比几何缩放大约 21%，而不是直接拉满。
+    "type_scale": 0.68,
 }
 
 _BY_KEY = {p["key"]: p for p in (LANDSCAPE, PORTRAIT)}
@@ -90,6 +97,8 @@ H = int(PROFILE["h"])
 SAFE = tuple(PROFILE["safe"])
 SUB_BAND = tuple(PROFILE["sub_band"])
 SUB_MAX_CHARS = int(PROFILE["sub_max_chars"])
+# 字号档：竖屏比几何缩放略大（见 profile 注释）。scenes 的 _font 读它。
+TYPE_SCALE = float(PROFILE.get("type_scale", 1.0))
 
 
 def profile(key=None):

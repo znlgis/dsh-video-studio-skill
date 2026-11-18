@@ -154,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；83 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；85 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -783,7 +783,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（83 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（85 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -994,7 +994,9 @@ S.event(0.62, 'ring',   {});           // 纯装饰事件：用通用名，不�
 | 内部构图 | 跟随 `layoutkit` 的 profile：**横屏 1920x1080 / 竖屏 1080x1920**；输出更小时在编码阶段用 ffmpeg `scale`（lanczos）下采样（`FrameSink(out_w=, out_h=)`） |
 | 允许的输出尺寸 | 横屏 1920x1080 / 1280x720 / 960x540（2560x1440 在"允许列表"里但**会被上采样规则拒掉**）；竖屏 1080x1920 / 720x1280 / 540x960 |
 | 允许的 fps | 24 / 25 / 30 / 50 / 60 |
-| 竖屏 | **支持（experimental）**：加 `--layout portrait`（render / propose / filmcheck 都有这个参数），画布切到 1080x1920，安全区与字幕带随之重算。版式骨架与 compare/process/chart 已竖屏原生；**未按竖屏复核的只有排版节奏**（`hold` / 段落最小长度） |
+| 竖屏 | **支持（experimental）**：加 `--layout portrait`（render / propose / filmcheck 都有这个参数），画布切到 1080x1920，安全区与字幕带随之重算。10 类构图**全部竖屏原生**（stat/quote/chapter/hero/statement/list/outro 纵向重排，compare 上下、process 竖向轴、chart 竖排条） |
+| 竖屏字号 | `layoutkit.TYPE_SCALE = 0.68`（横屏 1.0）：竖屏不是纯几何缩放（0.5625），手机上正文会小于舒适尺寸。档位定义在 profile 里，`scenes._font` 只读值 |
+| 竖屏逐类停留 | `render._apply_type_hold`：chart +0.45 / compare +0.40 / process +0.40 / list +0.30 / stat +0.25 / chapter +0.15 / outro +0.15，hero/statement/quote 不加；总增量上限片长 6%。段变长会整体后移后续段并重算 total/frames。横屏零变化 |
 | 竖屏输出比例 | 非 9:16 的输出**直接报错**；横屏片与竖屏片都只能同比例下采样 |
 | 上采样 | **直接报错**。输出大于当前画布 = 把 1080p 包装成"更高分辨率"（假 4K）；要真高清得改内部构图 |
 | 非法 fps | **直接报错**（报错里列出可用值） |
@@ -1127,7 +1129,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
 | 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
 | 浏览器逐帧渲染 | `webengine.py` |
-| 回归自检（83 条断言） | `selfcheck.py` |
+| 回归自检（85 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
@@ -1182,7 +1184,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 83 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 85 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

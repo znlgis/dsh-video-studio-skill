@@ -77,7 +77,12 @@
    竖屏 `pacing` 的 lead / tail / min_dur / hold 统一乘 1.08，横屏系数恒 1.0（selfcheck 第 81 条守着）。
    **1.08 是首轮校准值，不是推导出来的真值**——我先按安全区面积比开方算过，得到 0.93（方向相反），
    说明几何推导在这里不成立。要调就调 `PORTRAIT_PACE` 这一个数，或在 film.json 里用更高的 hold 覆盖。
-   仍未做的是「逐类构图按内容密度微调」（chart 段和 quote 段该不该同一个停顿，还没测）。
+   **逐类构图差异化停留已补**（`render._apply_type_hold`，只作用于竖屏）：chart +0.45 /
+   compare +0.40 / process +0.40 / list +0.30 / stat +0.25 / chapter +0.15 / outro +0.15，
+   hero / statement / quote 不加；总增量上限为片长的 6%。段变长时会**整体后移后续段**并重算
+   total/frames（只改 end 会让段重叠）。数值是按「要读多少信息」排的首轮值，没有完播率回归。
+   **竖屏字号档也单独标定了**：`layoutkit.TYPE_SCALE = 0.68`（横屏 1.0），依据是「大于纯几何
+   缩放 0.5625 且 10 类构图 `_fit_px` 钳位 0 次」，不是真人阅读测试；要调就调这一个数。
    （`PORTRAIT_COST_FACTOR` 已实测回填，不再是估值。）
 3. `list` 在竖屏已是单列（`panel_w` 920 只放得下一列），可确认；`stat` / `quote` / `chapter`
    已改为**竖屏原生绘制器**（纵向分层）；`hero` / `statement` / `outro` 的**纵向分布**也已重排

@@ -48,7 +48,7 @@ if __package__ in (None, ""):
 # 其它常量），但它是**刻意 re-export** 的：selfcheck 第 73 条要把 filmkit 导出的
 # 这几个画布常量逐个与 layoutkit 比对，防止有人把数字写回 filmkit 造成两处漂移。
 # 所以 lint 的 F401 在这里是误报——删掉它会让第 73 条直接 AttributeError。
-from layoutkit import H, SAFE, SUB_BAND, SUB_MAX_CHARS, W  # noqa: E402,F401
+from layoutkit import H, SAFE, SUB_BAND, SUB_MAX_CHARS, TYPE_SCALE, W  # noqa: E402,F401
 
 FPS = 30
 SR = 48000

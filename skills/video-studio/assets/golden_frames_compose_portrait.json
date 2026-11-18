@@ -33,15 +33,15 @@
   "platform": "Windows 11"
  },
  "inputs": {
-  "scenes_sha1": "26f3159b330a3b3c2c03a2b5de221f6e9d5ac476",
-  "filmkit_sha1": "e60148a5fd9a78b3a43f5148cf1d959e8a6bb90b",
+  "scenes_sha1": "79da254233cbcdd818b8ac9be626fb3693e65cc8",
+  "filmkit_sha1": "e3b6492065df73e6ba53b38454634ac06790a70d",
   "stylekit_sha1": "daf7d5af499287fdcf2b8ab969f399494d095100",
   "design_sha1": "38af167000934ff80b0ea10d82b135050ac91a33"
  },
  "frames": [
   {
    "name": "hero",
-   "sha256": "332a02bfa5901d3d449b75b715f6de1df108eabdd4fafc26901134e5086bfb87",
+   "sha256": "2dd1341c384e6e4363e92c2d02ad1a63a1fee4a8e9a67c823ce0a64c0a7c4432",
    "size": [
     1080,
     1920
@@ -49,7 +49,7 @@
   },
   {
    "name": "statement",
-   "sha256": "1374eaae35860546db670ece306846eeefb941ef4aa7511e43245c1cef1ca5fe",
+   "sha256": "e4aa4335f15849251f5131df9d88b653146afc37ac2b2cfaf975cfd89978af23",
    "size": [
     1080,
     1920
@@ -57,7 +57,7 @@
   },
   {
    "name": "list",
-   "sha256": "6ac5731322c07e221eb2ebfbfbeec69a08e3e848a789710dad2c302a14922fa1",
+   "sha256": "6f73954af8a61c52140f3bb49ab466d3f01db5fa33fade45daaa98460df38d14",
    "size": [
     1080,
     1920
@@ -65,7 +65,7 @@
   },
   {
    "name": "stat",
-   "sha256": "0f295fd7ea7246ba0a50fc721e8e755e0ca60ef1530e1211b8bae3ab4821f108",
+   "sha256": "2a7268012e04907c0ec4f0f103c4d6fff33a5c8e7e7f36fc9682e31944f4f2d7",
    "size": [
     1080,
     1920
@@ -73,7 +73,7 @@
   },
   {
    "name": "compare",
-   "sha256": "2d57ec56b34efabfceb4567fae200b4806a7db0eda2ead110d5631951f5b66b2",
+   "sha256": "bb8b39650ff0e84d9ab67bdf83c2e24427328297a3e036faa53a7dcbf6f65b72",
    "size": [
     1080,
     1920
@@ -81,7 +81,7 @@
   },
   {
    "name": "process",
-   "sha256": "88409cab77e3070125fc1cb1e7629ec914aebf9efc49aed026333c6804eec30c",
+   "sha256": "5da04a2647e1d25a38d35f00d7272f9a1a7335f03249201be580bd65e689851c",
    "size": [
     1080,
     1920
@@ -89,7 +89,7 @@
   },
   {
    "name": "quote",
-   "sha256": "96da6afa55098663b088c251fe8eccc25dce54d975966f2b72d992959d8f2f1d",
+   "sha256": "601f9f32e562835ca70becd2090707f4868d5201a5aa43556a0c0e62368a4d91",
    "size": [
     1080,
     1920
@@ -97,7 +97,7 @@
   },
   {
    "name": "chapter",
-   "sha256": "ec322e255dd68dc5cca0dbadf348a6390ed237fff58f8910fa0462f71e16ae9d",
+   "sha256": "007ee5665f3d76a4ad25e1ad4df81ef8738b5a8c54dd23b031cf0e9cb66c1999",
    "size": [
     1080,
     1920
@@ -105,7 +105,7 @@
   },
   {
    "name": "chart",
-   "sha256": "e316ab037eebbdc0daf06c97a63b4ac4358148bf1d3e93b6fd2ddd8d10eab83d",
+   "sha256": "8639b362232fbc0c4ac4c1741943ea88499cd3c89d9c51f030fb2ab121efca9f",
    "size": [
     1080,
     1920
@@ -113,7 +113,7 @@
   },
   {
    "name": "outro",
-   "sha256": "0de7bba9ae147da9c31ce20b356b31453a37347d25104df8d3baa6253f40f74f",
+   "sha256": "485cb20bb39ef212018184d391903449f214450ab8b210a7a68081f2ee7ddf05",
    "size": [
     1080,
     1920

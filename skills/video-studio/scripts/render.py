@@ -693,6 +693,8 @@ def st_layout(script, work, lines=None):
                       % (r["id"], r["kind"], r["type"], r["variant"], r["decor"],
                          "；".join(r["reason"][:2]) or "-"))
             tl["storyboard"] = {"type_counts": sb["type_counts"]}
+    # ---- 竖屏逐类停留：必须在 plan_scenes 之后（要读 scene_type）、落盘之前 ----
+    tl = _apply_type_hold(tl, script, plan)
     json.dump(tl, open(os.path.join(work, "timeline.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
@@ -744,6 +746,108 @@ def st_layout(script, work, lines=None):
             print("   [WARN] " + head
                   + "\n          想变长：加台词或调大 film.json 的 hold / lead / tail；"
                   + "\n          想变短：删减台词（hold 只会加留白，不会缩短旁白）。")
+    return tl
+
+
+# ---------------------------------------------------------------- 竖屏逐类停留
+# 为什么按构图类型再分配停留：chart 段要看清 6 根条与标签，hero 段只要认出标题，
+# 统一 pace 只能兼顾平均，结果必然是"数据段没看清、金句段干等"。
+# 只作用于竖屏：横屏恒不加（既有横屏片的时长与 golden_frames 都不许变）。
+_PORTRAIT_TYPE_HOLD = {
+    "chart": 0.45, "list": 0.30, "compare": 0.40, "process": 0.40,
+    "stat": 0.25, "chapter": 0.15, "outro": 0.15,
+    "hero": 0.0, "statement": 0.0, "quote": 0.0,
+}
+
+
+def _shift_scene(scene, delta):
+    """把一个 scene 上所有**绝对时间**字段整体平移 delta（秒）。"""
+    if not delta:
+        return
+    for key in ("start", "end", "voice_start", "voice_end"):
+        v = scene.get(key)
+        if v is not None:
+            scene[key] = round(float(v) + delta, 4)
+    was = scene.get("words_abs")
+    if isinstance(was, list) and was:
+        out = []
+        for w in was:
+            if not isinstance(w, dict):
+                out.append(w)
+                continue
+            nw = dict(w)
+            for key in ("start", "end"):
+                if nw.get(key) is not None:
+                    nw[key] = round(float(nw[key]) + delta, 4)
+            out.append(nw)
+        scene["words_abs"] = out
+
+
+def _apply_type_hold(tl, script, plan):
+    """竖屏：按 scene_type 追加段尾停留，并把后续段整体后移。横屏原样返回。
+
+    为什么不是"给每段单独改 end 就完事"：段是首尾相接的时间轴，第 i 段变长后，
+    第 i+1 段起的**所有**绝对时间（start/end/voice_start/voice_end/words_abs）
+    都得跟着后移，否则段会互相重叠、旁白与画面直接错位。
+    同时更新 total / frames —— 它们是 mux 与 QA 的时长基准。
+
+    film.json 显式写了 hold 时**不加码**：用户定的停留就是他的意思，不该被悄悄改大。
+    """
+    from layoutkit import W as _W, H as _H        # noqa: PLC0415 —— 只读画布判断
+    if int(_H) <= int(_W):
+        return tl                                  # 横屏：零改动
+    # 用户显式写的 hold 与逐类停留**叠加**：两者解决的不是同一件事——
+    # hold 是「所有段都多停一会」，逐类停留是「数据与对照多停、金句不用」。
+    # 叠加后总增量有上限（_MAX_TYPE_HOLD_EXTRA），避免把片子拖成等得着急。
+    _ = script.get("hold")          # 记一笔：这里只是不再因它早退
+    scenes = tl.get("scenes") or []
+    if not scenes:
+        return tl
+    shift = 0.0
+    applied = {}
+    for s in scenes:
+        if shift:
+            _shift_scene(s, shift)
+        stype = str(s.get("scene_type") or "")
+        extra = float(_PORTRAIT_TYPE_HOLD.get(stype) or 0.0)
+        if extra > 0:
+            s["end"] = round(float(s["end"]) + extra, 4)
+            s["hold_type"] = round(extra, 3)
+            applied[s["id"]] = (stype, round(extra, 3))
+            shift += extra
+    if not applied:
+        return tl
+    # 上限：逐类停留总共不超过片长的 6%（也至少 3 秒），防止长片被拖成慢节奏。
+    # 为什么给上限：逐类停留是按段累加的，55 段的片子会自动涨到十几秒，
+    # 那时该改的是台词节奏，不是继续加停顿。
+    _base = float(tl.get("total") or 0.0)
+    if _base > 0:
+        _cap = max(3.0, _base * 0.06)
+        if shift > _cap:
+            _k = _cap / shift
+            shift = 0.0
+            for s in scenes:
+                h = float(s.get("hold_type") or 0.0)
+                if h > 0:
+                    s["hold_type"] = round(h * _k, 3)
+                    s["end"] = round(float(s["end"]) - h + h * _k, 4)
+            shift = round(sum(float(s.get("hold_type") or 0.0) for s in scenes), 3)
+            # 重排一次，保持首尾相接
+            _t = 0.0
+            for s in scenes:
+                _dur = float(s["end"]) - float(s["start"])
+                s["start"] = round(_t, 4)
+                s["end"] = round(_t + _dur, 4)
+                _t = float(s["end"])
+            tl["total"] = round(_t, 4)
+    tl["total"] = round(float(scenes[-1]["end"]), 4)
+    fps = int(tl.get("fps") or 30)
+    tl["frames"] = int(round(tl["total"] * fps))
+    tl["type_hold"] = {"applied": len(applied), "extra_s": round(shift, 2),
+                       "by_id": {k: v[1] for k, v in applied.items()}}
+    print("   竖屏逐类停留: %d 段 +%.2fs（%s）"
+          % (len(applied), shift,
+             "/".join(sorted({v[0] for v in applied.values()}))))
     return tl
 
 
