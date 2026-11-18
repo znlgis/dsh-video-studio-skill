@@ -153,7 +153,8 @@ FONT_STACKS = {
 THEME_COLOR_KEYS = ("bg", "bg2", "surface", "ink", "muted", "dim",
                     "accent", "accent2", "good", "bad", "rule")
 
-# 画布只收 16:9 横屏：宽高都必须偶数（H.264 yuv420p 要求），宽高比误差 ≤ 1e-3。
+# 画布只收 16:9 横屏或 9:16 竖屏（与 layoutkit 的两套 profile 一致）：宽高都必须偶数
+# （H.264 yuv420p 要求），宽高比误差 ≤ 1e-3；其它比例（4:3 等）仍然 fail-closed。
 _ASPECT_TOL = 1e-3
 _MIN_CANVAS = (320, 180)
 
@@ -334,7 +335,9 @@ def normalize_style(style, *, width=W, height=H, fps=None):
         "theme_label": theme.get("label") or extra.get("style_name") or "",
         "legacy": bool(extra.get("legacy")) if extra.get("legacy") is not None else False,
         "dark": bool(dark),
-        "canvas": {"w": w, "h": h, "aspect": "16:9", "fps": fps_val},
+        # aspect 按真实画布写，别恒写 "16:9"：竖屏片（1080x1920）的载荷里写着 16:9
+        # 会让下游按错比例算安全区，且这种不一致在 payload 里是"看得见的假话"。
+        "canvas": {"w": w, "h": h, "aspect": "9:16" if h > w else "16:9", "fps": fps_val},
         "theme": colors,
         "typography": {
             "family": family,
@@ -506,7 +509,8 @@ async def open_page(pw, url, width=W, height=H, log=False, deterministic=None,
 
     风格注入：style 非 None 时在 page.goto **之前** add_init_script 注入 window.__STYLE__；
     style=None 时**不调用 add_init_script**，页面里不存在 __STYLE__（默认外观逐字节不变）。
-    width/height 一律先过 _validate_canvas（16:9 横屏偶数，否则 raise）；fps 只用于写进
+    width/height 一律先过 _validate_canvas（16:9 横屏 / 9:16 竖屏且偶数，否则 raise）；
+    fps 只用于写进
     payload（None = 不让 payload 约束帧率，页面 window.FPS 才是真值）。
     """
     global _BROWSER_KIND
@@ -1101,7 +1105,8 @@ def render_full(html_path, out_mp4, duration, *, workers=2, chunk_s=30.0,
 
     style 非 None 时整片跟随风格包（每个 worker 都在页面加载前注入同一份
     __STYLE__），块目录名会带尺寸 + style 指纹后缀，**换风格不会复用旧块**；
-    width/height 只收 16:9 横屏偶数（_validate_canvas），fps 非 None 时要求页面帧率一致。
+    width/height 只收 16:9 横屏 / 9:16 竖屏的偶数尺寸（_validate_canvas），fps 非 None
+    时要求页面帧率一致。
     """
     _setup_stdout()
     return asyncio.run(_render_full_async(
@@ -1590,6 +1595,22 @@ async def _selftest_style_probe() -> dict:
                 await browser.close()
             except Exception:
                 pass
+
+        # ④ 竖屏 1080x1920 + style：_validate_canvas 自 v1.8.5 起就放行 9:16，但 engine.js
+        # 当时仍只认 16:9 —— 上游同意、页面抛错，竖屏片在浏览器路线必炸且报错指向"画布比例"，
+        # 看起来像用户传错参数。这条用例把两边绑在一起：注入竖屏画布必须真的建出 1080x1920。
+        browser, page, cdp = await open_page(pw, url, 1080, 1920, style=_SELFTEST_STYLE)
+        try:
+            out["portrait_canvas"] = await page.evaluate(
+                "() => [document.getElementById('stage').width, document.getElementById('stage').height]")
+            out["portrait_aspect"] = await page.evaluate(
+                "() => window.__STYLE__ && window.__STYLE__.canvas ? window.__STYLE__.canvas.aspect : null")
+            out["portrait_png"] = await _grab(page, cdp, 45)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
     return out
 
 
@@ -1794,31 +1815,33 @@ def selftest() -> int:
               "f=45 与 f=46 的 PNG 不同" if probe.get("diff_frames") else (perr or "相邻帧截图相同（时间码没变？）"))
 
         # ---- 画布尺寸 / 风格注入 ----
-        good_sizes, bad_sizes, portrait_msg = [], [], ""
-        for w_, h_ in ((1920, 1080), (1280, 720), (3840, 2160)):
+        # 合法：横屏 16:9 三档 + 竖屏 9:16 两档。这条用例以前断言"1080x1920 必须被拒"，
+        # 而 _validate_canvas 从 v1.8.5 起就接受 9:16（竖屏是正式能力，见 SKILL.md §7.5.1）——
+        # 断言没跟着改，CI 就一直红在这条上，红的不是能力而是过期的期望。
+        # 现在的守则：**两套比例都收、其它比例仍然 fail-closed**，且竖屏报错文案要点名竖屏。
+        good_sizes, bad_sizes = [], []
+        for w_, h_ in ((1920, 1080), (1280, 720), (3840, 2160), (1080, 1920), (720, 1280)):
             try:
                 _validate_canvas(w_, h_)
                 good_sizes.append("%dx%d" % (w_, h_))
             except Exception as exc:            # noqa: BLE001
                 good_sizes.append("意外拒绝 %dx%d（%s）" % (w_, h_, exc))
-        # 竖屏单独测：报错必须点名"竖屏"（用户最常踩的就是 9:16），不能被后面的用例覆盖
-        try:
-            _validate_canvas(1080, 1920)
-            bad_sizes.append("1080x1920 没被拒")
-        except ValueError as exc:
-            if "竖屏" not in str(exc):
-                bad_sizes.append("竖屏报错没点名竖屏：%s" % str(exc)[:80])
-            else:
-                portrait_msg = str(exc)
-        for w_, h_ in ((1920, 1200), (1921, 1080), (0, 1080)):
+        for w_, h_ in ((1920, 1200), (1921, 1080), (1080, 1921), (0, 1080), (-1920, -1080)):
             try:
                 _validate_canvas(w_, h_)
-                bad_sizes.append("%dx%d 没被拒" % (w_, h_))
+                bad_sizes.append("%dx%d 没被拒（%s 不在两套版式内）" % (w_, h_, "非正数"))
             except ValueError:
                 pass
-        check("画布只收 16:9 横屏偶数尺寸（竖屏/4:3/奇数/非正数 fail-closed）",
-              (not bad_sizes) and len(good_sizes) == 3 and "竖屏" in portrait_msg,
-              "；".join(bad_sizes) or ("合法：%s；竖屏报错点名竖屏" % "、".join(good_sizes)))
+        # 4:3 的报错必须把两套合法画幅都说出来（只说"16:9 横屏"会让人以为竖屏不支持）
+        four_three = ""
+        try:
+            _validate_canvas(1920, 1440)
+        except ValueError as exc:
+            four_three = str(exc)
+        check("画布收 16:9 横屏与 9:16 竖屏偶数尺寸（4:3/奇数/非正数 fail-closed）",
+              (not bad_sizes) and len(good_sizes) == 5
+              and "9:16" in four_three and "16:9" in four_three,
+              "；".join(bad_sizes) or ("合法：%s；4:3 报错点名两套画幅" % "、".join(good_sizes)))
 
         # ---- 深审：确定性开关三态 / 文字质检参数与返回值 fail-closed ----
         # 这三条都是纯函数校验（不开浏览器），专门守"门禁看着干净、其实没在查"的三条路径：
@@ -1998,6 +2021,14 @@ def selftest() -> int:
               and _png_size(style_probe.get("small_png")) == (1280, 720),
               serr or ("canvas=%s，PNG=%s"
                        % (style_probe.get("small_canvas"), _png_size(style_probe.get("small_png")))))
+        check("1080x1920 + style 时竖屏画布能建出来（engine.js 与 _validate_canvas 同口径）",
+              (not serr) and style_probe.get("portrait_canvas") == [1080, 1920]
+              and _png_size(style_probe.get("portrait_png")) == (1080, 1920)
+              and style_probe.get("portrait_aspect") == "9:16",
+              serr or ("canvas=%s，PNG=%s，payload.aspect=%s"
+                       % (style_probe.get("portrait_canvas"),
+                          _png_size(style_probe.get("portrait_png")),
+                          style_probe.get("portrait_aspect"))))
 
 
         cues = probe.get("cues") or []
@@ -2197,8 +2228,10 @@ def _add_style_args(p, *, fps=True):
     p.add_argument("--style", default="",
                    help="外观载荷：work/style.json / 内联 JSON；缺省不注入"
                         "（不接受风格 id：内置风格表已删除）")
-    p.add_argument("--width", type=int, default=W, help="画布宽（只收 16:9 横屏偶数，默认 %d）" % W)
-    p.add_argument("--height", type=int, default=H, help="画布高（默认 %d）" % H)
+    p.add_argument("--width", type=int, default=W,
+                   help="画布宽（16:9 横屏 / 9:16 竖屏且偶数，默认 %d）" % W)
+    p.add_argument("--height", type=int, default=H,
+                   help="画布高（与 --width 一起决定画幅；默认 %d）" % H)
     if fps:
         p.add_argument("--fps", type=float, default=None,
                        help="写进 __STYLE__.canvas.fps 的帧率（缺省不约束，页面 window.FPS 为准）")

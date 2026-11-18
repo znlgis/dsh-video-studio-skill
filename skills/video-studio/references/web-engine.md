@@ -111,8 +111,9 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 2. 不读上一帧状态：每帧清空画布、从头按 T 重画（不要写"每帧位移 += speed"这种累加）。
 3. 字体固定：canvas 内 fallback 到 "Microsoft YaHei", sans-serif；文档字体加载完才 ready。
 4. 视口默认 1920x1080、devicePixelRatio=1；画布 CSS 尺寸与分辨率一致，截图才是 1:1 像素。
-   （`style/width/height/fps` 可让画布跟着交付规格走——只允许 **16:9 横屏偶数尺寸**，
-   竖屏 / 4:3 / 奇数在 `open_page` 入口就 raise；尺寸由 `window.__STYLE__.canvas` 注入。）
+   （`style/width/height/fps` 可让画布跟着交付规格走——只允许 **16:9 横屏或 9:16 竖屏的偶数尺寸**，
+   4:3 / 奇数 / 非正数在 `open_page` 入口就 raise；尺寸由 `window.__STYLE__.canvas` 注入，
+   `engine.js` 用同一套白名单，payload 的 `canvas.aspect` 按真实画布写 `16:9` / `9:16`。）
 5. 动画相位只用绝对时间 T（如 Math.sin(T*2)），不要用帧计数差或挂钟。
 6. 离屏缓存（发光精灵）在 boot 阶段建好，之后只读不写。
 7. 质检项：自检里"同一帧两次截图 byte 完全相同"就是这条守则的守门员。
@@ -123,7 +124,7 @@ assets/web/film.js 是 12 秒 / 3 个场景的完整模板：
 |---|---|
 | 1920x1080 PNG 截图 + 页面绘制 | 约 70–120 ms/帧（2 workers 时 70–85 ms/帧均摊） |
 | 12 秒 / 360 帧 / 2 workers / chunk 3s | 28.0 s 出片（约 78 ms/帧均摊） |
-| 自检（**35 项**，含真实无头浏览器、跨会话确定性验证与风格注入断言） | 约 60 s |
+| 自检（**36 项**，含真实无头浏览器、跨会话确定性验证、风格注入与竖屏画布断言） | 约 30–60 s |
 
 调参顺序：先降 workers（1–2 个足够，多了内存涨），再降 chunk_s（块小重渲代价低），
 最后才动 crf/preset（crf 17 / preset slow 是质量档；预览可用 crf 20 / preset veryfast）。

@@ -952,9 +952,13 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
                           and float(got["first_t"]) - expected
                           <= float(offset_warn) * 3.0 + 1e-9)
             if late_onset:
+                # seg_start 可能为 None（片段没有词级时间戳、或首字不是片段起点）。
+                # 这里只是**记录现场**，不能因为少一个可选字段就让整个判分崩掉：
+                # 曾经 round(float(None)) 直接抛 TypeError，门禁变成"跑了就红"而不是"判了有结论"。
                 offset_uncertain[sc["id"]] = {
                     "first_t": round(float(got["first_t"]), 3),
-                    "seg_start": round(float(seg_start), 3),
+                    "seg_start": (round(float(seg_start), 3)
+                                  if seg_start is not None else None),
                     "expected": round(float(expected), 3),
                     "reason": "ASR 首字晚于片段起点，边界不可信"}
                 offset_ref[sc["id"]] = "片段边界不清晰（偏移不可判）"
@@ -965,11 +969,13 @@ def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
                 offset_ref[sc["id"]] = "跨句片段（偏移不可判）"
             else:
                 offsets[sc["id"]] = raw_off
-            # 期望起点用的是哪个字段要如实说：voice_start 缺省（或等于 start）时就是 start
-            offset_ref[sc["id"]] = offset_ref_extra.get(
+            # 期望起点用的是哪个字段要如实说：voice_start 缺省（或等于 start）时就是 start。
+            # setdefault 而不是直接赋值：上面两个"不可判"分支写的是**结论**，这里写的是
+            # **来源**；直接覆盖会让结论静默消失（warnings 里只剩"偏 +0.70s"、"建议试听"没了）。
+            offset_ref.setdefault(sc["id"], offset_ref_extra.get(
                 sc["id"],
                 "voice_start" if vs is not None and abs(float(vs) - float(sc["start"])) > 1e-9
-                else "start")
+                else "start"))
     recall = (tot_hit / float(tot_ref)) if tot_ref else 0.0
     warnings, errors = [], []
 
@@ -1473,18 +1479,55 @@ def selftest() -> int:
         return True, "丢一句 -> fail（recall %.3f），缺句 %s" % (j["recall"], j["missing_lines"])
 
     def c_offset():
+        # 「真的晚了」要被算成偏移并告警。构造要点（1.12 起 offset 判据分三档，用例必须
+        # 明确自己落在哪一档，否则测的只是"某条分支碰巧走到"）：
+        #   ① 片段**覆盖**期望开口时刻（7.40 <= voice_start 7.55 < 11.82），不触发"不可判"；
+        #   ② 片段起点不早于期望 - 阈值，不触发"跨句伪偏移"；
+        #   ③ 有词级时间戳（first_word_t=8.20），first_t 就是真实晚开时刻。
+        # 旧写法只把整段后移 0.6 s 而不给词级时间戳：那时判据只有一条，现在会被
+        # 正确归到"边界不可信（不可判）"——所以这里改用**可判**的构造，另开一条用例守不可判。
         segs = [dict(s) for s in good_segs]
-        segs[1]["start"] += 0.6                         # l02 整体晚 0.6 s
-        segs[1]["end"] += 0.6
+        segs[1] = {"start": 7.40, "end": 11.82, "first_word_t": 8.20,
+                   "text": "但自动化不等于放弃检查,成片仍然需要逐句回读。"}
         j = _judge(scenes, segs)
         dt = j["offsets"].get("l02")
-        if dt is None or abs(dt - 0.63) > 0.12:
-            return False, "偏移算错：%r（预期约 +0.63）" % (dt,)
+        if dt is None or abs(dt - 0.65) > 0.12:
+            return False, "偏移算错：%r（预期约 +0.65）" % (dt,)
         if not any("l02" in w and "偏" in w for w in j["warnings"]):
             return False, "偏移超阈没告警：%s" % (j["warnings"],)
         if j["gate"]["status"] != "pass":
             return False, "偏移只该 warning，不该改判定（%s）" % j["gate"]["status"]
         return True, "l02 偏移 %+.2fs 记 warning，判定仍 pass" % dt
+
+    def c_offset_uncertain():
+        """ASR 边界不可信时：不算偏移、但必须**说出来**（不能静默当成 0）。
+
+        两个真实踩过的坑合在一条用例里守：
+          ① 片段起点晚于期望开口时刻、且期望时刻没有任何片段覆盖 —— 这时
+             「first_t - 期望」既可能是真晚开，也可能只是 ASR 把弱起判成静音；
+          ② 这种情况 seg_start 可能是 None（没有词级时间戳），旧代码
+             `round(float(seg_start), 3)` 直接 TypeError，整条门禁变成"跑了就崩"；
+          ③ 结论写进 offset_ref 后又被"来源"字段无条件覆盖，warnings 里只剩
+             一句"建议试听"之前的线索全没了。
+        """
+        segs = [dict(s) for s in good_segs]
+        segs[1] = {"start": 8.18, "end": 12.42,          # l02 整体晚 0.6 s：期望 7.55 无覆盖
+                   "text": "但自动化不等于放弃检查,成片仍然需要逐句回读。"}
+        j = _judge(scenes, segs)
+        if "l02" in j["offsets"]:
+            return False, "边界不可信的段落仍被算成偏移：%r" % (j["offsets"]["l02"],)
+        if "l02" not in j["offset_uncertain"]:
+            return False, "没记进 offset_uncertain（结论丢了）：%r" % (j["offset_uncertain"],)
+        if j["offset_uncertain"]["l02"].get("seg_start") is not None:
+            return False, "无词级时间戳时 seg_start 应为 None，实际 %r" % (
+                j["offset_uncertain"]["l02"].get("seg_start"),)
+        if "不可判" not in j["offset_ref"].get("l02", ""):
+            return False, "offset_ref 被来源字段覆盖（结论丢失）：%r" % (j["offset_ref"],)
+        if not any("无法自动判定" in w and "l02" in w for w in j["warnings"]):
+            return False, "不可判没告警：%s" % (j["warnings"],)
+        if j["gate"]["status"] != "pass":
+            return False, "不可判不该改判定（%s）" % j["gate"]["status"]
+        return True, "l02 记不可判 + warning 需人工试听，判定仍 pass"
 
     def c_no_film():
         rep = report(os.path.join(tmp, "nope.mp4"), scenes, log=None)
@@ -1606,6 +1649,7 @@ def selftest() -> int:
         check("介于两线之间 -> pass + warning", c_warn)
         check("丢一句 -> fail", c_fail)
         check("偏移超阈 -> warning 不改判定", c_offset)
+        check("ASR 边界不可判 -> warning 需人工试听", c_offset_uncertain)
         check("成片不存在 -> skipped", c_no_film)
         check("引擎不可用 -> skipped（不冒充 pass）", c_no_engine)
         check("无音轨 -> skipped", c_no_audio)

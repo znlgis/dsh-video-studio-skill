@@ -1188,7 +1188,7 @@ python selfcheck.py                  # 85 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）
-python webengine.py --selftest       # 浏览器引擎（35 项，会真起无头浏览器，约 60 秒）
+python webengine.py --selftest       # 浏览器引擎（36 项，会真起无头浏览器，约 60 秒）
 python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
 ```
 

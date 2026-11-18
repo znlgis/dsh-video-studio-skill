@@ -40,12 +40,18 @@
   var canvas = document.getElementById('stage');
   if (!canvas) throw new Error('engine.js: 页面缺少 <canvas id="stage">');
 
-  /* 画布尺寸：只在注入 style 时改（webengine 侧已校验 16:9 横屏偶数，这里再兜一层）。
-   * 没注入时 canvas 属性 / 内联样式一个字都不动 —— 旧行为不变。 */
+  /* 画布尺寸：只在注入 style 时改（webengine 侧已校验 16:9 横屏 / 9:16 竖屏偶数，这里再兜一层）。
+   * 没注入时 canvas 属性 / 内联样式一个字都不动 —— 旧行为不变。
+   * 这里的比例白名单必须与 webengine._validate_canvas 一致：上游放行 1080x1920 而这里只认
+   * 16:9 时，竖屏片会在页面里抛错（浏览器侧一句"必须是 16:9 横屏"），比上游拒绝更难查。 */
   if (ST_CANVAS) {
     var _w = Math.round(_num(ST_CANVAS.w, W)), _h = Math.round(_num(ST_CANVAS.h, H));
-    if (_w > 0 && _h > 0 && Math.abs(_w / _h - 16 / 9) > 1e-3) {
-      throw new Error('engine.js: __STYLE__.canvas 必须是 16:9 横屏，收到 ' + _w + 'x' + _h);
+    var _r = (_w > 0 && _h > 0) ? _w / _h : 0;
+    var _okAspect = _r === 0
+      || Math.abs(_r - 16 / 9) <= 1e-3 || Math.abs(_r - 9 / 16) <= 1e-3;
+    if (!_okAspect) {
+      throw new Error('engine.js: __STYLE__.canvas 必须是 16:9 横屏或 9:16 竖屏，收到 '
+        + _w + 'x' + _h);
     }
     if (_w > 0 && _h > 0) {
       W = _w; H = _h;
