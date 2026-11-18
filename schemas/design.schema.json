@@ -71,7 +71,20 @@
       "null"
      ],
      "minimum": 3,
-     "maximum": 1800
+     "maximum": 1800,
+     "description": "目标/下限时长的秒数。配合 target_mode 解释：exact=精确目标，at_least=下限。"
+    },
+    "target_mode": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "enum": [
+      "exact",
+      "at_least",
+      null
+     ],
+     "description": "时长语义：exact=精确目标（双向对账）；at_least=下限（只有不足才告警）。null/缺省按 exact。"
     }
    }
   },

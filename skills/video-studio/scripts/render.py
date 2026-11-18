@@ -725,15 +725,25 @@ def st_layout(script, work, lines=None):
             target = float(target)
         except (TypeError, ValueError):
             target = None
+    # 语义分两档（见 design.structure.target_mode）：
+    #   exact    = 精确目标，双向都告警（用户写「2 分钟」的常规理解）；
+    #   at_least = 下限，只有**不足**才告警——超出去是好事，不该报红。
+    # 两档都不截断旁白：成片长度永远由 TTS 实测决定。
+    mode = str((plan or {}).get("target_mode") or "exact")
     if target and target > 0:
         diff = float(tl["total"]) - target
         pct = diff / target * 100.0
-        print("   目标时长 %.1fs / 实际 %.2fs（%+.1fs，%+.0f%%）"
-              % (target, tl["total"], diff, pct))
-        if abs(pct) > 15.0:
-            print("   [WARN] 与目标时长差超过 15%：成片时长由**实测旁白**决定，不收口就要改文案。"
-                  "\n          想变长：加台词或调大 film.json 的 hold / lead / tail；"
-                  "\n          想变短：删减台词（hold 只会加留白，不会缩短旁白）。")
+        label = "下限" if mode == "at_least" else "目标"
+        print("   %s时长 %.1fs / 实际 %.2fs（%+.1fs，%+.0f%%）"
+              % (label, target, tl["total"], diff, pct))
+        warn = (pct < -15.0) if mode == "at_least" else (abs(pct) > 15.0)
+        if warn:
+            head = ("没有达到下限（差 %.1fs）：成片时长由**实测旁白**决定，" % (-diff)
+                    if mode == "at_least" else
+                    "与目标时长差超过 15%：成片时长由**实测旁白**决定，不收口就要改文案。")
+            print("   [WARN] " + head
+                  + "\n          想变长：加台词或调大 film.json 的 hold / lead / tail；"
+                  + "\n          想变短：删减台词（hold 只会加留白，不会缩短旁白）。")
     return tl
 
 

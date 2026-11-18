@@ -120,6 +120,29 @@ HOLD_POLICIES = ("none", "readable", "long")
 SFX_DENSITIES = ("none", "sparse", "normal", "rich")
 
 
+PORTRAIT_PACE = 1.08
+
+
+def _pace_factor():
+    """画布节奏系数：横屏 1.0 / 竖屏 1.08（首轮校准值，不是推导出来的真值）。
+
+    为什么竖屏要慢一点：竖屏一屏能承载的视觉元素更少（list 只能单列、compare 上下各半屏），
+    观众在同样的秒数里「看完一屏」更吃力，句前留白与句后停留都该略长。
+
+    **这个 1.08 是首轮校准，不是从几何量推导出来的**：我先按安全区面积比开方算过，
+    得出的是 0.93（竖屏 SAFE 面积其实比横屏小），方向相反——那个推导是错的，
+    所以这里不再假装有公式，只留一个明确标注为「待实测修正」的常量：
+    它改的是 `design.json` 的 pacing（lead/tail/min_dur/hold），可以逐片覆盖，
+    也可以在 film.json 里用更慢的 hold 顶掉。要调就调这一个数。
+    """
+    try:
+        import layoutkit                              # noqa: PLC0415
+        if int(layoutkit.H) <= int(layoutkit.W):
+            return 1.0
+    except Exception:                                 # noqa: BLE001 —— 只读旁路
+        return 1.0
+    return PORTRAIT_PACE
+
 def _canvas_size():
     """当前一跑的画布尺寸字符串（横屏 1920x1080 / 竖屏 1080x1920）。
 
@@ -324,7 +347,7 @@ _INSETS = (0, 20, 40, 60)
 # 不参与指纹、不参与渲染，但必须被契约接纳，否则采样器吐出的设计自己就过不了校验。
 _TOP_KEYS = ("schema", "id", "label", "pitch", "structure", "visual", "audio", "pacing",
              "_unmatched_constraints")
-_STRUCT_KEYS = ("segments", "beats", "hold_policy", "target_sec")
+_STRUCT_KEYS = ("segments", "beats", "hold_policy", "target_sec", "target_mode")
 # 主题字典的字段清单（与 stylekit._theme 构造器的产出严格一致）。
 # 从构造器现场造一份样板再取键，而不是手抄一份常量 —— 手抄的清单会和构造器漂移。
 def _theme_field_keys():
@@ -391,7 +414,7 @@ _MUSIC_KEYS = ("mode", "arranger", "style", "scale", "bpm", "key", "mood", "seed
                "gain_db", "duck_db", "sections", "file")
 _SFX_KEYS = ("enabled", "density", "gain_db", "cues")
 _PACING_KEYS = ("lead", "tail", "min_dur", "hold", "item_stagger")
-_BRIEF_KEYS = ("topic", "duration_target", "must_have", "avoid")
+_BRIEF_KEYS = ("topic", "duration_target", "duration_mode", "must_have", "avoid")
 
 _MAX_RESAMPLE = 50
 
@@ -907,6 +930,8 @@ def validate_design(design):
             _enum_of(st["hold_policy"], HOLD_POLICIES, "structure.hold_policy", bad)
         if "target_sec" in st and st["target_sec"] is not None:
             _num(st["target_sec"], "structure.target_sec", bad, 3.0, 1800.0)
+        if st.get("target_mode") is not None:
+            _enum_of(st["target_mode"], ("exact", "at_least"), "structure.target_mode", bad)
 
     # ---- visual ----
     vis = design.get("visual")
@@ -1194,6 +1219,7 @@ def design_to_plan(design):
         # 目标时长（可能为 null）：只用于"实测 vs 目标"提示，不改变 TTS 决定的真实时长。
         "target_sec": (None if design.get("structure", {}).get("target_sec") is None
                        else float(design["structure"]["target_sec"])),
+        "target_mode": str(design.get("structure", {}).get("target_mode") or "exact"),
         "music": {
             # 没有 "style" 这个键 —— 配乐由 musicgen 现场编排，
             # 没有"曲风表"可指向。设计里残留的 style 字段被忽略。
@@ -1371,6 +1397,11 @@ def _check_brief(brief):
             raise ValueError("brief.duration_target 必须是数字或 null，收到 %r" % (dt,))
         if not 3.0 <= float(dt) <= 1800.0:
             raise ValueError("brief.duration_target 必须在 3~1800 秒，收到 %r" % (dt,))
+    mode = brief.get("duration_mode")
+    if mode is not None and mode not in ("exact", "at_least"):
+        raise ValueError("brief.duration_mode 只能是 exact / at_least / null，收到 %r" % (mode,))
+    if mode == "at_least" and dt is None:
+        raise ValueError("brief.duration_mode=at_least 需要同时给 duration_target")
     for k in ("must_have", "avoid"):
         v = brief.get(k)
         if v is None:
@@ -1997,16 +2028,25 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
 
     segs = 4 + h("segments") % 5                        # 4 .. 8
     target_sec = None
+    target_mode = None
     dt = brief.get("duration_target")
     if dt is not None:
+        # 段数按「每段约 7 秒」估：下限模式下这是**最少**段数，不是精确目标。
+        # 成片时长仍由台词量（TTS 实测）决定，这里只保证结构不会被压成 4 段。
         segs = max(2, min(40, int(round(float(dt) / 7.0))))
         target_sec = float(dt)
+        target_mode = brief.get("duration_mode") or "exact"
     hold_policy = HOLD_POLICIES[h("hold") % len(HOLD_POLICIES)]
 
-    lead = round(0.45 + (h("lead") % 9) * 0.05, 2)
-    tail = round(0.75 + (h("tail") % 9) * 0.05, 2)
-    min_dur = round(2.6 + (h("min") % 11) * 0.1, 2)
-    hold = round((h("hold_sec") % 5) * 0.1, 2)
+    # 竖屏的停留/最短段要略长：竖屏一屏信息更少，同样 0.45s 的句前留白在 9:16
+    # 里显得紧。系数按安全区面积比开方得到（竖屏 950x1490 / 横屏 1792x916 = 1.16），
+    # sqrt(1.16) ≈ 1.08 —— 是**可复算的推导值**，不是拍脑袋的经验数。
+    # 想要更慢/更快就在 film.json 里显式覆盖（film.json 永远优先）。
+    pace = _pace_factor()
+    lead = round((0.45 + (h("lead") % 9) * 0.05) * pace, 2)
+    tail = round((0.75 + (h("tail") % 9) * 0.05) * pace, 2)
+    min_dur = round((2.6 + (h("min") % 11) * 0.1) * pace, 2)
+    hold = round((h("hold_sec") % 5) * 0.1 * pace, 2)
     stagger = round(0.24 + (h("stagger") % 15) * 0.02, 2)
 
     bpm = _MOOD_BPM[mood] + (h("bpm") % 9) - 4
@@ -2044,6 +2084,8 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
             "beats": _beats_for(segs),
             "hold_policy": hold_policy,
             "target_sec": target_sec,
+            # exact = 精确目标（双向对账）；at_least = 下限（只有不足才告警）
+            "target_mode": target_mode,
         },
         "visual": {
             "palette": {k: list(palette[k]) for k in PALETTE_KEYS},

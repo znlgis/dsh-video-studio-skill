@@ -2194,7 +2194,7 @@ def t_intake_gate():
 
     # ③ 答完 + 定稿：提案放行，并留 complete 痕迹
     r = _run([intake_py, "--work", work1,
-              "--set", "topic:AI 大模型的三年", "--set", "duration:45s",
+              "--set", "topic:AI 大模型的三年", "--set", "duration:at_least_1m",
               "--set", "tone:bright-lively", "--set", "voice:female-bright",
               "--set", "music:upbeat"], tmp)
     assert r.returncode == 0, "写答答案失败：%s" % (r.stderr or r.stdout)[-300:]
@@ -2920,6 +2920,120 @@ def t_mux_true_peak_override():
     return '默认 -1.5 / 可覆盖 -3.0 / 非法值报错'
 
 
+
+def t_duration_floor():
+    """80 时长下限：「不少于 N 分钟」是下限语义，不是精确目标。
+
+    为什么必须分开：目标语义下「还差 30%」只是告警；下限语义下「还差 30%」= 没达标。
+    早期版本只有 exact 一档，用户写「不少于 5 分钟」时，成片 4 分钟只报一句
+    「与目标时长差超过 15%」，读不出「这条片子不合格」。
+    另外问诊的时长题要能被自定义时长原话覆盖（「不少于 12 分钟」），
+    不能只认预置档位——9 分钟以上的片子没有预置档。
+    """
+    import propose as PP
+    import designkit as DK
+    cases = {
+        "不少于5分钟": (300.0, "at_least"),
+        "至少 3 分钟": (180.0, "at_least"),
+        "不少于 12 分钟": (720.0, "at_least"),
+        "2分钟": (120.0, "exact"),
+        "一分半": (90.0, "exact"),
+    }
+    for text, want in cases.items():
+        got = PP.parse_duration_spec(text)
+        assert got == want, "时长语义 %r 得到 %r，期望 %r" % (text, got, want)
+    # 别的句子里的「不少于」不能被算进时长语义（误判会让整片被当成下限模式）
+    assert PP.parse_duration_spec("不少于三条建议，2分钟") == (120.0, "exact"), \
+        "把别处的「不少于」算进了时长语义"
+    # brief -> design -> plan 全链
+    b = PP._brief_of("数字经济，不少于 5 分钟", {"title": "t"})
+    assert b.get("duration_mode") == "at_least", "brief 没接住下限语义：%r" % (b,)
+    d = DK.sample_designs(b, n=2, seed=11)[0]
+    assert d["structure"].get("target_mode") == "at_least", \
+        "下限语义没进设计：%r" % (d["structure"],)
+    assert d["structure"].get("target_sec") == 300.0, "时长没进设计"
+    plan = DK.design_to_plan(d)
+    assert plan.get("target_mode") == "at_least", "下限语义没进计划"
+    # 精确目标仍是 exact（旧行为不变）
+    b2 = PP._brief_of("2分钟", {"title": "t"})
+    d2 = DK.sample_designs(b2, n=2, seed=5)[0]
+    assert d2["structure"].get("target_mode") == "exact", "精确目标被误判成下限"
+    assert DK.design_to_plan(d2).get("target_mode") == "exact"
+    return "5 种说法语义正确；跨句不误判；brief->design->plan 全链 at_least/exact"
+
+
+def t_portrait_pacing_and_drawers():
+    """81 竖屏节奏与三类原生构图（stat / quote / chapter）。
+
+    竖屏的遗留问题有两块，这块守的是「不是缩放，是原生」：
+      ① stat / quote / chapter 在竖屏走**自己的绘制函数**（纵向分层），不是把横屏版
+         等比缩小——缩出来的结果是上半屏空、下半屏挤；
+      ② pacing（lead/tail/min_dur/hold）在竖屏乘 PORTRAIT_PACE，横屏系数恒 1.0。
+    这两条都容易在后续改动里被悄悄改回去（谁动了都会「看起来能出片」），所以钉住。
+    """
+    import subprocess
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    assets = os.path.abspath(os.path.join(here, os.pardir, "assets"))
+    probe_dir = tempfile.mkdtemp(prefix="vs-portrait2-")
+    probe = os.path.join(probe_dir, "_probe.py")
+    body = chr(10).join([
+        "import io, json, os, sys",
+        "sys.path.insert(0, %r)" % here,
+        "sys.path.insert(0, %r)" % assets,
+        "import designkit as DK",
+        "import layoutkit as LK",
+        "import scenes as SC",
+        "design = json.load(io.open(os.path.join(%r, 'design_fixture.json'), encoding='utf-8'))" % assets,
+        "plan = DK.design_to_plan(design)",
+        "script = {'title': 'T', 'lines': [], '_style': plan}",
+        "out = {'canvas': [SC.W, SC.H], 'pace': DK._pace_factor(), 'sizes': {}, 'err': {}}",
+        "kinds = {'stat': 'body', 'quote': 'quote', 'chapter': 'body'}",
+        "for st in kinds:",
+        "    scene = {'id': 'p_' + st, 'kind': kinds[st], 'scene_type': st,",
+        "             'scene_layout': 'split-right', 'chapter': '07 · 风险',",
+        "             'text': '这是一句用来测试排版的正文，长度中等偏长。',",
+        "             'sub': '字幕一行', 'big': '标题示例', 'kicker': 'KICKER',",
+        "             'stats': [{'value': '103612', 'unit': 'P', 'label': '总算力'}],",
+        "             'quote': '规划的文本可以被反复解读，但其真正的意义在于落地。',",
+        "             'by': '某报告'}",
+        "    try:",
+        "        out['sizes'][st] = list(SC.draw_frame(scene, 1.5, 6.0, 1.5, script, 45).size)",
+        "    except Exception as e:",
+        "        out['err'][st] = (type(e).__name__ + ': ' + str(e))[:160]",
+        "out['clamped'] = len(SC._CLAMPED)",
+        "print(json.dumps(out, ensure_ascii=False))",
+    ])
+    io.open(probe, "w", encoding="utf-8").write(body)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", VIDEO_STUDIO_LAYOUT="portrait-9x16")
+    r = subprocess.run([_sys.executable, probe], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env, timeout=300)
+    assert r.returncode == 0, "竖屏探针失败：%s" % (r.stderr or r.stdout)[-400:]
+    got = json.loads(r.stdout[r.stdout.find("{"):])
+    assert got["canvas"] == [1080, 1920], "竖屏画布不对：%r" % (got["canvas"],)
+    assert abs(float(got["pace"]) - 1.08) < 1e-6, "竖屏节奏系数变了：%r" % (got["pace"],)
+    assert not got["err"], "竖屏原生构图有异常：%r" % (got["err"],)
+    for st in ("stat", "quote", "chapter"):
+        assert got["sizes"].get(st) == [1080, 1920], \
+            "%s 竖屏出图尺寸不对：%r" % (st, got["sizes"].get(st))
+
+    # 横屏系数必须恒为 1.0（竖屏改动不能改横屏节奏）
+    body2 = chr(10).join([
+        "import os, sys",
+        "sys.path.insert(0, %r)" % here,
+        "import designkit as DK",
+        "print(DK._pace_factor())",
+    ])
+    probe2 = os.path.join(probe_dir, "_probe2.py")
+    io.open(probe2, "w", encoding="utf-8").write(body2)
+    env2 = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env2.pop("VIDEO_STUDIO_LAYOUT", None)
+    r2 = subprocess.run([_sys.executable, probe2], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", env=env2, timeout=120)
+    assert r2.returncode == 0, "横屏探针失败：%s" % (r2.stderr or r2.stdout)[-300:]
+    assert abs(float(r2.stdout.strip().splitlines()[-1]) - 1.0) < 1e-6, \
+        "横屏节奏系数被改了：%r" % (r2.stdout, )
+    return "竖屏 1.08 / 三类原生构图出图 1080x1920 / 横屏系数仍 1.0"
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3000,6 +3114,8 @@ CASES = [
     ("77 枚举校验真的在执行（enum 不许只写在 SPEC 里）", t_enum_enforced),
     ("78 画幅开关（问诊/尺寸枚举/filmcheck/propose 都认竖屏）", t_canvas_switch),
     ("79 真峰目标可覆盖（竖屏片默认 -1.5 dBTP 会 G5 fail）", t_mux_true_peak_override),
+    ("80 时长下限（不少于 N 分钟 / 自定义原话）", t_duration_floor),
+    ("81 竖屏节奏与三类原生构图（stat/quote/chapter）", t_portrait_pacing_and_drawers),
 ]
 
 

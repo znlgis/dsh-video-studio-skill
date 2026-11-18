@@ -1700,6 +1700,10 @@ def _draw_stat(scene, t, dur, tg, script, frame, plan, th):
     if not stats:
         return _draw_statement(scene, t, dur, tg, script, frame, plan, th)
 
+    if H > W:
+        # 竖屏：横向排布在 1080 宽里放不下四层信息，改**纵向分层**。
+        return _draw_stat_portrait(scene, t, dur, tg, script, frame, plan, th, stats)
+
     main = stats[0]
     raw = str(main.get("value") if main.get("value") is not None else "")
     unit = str(main.get("unit") or "")
@@ -2140,6 +2144,9 @@ def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
         q, by = _G.derive_quote(scene)
     q = str(q or scene.get("text") or "")
     by = str(by or "")
+    if H > W:
+        # 竖屏：引文整幅宽铺开、引号在上，署名贴右下安全区。
+        return _draw_quote_portrait(scene, t, dur, tg, script, frame, plan, th, q, by)
 
     # 巨型引号：**用字形**，不用矢量线。
     # 用两条短线拼「《」实测看起来像播放器的"快退"图标，
@@ -2209,6 +2216,11 @@ def _draw_chapter(scene, t, dur, tg, script, frame, plan, th):
     n = _chapter_index(chapter)
     nstyle = str(_typo(lang).get("number") or "dim")
     num = _number_text(nstyle, n, fallback=chapter[:2])
+    if H > W:
+        # 竖屏：编号/名称/横线纵向重排，横线缩到 SAFE 宽。
+        name_p = str(scene.get("big") or "").strip() or chapter
+        return _draw_chapter_portrait(scene, t, dur, tg, script, frame, plan, th,
+                                     num, name_p, str(scene.get("kicker") or ""))
 
     # 巨型编号：用矩形"裁剪揭示"（先画字，再用两块背景板盖住未揭示部分），比 mask 便宜
     nsize = 240
@@ -2420,6 +2432,230 @@ def _draw_chart_portrait(scene, t, dur, tg, script, frame, plan, th, series):
     return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
                 script.get("title", ""), lang)
 
+
+
+def _draw_stat_portrait(scene, t, dur, tg, script, frame, plan, th, stats):
+    """竖屏数字卡：数字在上、口径在中、刻度在下，纵向铺满一屏。
+
+    横屏版把「大数字 + 口径 + 12 格刻度 + 2 条次要统计」压在 1080 高的横带里；
+    竖屏（1080x1920）照搬会让上半屏空、下半屏挤。竖屏纵向空间足够把四层摊开：
+    数字(y≈620) / 主口径(y≈980) / 刻度(y≈1160) / 次要统计(y≈1300 起)。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    ph = _phase(scene)
+
+    main = stats[0]
+    raw = str(main.get("value") if main.get("value") is not None else "")
+    unit = str(main.get("unit") or "")
+    label = str(main.get("label") or "")
+    notes = [s for s in stats[1:3] if str(s.get("label") or "")]
+
+    target = None
+    try:
+        target = float(raw)
+    except (TypeError, ValueError):
+        target = None
+    p = ease(clamp(t / max(0.5, min(1.2, dur * 0.42))))
+    if target is None:
+        shown_txt = raw
+    elif "." in raw:
+        dec = len(raw.split(".")[1])
+        shown_txt = ("%." + str(dec) + "f") % (target * p)
+    else:
+        shown_txt = "%d" % int(round(target * p))
+
+    # 数字：整屏最重的一层。max_w 用 SAFE 宽度（不是横屏常量 1500），
+    # 长数字（103612P / 34.7）在 1080 宽里靠缩字号，而不是靠 _fit_px 钳位。
+    size = 200
+    max_w = float(SAFE[2] - SAFE[0])
+    while size > 96 and _text_w(shown_txt + unit, size, _NUM_WEIGHT, th) > max_w:
+        size = int(size * 0.9)
+    cy = 700.0
+    total_w = _text_w(shown_txt, size, _NUM_WEIGHT, th)
+    if unit:
+        total_w += _text_w(unit, int(size * 0.42), "reg", th)
+    x0 = W * 0.5 - total_w * 0.5
+    _draw_num(img, th, v, shown_txt, x0, cy - size * 0.62, size, th["accent"], "left",
+              0.25 + 0.75 * p)
+    if unit:
+        pu = ease(rng(t, 0.35, 0.95))
+        _draw_text(img, th, v, unit, x0 + _text_w(shown_txt, size, _NUM_WEIGHT, th) + 12,
+                   cy + size * 0.22, int(size * 0.42), "reg", th["muted"], "left", pu)
+
+    if label:
+        pl = ease(rng(t, 0.45, 1.10))
+        lsize = int(th["scale"]["sub"][0])
+        for j, ln in enumerate(_wrap(label, lsize, max_w, "light", th)[:2]):
+            _draw_text(img, th, v, ln, W * 0.5, 1060.0 + j * int(lsize * 1.3), lsize,
+                       "light", th["ink"], "center", pl)
+
+    # 持续动态：12 格刻度逐格点亮（横屏横排、竖屏竖排：与画面主要方向同向）
+    bars = 12
+    bh, gapb = 26, 8
+    tot = bars * bh + (bars - 1) * gapb
+    by = 1240.0
+    bx = W * 0.5 - tot * 0.5
+    lit = int((t / 0.55 + ph) % bars)
+    d = ImageDraw.Draw(img, "RGBA")
+    for i in range(bars):
+        on = i <= lit
+        d.rectangle([v.x(bx + i * (bh + gapb)), v.y(by),
+                     v.x(bx + i * (bh + gapb) + bh), v.y(by + 8)],
+                    fill=_rgba(th["accent"] if on else th["rule"],
+                               int((150 if on else 34))))
+
+    nsize = int(th["scale"]["body"][0] - 6)
+    step = int(nsize * 1.75)
+    for j, s in enumerate(notes):
+        pn = ease(rng(t, 0.6 + 0.15 * j, 1.3 + 0.15 * j))
+        val = str(s.get("value") if s.get("value") is not None else "").strip()
+        un = str(s.get("unit") or "").strip()
+        lbl = str(s.get("label") or "").strip()
+        head = val + ((" " + un) if un else "")
+        txt = (head + "  " + lbl) if head else lbl
+        if not txt:
+            continue
+        txt = _fit_size(txt, max_w, nsize, "reg", th, 18)
+        _draw_text(img, th, v, txt, W * 0.5, 1400.0 + j * step, nsize,
+                   "reg", th["muted"], "center", pn)
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
+
+
+def _draw_quote_portrait(scene, t, dur, tg, script, frame, plan, th, q, by):
+    """竖屏引语：巨型引号在上、引文纵向铺开、署名右下。
+
+    横屏版引文 max_w=1240、起始 x=340，放在 1080 宽里会被 _fit_px 钳成左边距 0；
+    竖屏改成整幅宽（SAFE 宽 - 60），字号与折行数上限也随之调整（竖屏能放更多行）。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    gap = _gap(th, lang)
+    ph = _phase(scene)
+
+    max_w = float(SAFE[2] - SAFE[0] - 40)
+    left = float(SAFE[0] + 20)
+
+    pq = ease(rng(t, 0.0, 0.45))
+    _draw_text(img, th, v, "\u201c", left, 300.0, 170, "bold", th["accent"], "left", 0.55 * pq)
+
+    qsize = 54
+    lines = _wrap(q, qsize, max_w, "light", th)
+    while len(lines) > 7 and qsize > 32:
+        qsize -= 2
+        lines = _wrap(q, qsize, max_w, "light", th)
+    lh = int(qsize * float(gap) * 1.20)
+    block_h = max(1, len(lines)) * lh + (60.0 if by else 0.0)
+    body_top, body_bot = float(SAFE[1]) + 240.0, float(SUB_BAND[1]) - 40.0
+    top = max(body_top, (body_top + body_bot - block_h) * 0.5)
+    reveal = clamp(t / max(0.4, min(2.2, dur * 0.55)))
+    total = sum(len(x) for x in lines)
+    shown = int(total * ease(reveal))
+    walked = 0
+    for i, ln in enumerate(lines):
+        if walked >= shown:
+            break
+        take = max(0, min(len(ln), shown - walked))
+        walked += len(ln)
+        seg = ln[:take]
+        if seg:
+            _draw_text(img, th, v, seg, left, top + i * lh, qsize, "light",
+                       th["ink"], "left", 1.0, trk * 0.4)
+
+    if by:
+        pb = ease(rng(t, 0.9, 1.9))
+        bsize = int(th["scale"]["body"][0])
+        bw = _text_w("—— " + by, bsize, "reg", th)
+        bx = float(SAFE[2] - 20) - bw
+        _draw_text(img, th, v, "—— " + by, bx, top + len(lines) * lh + 60,
+                   bsize, "reg", th["muted"], "left", pb)
+
+    # 持续动态：引号透明度呼吸（与横屏同口径，不做位置漂移）
+    bre = 0.5 + 0.5 * math.sin(0.5 * t + ph)
+    _draw_text(img, th, v, "\u201c", left, 300.0, 170, "bold",
+               th["accent"], "left", 0.55 * (0.55 + 0.45 * bre))
+    if int(t * 1.1) % 2 == 0:
+        ly = top + max(0, len(lines) - 1) * lh + qsize * 0.92
+        lw = _text_w(lines[-1] if lines else "", qsize, "light", th)
+        rx = min(left + lw + 8, float(SAFE[2] - 12))
+        ImageDraw.Draw(img, "RGBA").rectangle(
+            [v.x(rx), v.y(ly), v.x(rx + 10), v.y(ly + qsize * 0.5)],
+            fill=_rgba(th["accent"], 150))
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
+
+
+def _draw_chapter_portrait(scene, t, dur, tg, script, frame, plan, th, num, name, kicker):
+    """竖屏章节卡：编号在上、名称居中、横线在下。
+
+    横屏版编号 240px 在 x=96、名称 68px 在 y=470、横线跨 1600px（y=700）；
+    竖屏把横线缩到 SAFE 宽、整体纵向重新分布，否则下半屏会空掉 1000px。
+    """
+    lang = _lang(plan, th)
+    s_bg = _push_scale(th, t, dur)
+    v = _view(th, s_bg)
+    img = _plate(th, lang, scene, s_bg)
+    ease = _ease((lang.get("motion") or {}).get("ease") or "out3")
+    trk = _tracking(th, lang)
+    ph = _phase(scene)
+
+    nsize = 300
+    nx, ny = float(SAFE[0] + 20), 420.0
+    _draw_num(img, th, v, num, nx, ny, nsize, th["accent"], "left", 0.30)
+    p = ease(clamp(t / 0.7))
+    nw_full = _text_w(num, nsize, _NUM_WEIGHT, th)
+    cut = int(nx + nw_full * p)
+    if cut < nx + nw_full:
+        base = _plate(th, lang, scene, s_bg)
+        top = int(ny - 12)
+        bot = int(ny + nsize * 1.28)
+        img.paste(base.crop((int(cut), top, W, bot)), (int(cut), top))
+
+    pn = ease(rng(t, 0.2, 1.0))
+    y = 940.0
+    name_size = 76
+    max_w = float(SAFE[2] - SAFE[0])
+    for j, ln in enumerate(_wrap(name, name_size, max_w, "bold", th)[:3]):
+        size = _fit_size(ln, max_w, name_size, "bold", th, 40)
+        _draw_text(img, th, v, ln, W * 0.5, y + j * int(size * 1.25) + _entrance_y(th, pn),
+                   size, "bold", th["ink"], "center", pn, trk)
+
+    if kicker:
+        pk = ease(rng(t, 0.15, 0.8))
+        _draw_text(img, th, v, kicker, W * 0.5, 910.0, int(th["scale"]["kicker"][0]),
+                   "bold", th["accent"], "center", pk, trk * 0.5)
+
+    pl = ease(rng(t, 0.35, 1.1))
+    bre = 0.9 + 0.1 * math.sin(1.0 * t + ph)
+    half = (max_w * 0.5) * pl * bre
+    # 横线贴着名称块下方（原来放 1450 会在名称与线之间留 400px 空洞）
+    cy = 1290.0
+    ImageDraw.Draw(img, "RGBA").line(
+        [v.x(W * 0.5 - half), v.y(cy), v.x(W * 0.5 + half), v.y(cy)],
+        fill=_rgba(th["rule"], 120), width=_lw(2, lang))
+
+    # 持续动态：编号上缘细光带（与横屏同口径：只在 6px 高，既动又不盖笔画）
+    span = float(SAFE[2] - SAFE[0] - 200)
+    sx = float(SAFE[0]) + span * ((t / 2.8 + ph / 6.28) % 1.0)
+    ImageDraw.Draw(img, "RGBA").rectangle(
+        [v.x(sx), v.y(ny - 14), v.x(sx + 170), v.y(ny - 8)],
+        fill=_rgba(th["accent"], 60))
+
+    img = _apply_veil(img, th, lang, scene, t, s_bg)
+    return _hud(img, th, scene.get("chapter") or "02 · 正文", _progress(tg, script),
+                script.get("title", ""), lang)
 
 # ---------------- 10) outro 收尾 ----------------
 

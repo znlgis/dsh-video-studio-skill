@@ -73,19 +73,27 @@ QUESTIONS = (
     {
         "id": "duration",
         "header": "时长",
-        "question": "成片大约多长？",
+        "question": "成片至少要多长？",
         "kind": "single",
         "required": True,
-        "default": "45s",
+        "default": "at_least_3m",
+        # 允许直接写时长原话（「不少于 12 分钟」/「2 分半」）：自定义档就是靠这条
+        # 才可能落到具体秒数——只认预置选项的话，选了「自定义」却没有地方写数字。
+        "allow_text": True,
+        # 时长是**下限**（不少于），不是精确目标：成片长度永远由 TTS 实测决定，
+        # 写「目标 3 分钟」而台词只够 90 秒时，渲染器只能告警、不能凭空拉长；
+        # 而写「不少于 3 分钟」语义天然正确——台词不够就是没达标，要加内容。
         "options": [
-            {"value": "30s", "label": "30 秒（推荐：口播 6–8 句，最稳）", "brief": "30秒"},
-            {"value": "45s", "label": "45 秒（推荐：起承转合齐全）", "brief": "45秒"},
-            {"value": "60s", "label": "1 分钟", "brief": "1分钟"},
-            {"value": "90s", "label": "1 分半", "brief": "一分半"},
-            {"value": "120s", "label": "2 分钟", "brief": "2分钟"},
-            {"value": "auto", "label": "按台词实测长度（不设目标）", "brief": ""},
+            {"value": "at_least_1m", "label": "不少于 1 分钟", "brief": "不少于1分钟"},
+            {"value": "at_least_3m", "label": "不少于 3 分钟", "brief": "不少于3分钟"},
+            {"value": "at_least_5m", "label": "不少于 5 分钟", "brief": "不少于5分钟"},
+            {"value": "at_least_7m", "label": "不少于 7 分钟", "brief": "不少于7分钟"},
+            {"value": "at_least_9m", "label": "不少于 9 分钟", "brief": "不少于9分钟"},
+            {"value": "custom", "label": "自定义（自己写时长，如「不少于 12 分钟」/「2 分半」）", "brief": ""},
+            {"value": "auto", "label": "按台词实测长度（不设下限）", "brief": ""},
         ],
-        "hint": "只写目标；成片长度仍由旁白实测时长决定，不会截断台词。",
+        "hint": "时长是**下限**：写成片至少要多长（例「不少于 5 分钟」）。成片实际长度仍由旁白实测决定，"
+                "台词不够就是没达标——要加内容，渲染器不会截断旁白也不会拉长留白。",
     },
     {
         "id": "tone",
@@ -232,6 +240,12 @@ def _norm_value(q, raw):
         return ""
     if q["kind"] == "text":
         return text
+    # 「自定义」不是一个答案，是一个**要求用户写数字**的占位选项：
+    # 用户若真把 "custom" 当答案提交，必须当场说清怎么写，不能存下一个没有秒数的字符串。
+    if q.get("allow_text") and text.lower() in ("custom", "自定义"):
+        raise SystemExit("[intake] %s 选了「自定义」就要写出具体时长，例如："
+                         "--set %s:\"不少于 12 分钟\"（也认「2 分半」「90 秒」）"
+                         % (q["id"], q["id"]))
     for o in q.get("options") or ():
         if text == o["value"]:
             return o["value"]
@@ -243,6 +257,19 @@ def _norm_value(q, raw):
     for o in q.get("options") or ():
         if o.get("brief") and o["brief"] and o["brief"] in text:
             return o["value"]
+    # allow_text 的题（目前只有时长）：认出时长就存原话，由 propose 解析成秒数。
+    # 不这么做的话，「自定义」档只能存一个 "custom" 字符串，等于什么都没说。
+    if q.get("allow_text"):
+        try:
+            # 同目录、延迟导入：intake 只在有人写自定义时长时才需要解析器。
+            import propose as _P                            # noqa: PLC0415
+            if _P.parse_duration(text) is not None:
+                return text
+        except Exception:                                   # noqa: BLE001 —— 解析器不可用就按非法值报错
+            pass
+        if text == "custom":
+            raise SystemExit("[intake] 选了「自定义」就要写出具体时长，例如："
+                             "--set duration:\"不少于 12 分钟\"")
     raise SystemExit("[intake] %s=%r 不是合法选项；可选：%s"
                      % (q["id"], raw, " / ".join(o["value"] for o in q.get("options") or ())))
 
@@ -281,11 +308,16 @@ def brief_text(data):
         val = str(answers.get(q["id"]) or "").strip()
         if not val:
             continue
+        matched = False
         for o in q.get("options") or ():
             if o["value"] == val:
+                matched = True
                 if o.get("brief"):
                     parts.append(o["brief"])
                 break
+        if not matched:
+            # 自定义时长原话（"不少于 12 分钟"）：原样进 brief，由 propose 解析。
+            parts.append(val)
     note = str(answers.get("note") or "").strip()
     if note:
         parts.append(note)

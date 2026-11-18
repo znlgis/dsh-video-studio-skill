@@ -154,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；79 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；81 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -463,7 +463,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage styl
 
 | 块 | 决定什么 | 关键字段 |
 |---|---|---|
-| `structure` | 段落数与目标时长 | `segments` / `beats` / `hold_policy` / `target_sec` |
+| `structure` | 段落数与目标/下限时长 | `segments` / `beats` / `hold_policy` / `target_sec` / `target_mode`（exact / at_least） |
 | `visual` | 画面：配色、字体、版式、动效、装饰、字幕 | 见下面的字段表 |
 | `audio` | 配乐参数、声线、音效密度 | `music`（调式/BPM/调性/情绪/seed）/ `voice` / `sfx` |
 | `pacing` | 节奏 | `lead` / `tail` / `min_dur` / `hold` / `item_stagger` |
@@ -531,17 +531,21 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage styl
 - 可审计：`--stage layout` 打印每段选了哪类构图，并落 `work/storyboard.json`，
   每段都带 `layout` 字段（哪一章用了哪个骨架一眼可查）。
 
-#### 5.5.2b 时长要求：关于「2 分钟」这类 brief 的真实语义
+#### 5.5.2b 时长要求：「不少于 N 分钟」是**下限**，不是精确目标
 
-`--brief` 里写「2 分钟」「90 秒」「一分半」「3 分 30 秒」会被解析成 `duration_target`，并落进
-`design.structure.target_sec`。它真正决定两件事：
+问诊的时长题给的是「不少于 1 / 3 / 5 / 7 / 9 分钟」+ 自定义原话（也认「2 分钟」「90 秒」这类精确说法）。
+解析结果分两档，落在 `design.structure.target_sec` 与 `target_mode`：
 
-1. **候选的段落数**（`designkit` 按目标时长决定 `structure.segments`），所以 90 秒的 brief 与 30 秒的 brief，
-   候选结构本身不同；
-2. **渲染时的对账**：`render.py` 会打印「目标时长 vs 实测」，差 > 15% 时告警。
+| `target_mode` | 触发写法 | 渲染对账 |
+|---|---|---|
+| `at_least` | 「不少于 5 分钟」「至少 3 分钟」「12 分钟以上」 | **只有不足**才告警（超出去是好事，不报） |
+| `exact` | 「2 分钟」「90 秒」「一分半」 | 双向告警（差 >15%） |
 
-**但它不会截断旁白**：成片长度仍由 TTS 实测时长决定。写完 `film.json` 的台词后如果总时长和目标差太多，
-要改的是台词量（或 `pacing` 的停留），不是指望渲染器「压到 90 秒」。
+两档都只影响两件事：候选的段落数（`designkit` 按 `target_sec` 决定 `structure.segments`）与渲染时的对账口径。
+
+**都不会截断旁白**：成片长度永远由 TTS 实测时长决定。写了「不少于 5 分钟」而台词只够 4 分钟，
+渲染器只会告诉你「没有达到下限（差 60.0s）」，要补的是台词量（或 `hold`/`lead`/`tail`），
+不是指望它凭空拉长。
 
 #### 5.5.3 设计多样性：候选之间、以及片与片之间
 
@@ -762,7 +766,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（79 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（81 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1106,7 +1110,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
 | 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
 | 浏览器逐帧渲染 | `webengine.py` |
-| 回归自检（79 条断言） | `selfcheck.py` |
+| 回归自检（81 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
@@ -1161,7 +1165,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 79 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 81 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

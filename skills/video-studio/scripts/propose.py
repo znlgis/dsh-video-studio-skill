@@ -329,6 +329,36 @@ def parse_duration(text):
     if best < 3.0 or best > 1800.0:
         return None            # 与 designkit 的契约范围一致（3–1800 秒）
     return round(best, 2)
+# 「不少于 N 分钟 / 至少 N 分钟 / N 分钟以上」= 下限语义。
+# 为什么必须区分：目标语义下「还差 30%」只是告警；下限语义下「还差 30%」= 没达标。
+# 成片长度永远由 TTS 实测决定，两种语义都不能截断旁白，区别只在**怎么报**：
+# exact -> 差值双向告警；at_least -> 只有不足才告警，超出是好事（不提示）。
+_FLOOR_WORDS = ("不少于", "不少于", "至少", "最少", "不低于", "不低于",
+                "起", ">=", "≥", "以上")
+
+
+def parse_duration_spec(text):
+    """解析时长要求 -> (秒数, 模式) 或 (None, None)。
+
+    模式："at_least"（下限，例如「不少于 5 分钟」） / "exact"（精确目标，例如「2 分钟」）。
+    只认 parse_duration 认得的写法（宁可比对少认，也不要猜错）；认不出就返回 (None, None)，
+    整句仍作为 topic 参与题材理解，不会被静默吞掉。
+    """
+    sec = parse_duration(text)
+    if sec is None:
+        return None, None
+    raw = str(text or "")
+    # 只在与时长数字**同一短句**里找下限词：避免「结尾用中文，不少于三条建议」这类
+    # 别的句子的「不少于」被算进时长语义（实测这种误判会让整片被当成下限模式）。
+    import re as _re
+    for seg in _re.split(r"[，。；、,.;!?！？\n]+", raw):
+        if parse_duration(seg) is None:
+            continue
+        if any(w in seg for w in _FLOOR_WORDS):
+            return sec, "at_least"
+        return sec, "exact"
+    return sec, "exact"
+
 # ---------------------------------------------------------------- 出片前问诊
 # 一次问完的决策表由 intake.py 落盘（work/intake.json）。propose 读它的原因是：
 # 「先出方案」只解决"外观谁拍板"，素材/时长/声调这些输入仍然要靠问。实际会话里
@@ -426,8 +456,9 @@ def _brief_of(text, script):
             neg = any(w in seg for w in _NEGATIVE_WORDS)
             (avoid if neg else must).append(seg)
     # 时长要求也要接住（漏了就是恒为 None，用户写了「2 分钟」等于没写）。
-    dt = parse_duration(text)
-    return {"topic": topic, "duration_target": dt,
+    # 下限与精确目标分开记：见 parse_duration_spec 的说明。
+    dt, dt_mode = parse_duration_spec(text)
+    return {"topic": topic, "duration_target": dt, "duration_mode": dt_mode,
             "must_have": must, "avoid": avoid}
 
 
