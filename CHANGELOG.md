@@ -42,7 +42,7 @@
 | `python tools/ci_check.py -v`（装 numpy/Pillow） | **PASS 14 / FAIL 0 / SKIP 0** |
 | `python tools/ci_check.py -v`（屏蔽 numpy/Pillow，模拟裸机） | **PASS 13 / FAIL 0 / SKIP 1**（第 13 项明确打印"缺 numpy"），**退出码 0** |
 | `python tools/footage_selftest.py` | **PASS 7 / FAIL 0**（离线约 30 秒） |
-| 真 CI | 待本次推送验证（repo ubuntu/windows + py39 三个 job 全绿才算收尾） |
+| 真 CI（run 44314293016 @ 3649b86） | **6 个 job 全绿**：repo check（ubuntu / windows）、python 3.9 compat、skill selfcheck（Linux / Windows）、webengine selftest |
 
 ## 2.1.0 — 素材剪辑线（footage 模式）：有素材就剪，没素材才画（2026-11-18）
 
