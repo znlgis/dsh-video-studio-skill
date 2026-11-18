@@ -6,6 +6,176 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.3.0 — 适配 DSH 0.2.x：技能注册改用 registerProvider（修「插件装了但技能没挂上」）（2026-11-19）
+
+> 起因是「适配 DSH 最新版本」。本机 DSH 是 **0.2.2-rc.5**，实测本插件（v2.2.0 与已安装的 v2.1.1）
+> 在上面 **技能根本没有挂载**：`apply()` 只打印一条「缺少可选依赖 @deepseek-ai/dsh-skill-filesystem」
+> 就返回，`ctx.skills.registerProvider` 调用次数 = 0。插件行、`node --check`、`selfcheck`、`ci_check`
+> 当时全都是绿的——这是典型的「看着装好了，其实没生效」。
+
+### P0：技能注册接口换代（静默降级 → 真的挂上）
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| DSH 0.2.2-rc.5 上 `registerProvider` 调用 0 次，`ctx.skills.list()` 里没有 video-studio | 入口只走 0.1.x 的 `dsh-skill-filesystem.apply(ctx, config)`，而该包在 0.2.x 里是**运行时自带**（在 `app.asar` 内），插件目录 `import` 解析不到 → `ERR_MODULE_NOT_FOUND` → 走「缺少可选依赖」降级分支 | 入口改为**自带 provider**：`ctx.skills.registerProvider(create)`（0.2.x 主路径）；只有 `registerProvider` 不存在时才回退老路径。主路径**不 import 任何 `@deepseek-ai/*` 包** |
+
+自带 provider 的语义对齐官方 `dsh-skill-filesystem` 的 bundled 根：
+
+- `list()` 只读每个 `SKILL.md` 的 YAML frontmatter（正文在 `get()` 才读，不在会话启动时整篇加载）；
+- `rank = 600`（`BUNDLED_SKILL_RANK`：打包技能根的标准优先级）、`source = "bundled"`、`provider = "video-studio"`；
+- `resourceBase` = 技能目录（`{kind:"directory"}`），保证 `SKILL.md` 里的相对引用能解析；
+- frontmatter 非法只告警并跳过该技能，**绝不抛错**——挂不上技能是降级，不是崩溃；
+- 手写 frontmatter 解析器（只认「顶层 key: 标量」这一小撮），不引 YAML 库：插件要在没有 `node_modules` 的环境里直接跑。
+
+### 兼容性判据改成 `engines.dsh`
+
+- `package.json` 新增 `engines.dsh: ">=0.1.0-rc.6 <0.3.0-0"`。DSH 0.2.x 的加载器读它判兼容性；
+  **写了这个字段就只按它判、忽略 `peerDependencies`**，且判定用 `includePrerelease: true`，所以 `0.2.2-rc.5` 在范围内。
+- `@deepseek-ai/dsh-skill-filesystem` 从「唯一依赖」降级为**只服务 0.1.x 回退路径的可选 peer**（`optional`），
+  缺失不再影响 0.2.x；README 的兼容性章节按两代接口重写。
+
+### 新增护栏：`tools/plugin_entry_check.mjs`（接进 `ci_check` 第 2 项）
+
+这类「静默降级」光靠 `node --check` 和自检抓不到，所以补一个**真的跑一遍入口**的冒烟：
+用最小 `ctx` 桩（只有 `skills.registerProvider` + `logger`）调 `apply`，断言——
+
+1. 入口导出 `name` / `inject`（含 `skills`）/ `apply`；
+2. `apply` 确实注册了 **1 个** provider（为 0 时把降级日志原文带出来）；
+3. 该 provider 实现 `list()` 与 `get()`；
+4. `list()` 返回 1 个候选，`name/rank/source/provider/resourceBase/invocation` 全对；
+5. `get()` 返回的正文**等于 SKILL.md 中 frontmatter 之后的部分**（防止解析器把正文弄丢或把 frontmatter 混进去）。
+
+负实验（把 v2.1.1 的旧入口放进去跑）：
+
+```
+FAIL 插件入口：apply 必须注册 1 个技能 provider（实际 0 个）。为 0 通常意味着入口走了某条降级分支：
+[video-studio] 缺少可选依赖 @deepseek-ai/dsh-skill-filesystem，本次不挂载技能…（ERR_MODULE_NOT_FOUND）
+```
+
+`ci_check` 仍是 **14 项**（第 2 项由「JS 语法」扩为「JS 语法 + 插件入口冒烟」，不新增检查项，避免文档里所有 `14 项` 口径连锁改动）。
+
+### 验收（在 DSH 0.2.2-rc.5 的真实运行时上）
+
+| 项 | 结果 |
+|---|---|
+| 旧入口（v2.1.1）挂载 | `apply` 后 `registerProvider` 调用 **0 次**（复现缺陷） |
+| 新入口挂载 | 调用 1 次；`provider.name = "video-studio"`，`list()` 1 个候选（rank 600 / source bundled / resourceBase 指向技能目录） |
+| 真实 `SkillRegistry` 集成 | `registry.list()` 返回 1 条 `video-studio`；`registry.get("video-studio")` 返回 54441 字正文 + directory 型 `resourceBase` |
+| `engines.dsh` 判定 | 用 DSH 自带的 `evaluatePluginCompatibility()` 跑：`>=0.1.0-rc.6 <0.3.0-0` 等四个候选范围在 0.2.2-rc.5 上均 `undefined`（= 兼容） |
+| `node tools/plugin_entry_check.mjs --verbose` | 16 条断言全 ok，`PASS 插件入口：… list 1 个候选 / get 54441 字` |
+| `python tools/ci_check.py -v` | `PASS 14 / FAIL 0 / SKIP 0` |
+
+### 升级说明（已装旧版的用户）
+
+已安装的 2.1.1 在 DSH 0.2.x 上**技能不会挂载**（插件列表里看着是启用的）。升级到 2.3.0 即可：
+
+```bash
+dsh plugin --profile <profile> add @dsh-gis/dsh-video-studio-skill@2.3.0
+# 或本地 checkout：dsh plugin --profile <profile> add D:/path/to/dsh-video-studio-skill
+```
+
+> 桌面版请在「插件」页重装/更新该插件行。装好后新开会话，在技能目录里应能看到 **video-studio**。
+## 2.2.0 — 全面审查修复：门禁不再空转、竖屏像素有基线、文档命令可执行（2026-11-19）
+
+> 起因：一次「全面审查整个项目并优化完善」。审查分四路并行只读跑（脚本质量 / 文档一致性 /
+> 工具链与打包 / assets 与 web 引擎），加 Lead 侧端到端实测（intake → propose → confirm →
+> render stills → --preview → --stage all 真出片，含 TTS / 混音 / VMAF / ASR）。
+> **先说结论：没有发现会让成片必错的 P0。** 问题集中在两类：
+> ① **门禁看着在跑、其实没查**（契约文件没人读、竖屏基线从没被选中、CI 项 glob 为空也算 PASS）；
+> ② **文档教你写的命令会失败**（`--set duration:45s` 不被解析、`--compose --golden` 被静默丢弃）。
+> 本版逐条收掉，并给每类都留下了可复现的负实验证据。
+
+### P0：无（先说清楚，免得被当成"又发一个大版本"）
+
+审查确认：`ruff` 0 违规、`ci_check` 14 项、`selfcheck` 85 条、`footage_selftest` 7 项，
+在未修改的 HEAD（3864b28）上全绿；端到端 dry-run 也能出片。本版不是修崩溃，是修**可信度**。
+
+### P1-1 契约文件是装饰品：`schemas/*.json` 没人读、也没人验
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 把 `schemas/design.schema.json` 改成坏 JSON，`ci_check` 仍 `PASS 14 / rc=0` | 第 3 项只扫 package/marketplace/locale/assets，`schemas/` 不在清单里 | 第 3 项并入 `schemas/*.json`，并断言每个契约都有以 `http` 开头的 `$schema` 方言 |
+| `film.schema.json` 与真正执行的 `filmcheck.py` 有 33 处分歧（`music.key` 数字被判非法、`video.out_width` 未声明、`sfx.cues` 的 25 个透传参数未声明） | 两份"真源"，且没人跑过差分 | 对齐会造成**误拒**的分歧；文件描述里写明"执行者是 filmcheck.py，本文件是字段说明"，README 同步改口 |
+| `footage.schema.json` 与仓库里**唯一**真实样例互斥（根不允许 `_comment`、`sources[]` 不允许 `burned_subs`/`watermark`，而 `footageqa` 正靠这两个字段做 F2/F3） | schema 没跟上 F2/F3 的字段演进，CI 也从不拿它校验 | schema 补 `burned_subs`/`watermark` 与下划线注释键；第 13 项改用 `jsonschema` 真校验回归样例 + 模板（缺包记 SKIP，不记 PASS） |
+
+### P1-2 竖屏像素门禁从没被执行过（并且基线早已漂移）
+
+- 证据：`python tools/golden_frames.py --layout portrait --check` → **FAIL 3/3**（frame 36/270/369 全 DIFF）；
+  `note` 明说 script/scenes/filmkit/stylekit/designkit 五个输入指纹都变过，而 `font_fp`/`env_fp` 与基线一致
+  ——是**真渲染回归**，不是换机噪声。
+- 根因：`selfcheck` 的金帧用例写死横屏基线、compose 用例靠导入期 `K.H/K.W` 选 profile，而 selfcheck 只跑一次、恒横屏；
+  全仓除 `tools/golden_frames.py` 自身外**零引用** `golden_frames_portrait.json`。
+- 修法：金帧用例改**双 profile**（横屏 + 竖屏各比一次，竖屏显式 `--layout portrait`），compose 用例同样双 profile；
+  竖屏基线按"有意改动后重录"的正规路径重录（`--write`），重录后 PASS 3/3。
+- 语义保持：像素不一致 → **FAIL**；字体/环境指纹不同 → **SKIP**（跨机不误报）；只有两个 profile 都 pass 才 PASS。
+
+### P1-3 `ci_check` 有 4 项"声称在查、实际空转"
+
+| 项 | 空转形态 | 修法 |
+|---|---|---|
+| 12 film 契约 | 只看 `filmcheck` 退出码；夹具变成 artifact 形态时它 `rc=0 + skipped=true`，这项照样 PASS | 改 `--json` 并解析，`skipped` 为真即失败 |
+| 13 footage 契约 | 任何 `ModuleNotFoundError` 都记 SKIP（本地模块被改名也报"缺依赖"） | 只有**三方白名单**里的包才 SKIP；本地模块导入失败 = 包坏了，FAIL |
+| 14 断言条数 | `9 条` 被当序号忽略；改写成中文数字则零命中，仍 PASS | 补一位数正则 + 每篇必查文档至少命中 1 处（未命中即失败） |
+| 11 单文件体积 | `.jpg` 参与判定而 `.png` 不参与；`.ruff_cache`/`.tmpcheck` 被算进来；文案写"所有文本文件" | 二进制后缀统一排除、缓存目录跳过、文案改"受检文本文件" |
+
+### P1-4 文档命令照着抄会失败
+
+- `--set duration:45s` / `duration:30s`（README、SKILL.md、`intake.py` docstring 三处都这么教）在 `intake.py` 处报
+  「不是合法选项」——`parse_duration` 当时只认中文「分/秒」。修法：**扩解析器**而不是改文档
+  （`45s` / `2m` / `1.5min` / `90sec` 都认，大小写不敏感、带左右边界防误匹配，仍守 3–1800 s 与"只取首个匹配"）。
+- `--compose --check --golden /tmp/nonexistent.json` 返回 `pass`（`--golden` 被 `_compose_default_golden()` 无条件覆盖）。
+  修法：显式路径在 check/write 两种模式下都生效；缺基线时 `skipped`（`--strict` 下非 0），不再冒充通过。
+- `--preview N` 在干净目录直接 `[前置] 没有 timeline.json` 失败，而 `--stage stills` 会自动补 tts+layout。
+  修法：preview 分支照 stills 的写法自动补前置，并明说自己补了什么。
+- `--set format:1920x1080`（intake docstring 示例）合法值是 `1080p30` 这类枚举，照抄即报错。修法：示例改真值并注明「以 `--questions` 的 `options[].value` 为准」。
+
+### P1-5 素材线的两处静默丢轨 / 静默跳门禁
+
+- `footageqa.f6_voice_dominance` 只取 ffmpeg `.stdout` 不看返回码 → 解码失败得到空数组 → 记 `skipped`，
+  而 F6 正是"原片解说盖住旁白"的唯一判据。修法：先判 `returncode`，非 0 记 **fail** 并带 stderr 尾部。
+- `footageedit.decode_audio` 同款问题 → 该轨整条消失且 QC 无痕。修法：`rc != 0` 或结果为空直接抛错。
+- `filmkit.snap()` 不判返回码也不验产物 → 联系表可能少一镜，而 F7"人看过"是交付凭据。
+  修法：`snap()` 失败抛错；`make_contact_sheet` 逐镜收集失败并让 **F7 记 fail**（证据不全 ≠ 没执行）。
+- `filmkit.media_dur()` 读不到返回 `0.0`，而 `if vd and ad and abs(vd-ad) > 0.05` 遇到 0.0 会**整条跳过**等长校验。
+  修法：新增 `media_dur_checked()`（读不到就抛），`mux` 与 `footageedit.assemble` 改用它；`media_dur` 保留给展示用途并在 docstring 写明"不许用于判定"。
+
+### P1-6 性能断言把"机器忙"判成"代码坏了"
+
+- 证据：4 并发跑 `sfxkit --selftest` **4/4 FAIL**（`rain=1.56s` 超 `PERF_BUDGET_SCIPY=1.5`）；单跑 3 次全绿。
+  实测耗时分布：空载最慢 `wind=1.27s`（已贴预算 18% 余量）、4 并发 `rain=1.65s`/`wind=1.62s`。
+- 修法：功能断言仍硬失败（None/空数组/NaN-Inf/静音/越界）；性能改**软预算 + 硬上限 2×**——超软预算打 WARN 并复核一次，
+  超 2× 才 raise（那才是算法退化）。用例名同步改为"性能不退化"，detail 始终打印最慢三项。
+- 证据（改后）：8 并发 8/8 PASS（含 WARN）；把预算临时调到 0.3 s 模拟退化时仍正确 FAIL。
+
+### P2：可维护性与口径（一并收掉）
+
+- **ASR 繁简表 166 → 352 键**：`條/鏈/煙` 等常用字缺失，把繁体输出算成错字，G12 字符召回被压低（实测 0.857 → 0.929、0.800 → 0.933）。
+  剩下未归一的是**真实 ASR 错字**（到→刀、质→致），注释里写明"不该被繁简映射掩盖"。
+- **`webengine.py` docstring 说"只接受 16:9 横屏"**，实际已支持 9:16 竖屏；`qa_text.js` 旧行为的描述也已过期——改为现状，零行为改动。
+- **示例页 `index.html` 的 `boot()` 没 catch**：页面一炸就是 unhandled rejection，`window.ready` 永不置 true，只能等 300 s 超时。
+  修法：`boot().catch` 写 `window.__BOOT_ERROR__`；`webengine` 的 ready 超时报错现在会把这条异常带出来。
+- **`SKILL.md`（92 KB）没有目录**：补 18 项锚点目录、修唯一一处标题跳级（H5→H4）、给「§0.1 为什么排在最前」留一句注释。
+- **`studio.py` 写着"76 条断言"**（实为 85）、**`quality-gates.md` 的验收示例写 `PASS 70`**、**`SKILL.md` 写 `PASS 67 / 12`**：
+  改成占位 + "真源在 `CASES`/`CI_CHECK_COUNT`"，并说明 `ci_check` 第 14 项会自动核这类句式。
+- **`ci.yml` 头注释说"两个 job"**（实为 5 个）、**CHANGELOG 说"6 个 job 全绿"**（其中 Windows selfcheck 是 `continue-on-error`）：改成与事实一致的口径。
+- **`estimate.py` 里 `_CANVAS` 定义两次**（后一个覆盖前一个）、**`silhouette_qa` 的 `AUTO_SEEDS` 全仓 0 引用**、
+  **`footagekit` 三元表达式里的 `if False else` 死分支**、**`filmkit` 三处 `open()` 未用 `with`**：清理。
+- **`scenes.py` 的 legacy 绘制器**仍是历史基线（约 110 行）但**不可达**：注释改成明确的"当前不可达、保留用于历史对拍"，避免下一个人误以为还支持 legacy。
+
+### 验收（本机实测，全部命令可复现）
+
+| 项 | 结果 |
+|---|---|
+| `python -m ruff check .` | **0 违规** |
+| `python tools/ci_check.py -v` | **PASS 14 / FAIL 0 / SKIP 0**（第 3/11/12/13/14 项均有负实验证明能红） |
+| `python skills/video-studio/scripts/selfcheck.py` | **PASS 85 / FAIL 0 / SKIP 0**（金帧用例已双 profile） |
+| `python tools/footage_selftest.py` | **PASS 7 / FAIL 0** |
+| 金帧四组合 | 横屏 3/3、竖屏 3/3、横屏构图 10/10、竖屏构图 10/10 全 PASS |
+| 端到端出片 | intake → propose → confirm → `--stage all` 出 1280×720/9.42 s 成片；门禁 pass 12 / fail 0 / skipped 1（签核） |
+| 组件自检 | webengine 36/36、qa_frames 22/22、qavmaf 11/11、musicgen 26/26、sfxkit 16/16（含 4 并发） |
+
+> 口径不变：`PASS` = 这次真查了且通过；`FAIL` = 查了没过；`SKIP` = **这次没执行**，不等于通过。
+
 ## 2.1.1 — CI 三红修复：lint 归零 + 契约检查不再因缺可选依赖误红（2026-11-18）
 
 > 2.1.0 推上去后 GitHub Actions 是红的：repo check（ubuntu/windows）红在 ruff，
@@ -42,7 +212,7 @@
 | `python tools/ci_check.py -v`（装 numpy/Pillow） | **PASS 14 / FAIL 0 / SKIP 0** |
 | `python tools/ci_check.py -v`（屏蔽 numpy/Pillow，模拟裸机） | **PASS 13 / FAIL 0 / SKIP 1**（第 13 项明确打印"缺 numpy"），**退出码 0** |
 | `python tools/footage_selftest.py` | **PASS 7 / FAIL 0**（离线约 30 秒） |
-| 真 CI（run 44314293016 @ 3649b86） | **6 个 job 全绿**：repo check（ubuntu / windows）、python 3.9 compat、skill selfcheck（Linux / Windows）、webengine selftest |
+| 真 CI（run 44314293016 @ 3649b86） | **6 个 runner 实例全绿**：repo check（ubuntu / windows，matrix 2 个）、python 3.9 compat、skill selfcheck（Linux）、webengine selftest、skill selfcheck（Windows，**advisory**：`continue-on-error`，红也显示绿）。<br>口径见 `.github/workflows/ci.yml` 头部注释：5 个 job，其中 skill-windows 仍是 advisory（等它连续绿几轮再转必过）。 |
 
 ## 2.1.0 — 素材剪辑线（footage 模式）：有素材就剪，没素材才画（2026-11-18）
 

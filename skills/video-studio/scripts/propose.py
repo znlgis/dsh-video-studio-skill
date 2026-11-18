@@ -298,9 +298,13 @@ def _cn_number(text):
 def parse_duration(text):
     """从一句话里解析时长（秒）。认不出返回 None。
 
-    支持：「90秒」「2分钟」「2.5分钟」「一分半」「3分30秒」「1分30秒」「两分钟」。
+    支持（中文单位）：「90秒」「2分钟」「2.5分钟」「一分半」「3分30秒」「1分30秒」「两分钟」。
+    支持（ASCII 单位，README/SKILL/intake 的示例写的就是这种）：「45s」「20 s」「90sec」
+    「1.5min」「2m」「3minutes」——大小写不敏感，数字与单位之间允许空格。
     为什么只认这些：宁可比对少认，也不要猜错——猜错会让成片段落数按错误时长排，
     用户更难发现。认不出的句子不会被静默吞掉：整句仍作为 topic 参与题材理解。
+    为什么只取**首个**匹配、不把多个时长相加：「每 5 分钟走 20 秒」是在说节拍，
+    相加成 320 秒会把整片长度排错；取首匹配（5 分钟 = 300 秒）至少和句子的主语一致。
     """
     import re as _re
     s = str(text or "")
@@ -324,6 +328,22 @@ def parse_duration(text):
             v = _cn_number(m.group(1))
             if v is not None:
                 best = float(v)
+    if best is None:
+        # ASCII 单位：文档把 `--set duration:45s` 写成示例（README / SKILL / intake 三处），
+        # 而上面两条分支只认「分/秒」——照文档执行会被 intake 判成"不是合法选项"。
+        # 单位按长到短排（min before m, sec before s），否则 "2min" 会被截成 "2m" 后
+        # 在 "in" 处撞上右边界而整体不认。
+        # 左边界：数字前不能是字母/数字（"ipv6s"、"h264s" 里的字母不是单位）；
+        # 连 "." 也一起排除，"v1.45s" 这种版本号写法不能被读成 45 秒。
+        # 右边界：单位后不能紧跟字母（"2months"/"45secondsx" 必须整体不认，
+        # 而不是截成 2m/45s）——宁可少认，也不能猜错。
+        m = _re.search(
+            r"(?<![0-9A-Za-z.])([0-9]+(?:\.[0-9]+)?)\s*"
+            r"(min(?:ute)?s?|m|sec(?:ond)?s?|s)(?![A-Za-z])",
+            s, _re.IGNORECASE)
+        if m:
+            v = float(m.group(1))
+            best = v * 60.0 if m.group(2).lower().startswith("m") else v
     if best is None or best <= 0:
         return None
     if best < 3.0 or best > 1800.0:
@@ -341,8 +361,9 @@ def parse_duration_spec(text):
     """解析时长要求 -> (秒数, 模式) 或 (None, None)。
 
     模式："at_least"（下限，例如「不少于 5 分钟」） / "exact"（精确目标，例如「2 分钟」）。
-    只认 parse_duration 认得的写法（宁可比对少认，也不要猜错）；认不出就返回 (None, None)，
-    整句仍作为 topic 参与题材理解，不会被静默吞掉。
+    只认 parse_duration 认得的写法（宁可比对少认，也不要猜错），所以 ASCII 写法同样走这条路径：
+    「不少于45s」-> (45.0, "at_least")，「45s 以上」也判下限。
+    认不出就返回 (None, None)，整句仍作为 topic 参与题材理解，不会被静默吞掉。
     """
     sec = parse_duration(text)
     if sec is None:

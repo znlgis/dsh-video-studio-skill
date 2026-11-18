@@ -240,7 +240,8 @@ def build_treatment_filter(treatment, video):
         cw = int(crop.split(":")[0]) if crop else vw
         chh = int(crop.split(":")[1]) if crop else vh
         if cw and chh:
-            scale = "%d:%d" % (vw, int(round(vh * 1.0 * chh / cw)) if False else max(2, int(round(vw * chh / cw))))
+            # 只按宽度等比缩，高度由 crop 的宽高比反推（不拉伸）。
+            scale = "%d:%d" % (vw, max(2, int(round(vw * chh / cw))))
     if scale:
         sw, sh = [int(x) for x in scale.split(":")[:2]]
         if sh > vh:      # 超高就按高度贴边，避免 pad 失败
@@ -438,8 +439,11 @@ def transcribe(media, work, *, model="small", lang="zh", force=False,
         return data
     t0 = time.time()
     log("  [asr] 解码 %s" % media.name)
-    audio = _decode_pcm(media)
-    dur = len(audio) / 16000.0
+    # 采样率只写一次：_decode_pcm 的默认 sr 与这里算时长用的除数必须是同一个常量，
+    # 否则改 sr 参数后时长会静默算错（16k 是 ASR 侧口径，与音频总线的 48k 无关）。
+    asr_sr = 16000
+    audio = _decode_pcm(media, sr=asr_sr)
+    dur = len(audio) / float(asr_sr)
     log("  [asr] %.1fs 音频，加载模型 %s" % (dur, model))
     from faster_whisper import WhisperModel
     m = WhisperModel(model, device="cpu", compute_type="int8")

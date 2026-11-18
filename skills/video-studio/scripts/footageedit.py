@@ -187,14 +187,25 @@ def cut_shots(footage, edl, work, *, crf=16, preset="veryfast"):
 # ============================================================================
 
 def decode_audio(path, sr=SR):
-    """解成 (N,2) float32；单声道自动复制成双声道，保证总线形状统一。"""
+    """解成 (N,2) float32；单声道自动复制成双声道，保证总线形状统一。
+
+    解码失败**必须抛错**，不能返回空数组：调用方会把它直接加进总线，
+    空数组等于"这一轨整条消失"，而 QC 报告里看不出任何痕迹。
+    （2026-11 审查实测：素材路径存在但内容坏时，原实现静默丢轨。）
+    """
     import numpy as np
-    raw = subprocess.run([filmkit.FFMPEG, "-v", "error", "-i", str(path),
-                          "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
-                         capture_output=True).stdout
-    a = np.frombuffer(raw, dtype=np.float32)
+    proc = subprocess.run([filmkit.FFMPEG, "-v", "error", "-i", str(path),
+                           "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
+                          capture_output=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("音频解码失败（%s，ffmpeg rc=%d）：%s"
+                           % (path, proc.returncode, (tail[-1] if tail else "无 stderr")[:200]))
+    a = np.frombuffer(proc.stdout, dtype=np.float32)
     if len(a) % 2:
         a = a[:-1]
+    if a.size == 0:
+        raise RuntimeError("音频解码结果为空（%s）：文件存在但没有可解的音轨" % path)
     return a.reshape(-1, 2).copy()
 
 
@@ -376,9 +387,10 @@ def assemble(footage, work, out_path, *, ass_path=None, crf=19, preset="medium")
         raise SystemExit("缺 %s（先跑 cut/concat）" % silent)
     if not mix.exists():
         raise SystemExit("缺 %s（先跑 mix）" % mix)
-    vd = filmkit.media_dur(str(silent))
-    ad = filmkit.media_dur(str(mix))
-    if vd and ad and abs(vd - ad) > 0.05:
+    # 用 checked 版：media_dur 读不到返回 0.0，而 0.0 为假值会让下面这条等长校验整条跳过。
+    vd = filmkit.media_dur_checked(str(silent), "无声视频")
+    ad = filmkit.media_dur_checked(str(mix), "混音音轨")
+    if abs(vd - ad) > 0.05:
         raise SystemExit("音视频时长不一致：video %.3fs vs audio %.3fs（差 %.3fs）"
                          % (vd, ad, abs(vd - ad)))
     out_path = Path(out_path).resolve()

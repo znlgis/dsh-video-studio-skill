@@ -10,6 +10,11 @@
   "lines"
  ],
  "additionalProperties": false,
+ "patternProperties": {
+  "^_": {
+   "description": "以 _ 开头的注释键（如 _comment）：只给人看，不参与渲染与门禁逻辑"
+  }
+ },
  "properties": {
   "title": {
    "type": "string",
@@ -24,6 +29,11 @@
      "id"
     ],
     "additionalProperties": false,
+    "patternProperties": {
+     "^_": {
+      "description": "以 _ 开头的注释键：只给人看，不参与渲染与门禁逻辑"
+     }
+    },
     "properties": {
      "id": {
       "type": "string",
@@ -68,6 +78,50 @@
      "license_note": {
       "type": "string",
       "description": "出处/授权说明（F5 门禁要求非空）"
+     },
+     "burned_subs": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "原片烧录字幕带的纵向范围（源像素）。F2 原字幕残留判定拿它和 treatment.crop 之后的可见区做几何相交；字段名与 footageqa._declared_band 消费的写法一致",
+      "required": [
+       "y0",
+       "y1"
+      ],
+      "properties": {
+       "y0": {
+        "type": "number",
+        "description": "字幕带上边界（源像素 y）"
+       },
+       "y1": {
+        "type": "number",
+        "description": "字幕带下边界（源像素 y）"
+       }
+      }
+     },
+     "watermark": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "原片台标/水印框（源像素）。F3 水印残留判定拿它和 treatment.crop 之后的可见区做几何相交；字段名与 footageqa._declared_band 消费的写法一致",
+      "required": [
+       "x",
+       "y",
+       "w",
+       "h"
+      ],
+      "properties": {
+       "x": {
+        "type": "number"
+       },
+       "y": {
+        "type": "number"
+       },
+       "w": {
+        "type": "number"
+       },
+       "h": {
+        "type": "number"
+       }
+      }
      }
     }
    }

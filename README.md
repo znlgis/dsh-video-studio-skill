@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.3.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -24,7 +24,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 | "我查过了"无法复现 | `out/QC-REPORT.md` + `work/gates.json`：三档 gate matrix，"没执行"独立成 `skipped` |
 | "我签过了"变成空头支票 | 签核绑内容指纹：改剧本 / `scenes.py` / 引擎，旧签核自动失效 |
 | 改一句台词不知道要重跑什么 | `work/manifest.json` 记每阶段输入/输出指纹，`--stage explain` 直接给最小重跑命令 |
-| `holds` 写成拼写错误却静默失效 | `schemas/film.schema.json` + `filmcheck.py`，并接进 `ci_check` 第 12 项 |
+| `holds` 写成拼写错误却静默失效 | `filmcheck.py` 执行 film.json 契约（接进 `ci_check` 第 12 项）；`schemas/film.schema.json` 供人和编辑器读字段（不做校验，只有两个测试读它核对枚举） |
 | 机器替你选风格、你从头到尾没参与 | **提案优先**：`propose.py` 先出 N 个候选（各带静帧联系表 + 设计距离），人 `--confirm` 后才冻结 `design.json` |
 | 每个视频都差不多 | 设计 DSL 现场采样（每次新 nonce）+ 候选两两 ≥2 维不同 + 底色色相分叉 + **片间去重台账** |
 | 外观只能从几套模板里挑 | 没有内置风格表：配色是连续色相空间、母题/转场/缓动/版式/字幕全字段开放，且必须过 `theme_lint` 与 G13 剪影门禁 |
@@ -210,7 +210,7 @@ skills/video-studio/
   assets/web/                浏览器页面示例（--engine web 需要你自己的页面；不是出片模板）
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
-schemas/film.schema.json     film.json 的契约（draft-07 子集）
+schemas/film.schema.json     film.json 字段说明（给人/IDE 补全；执行者是 scripts/filmcheck.py）
 tools/ci_check.py            仓库级体检（14 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；含 preflight/vmaf/asr）
 tools/golden_frames.py       金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
@@ -246,17 +246,26 @@ ffmpeg 路径可用环境变量 `FILMKIT_FFMPEG` 覆盖，字体候选在 `filmk
 
 ## 兼容性
 
-peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 DSH 0.1.x / 0.2.x 的**正式版**。
+**判据是 `package.json` 的 `engines.dsh`：`>=0.1.0-rc.6 <0.3.0-0`（含预发布版）。**
+DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时**只按它判**、忽略 `peerDependencies`，
+所以 0.2.2-rc.5 这类预发布版也在范围内（DSH 内部用 `semver.satisfies(..., {includePrerelease:true})`）。
 
-⚠️ **预发布版按 semver 规则不满足这个范围**：`>=0.1.0-rc.6 <0.3.0` 这组比较器里没有带预发布标签的
-基准，所以 `0.2.2-rc.1` 这类版本 `semver.satisfies()` 返回 false（实测）。因为该 peer 标了
-`optional`，pnpm 不会因此阻断安装；插件入口也已经把依赖改成 `apply` 内按需 `import`——
-缺这个包时**只降级（不挂载 bundled 技能根）并打一条能照着做的日志，不会让整个插件行加载失败**。
+技能注册接口在 0.2.x 换过：
+
+| DSH | 技能注册接口 | 本插件怎么走 |
+|---|---|---|
+| 0.2.x | `ctx.skills.registerProvider(create)` | **主路径**：插件自带 provider（只读 SKILL.md 的 frontmatter，`rank=600`，`resourceBase`=技能目录），**不 import 任何 `@deepseek-ai/*` 包**，所以装到哪种 DSH 里都能自己跑起来 |
+| 0.1.x | `@deepseek-ai/dsh-skill-filesystem` 的 `apply(ctx, config)` | 回退路径：仅当 `ctx.skills.registerProvider` 不存在时才用；此时那个包仍是可选 peer（`optional`），缺了只打日志降级 |
+
+> 为什么不再只用 peer：v2.1.1 及更早只走 0.1.x 那条路，在 DSH **0.2.2-rc.5** 上实测——插件目录解析不到
+> 运行时自带的 `dsh-skill-filesystem`（它在 `app.asar` 里），`import` 抛 `ERR_MODULE_NOT_FOUND`，
+> 于是 `apply` 只打一条「缺少可选依赖」的日志就返回：**技能一个都没挂上，而插件行、语法检查、自检全绿**。
+> 这类静默降级现在由 `tools/plugin_entry_check.mjs` 在 `ci_check` 第 2 项里真跑一遍入口来守。
 
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
+python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /

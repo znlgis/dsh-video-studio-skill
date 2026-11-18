@@ -367,12 +367,24 @@ def f6_voice_dominance(foot, work, out, tl, edl, ctx):
     （与零素材线 voice_duck 同一口径）。
     """
     import numpy as np
-    raw = subprocess.run([filmkit.FFMPEG, "-v", "error", "-i", str(out), "-vn",
-                          "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
-                         capture_output=True).stdout
-    a = np.frombuffer(raw, dtype=np.float32)
+    # 必须看返回码：只取 stdout 时 ffmpeg 解码失败会得到空数组，于是这条判据被记成
+    # skipped（"没执行"）——而 skipped 在 F6 这类门禁里等于静默放行。解码失败是**判据
+    # 无法执行的原因**，要么 fail（明确错），要么在 detail 里说清；这里按 fail 处理，
+    # 因为成片音轨解不出来本身就该拦（与 preflight.py 探测 ffmpeg 的口径一致）。
+    proc = subprocess.run([filmkit.FFMPEG, "-v", "error", "-i", str(out), "-vn",
+                           "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
+                          capture_output=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        return dict(gate="F6", status="fail",
+                    detail="音轨解码失败（ffmpeg rc=%d）：%s"
+                           % (proc.returncode, (tail[-1] if tail else "无 stderr")[:160]),
+                    values={"ffmpeg_rc": proc.returncode})
+    a = np.frombuffer(proc.stdout, dtype=np.float32)
     if a.size < 16000:
-        return dict(gate="F6", status="skipped", detail="音轨为空或过短", values={})
+        return dict(gate="F6", status="skipped",
+                    detail="音轨短于 1 秒（%.2fs），量不出旁白/背景比" % (a.size / 16000.0),
+                    values={"samples": int(a.size)})
     sr = 16000
     chans, gaps = [], []
     prev = 0.0
@@ -402,8 +414,20 @@ def f6_voice_dominance(foot, work, out, tl, edl, ctx):
 
 # ---------------------------------------------------------------- F7
 def f7_signoff(foot, work, out, tl, edl, ctx):
+    # 抽帧失败 = 联系表少了镜 = "人看过"这件事没覆盖全片。这是 fail，不是 skipped：
+    # skipped 会被 --strict-qa 之外的路径当成"没执行"，而这里明明是**执行了但证据不全**。
+    snap_fails = list(ctx.get("snap_fails") or [])
+    if snap_fails:
+        return dict(gate="F7", status="fail",
+                    detail="联系表有 %d 镜抽帧失败（签核证据不全）：%s"
+                           % (len(snap_fails), "；".join(snap_fails[:3])),
+                    values={"snap_fails": snap_fails[:10]})
     sheet = ctx.get("contact_sheet")
     if not sheet or not Path(sheet).exists():
+        if ctx.get("shots_expected"):
+            return dict(gate="F7", status="fail",
+                        detail="联系表没有生成（%d 镜全部抽帧失败），签核证据缺失"
+                               % int(ctx["shots_expected"]), values={})
         return dict(gate="F7", status="skipped", detail="联系表还没生成", values={})
     fp = _fingerprint(foot, edl)
     so = Path(work) / "footage-signoff.json"
@@ -433,8 +457,13 @@ GATES = [f1_edl, f2_subtitle_bleed, f3_watermark, f4_av_equal,
 
 
 # ---------------------------------------------------------------- 联系表（F7 证据）
-def make_contact_sheet(out, edl, tl, path, cols=4, thumb=480):
-    """逐镜抽一帧拼联系表。这是 F7 的唯一证据，也是"人看过"的凭据。"""
+def make_contact_sheet(out, edl, tl, path, cols=4, thumb=480, fails=None):
+    """逐镜抽一帧拼联系表。这是 F7 的唯一证据，也是"人看过"的凭据。
+
+    单镜抽帧失败**不能静默跳过**：联系表少一张图，F7 的"人看过"就少了一镜，
+    而报告里看不出任何痕迹。抽帧失败记进 fails 列表（由调用方写进 F7 detail），
+    全部失败时返回 None（调用方按 fail 处理）。
+    """
     from PIL import Image, ImageDraw
     rows_by_id = {r["id"]: r for r in (tl or {}).get("lines") or []}
     path = Path(path)
@@ -444,9 +473,14 @@ def make_contact_sheet(out, edl, tl, path, cols=4, thumb=480):
         t = float(r.get("shot_start") or 0.0) + min(1.2, max(0.0, float(s["len"]) * 0.35))
         png = path.with_name("_frame_%02d.png" % i)
         png.parent.mkdir(parents=True, exist_ok=True)
-        filmkit.snap(str(out), t, str(png))
-        if png.exists():
-            tiles.append((png, "%s  %.1fs" % (s["id"], float(s["at"]))))
+        try:
+            filmkit.snap(str(out), t, str(png))
+        except Exception as e:                                  # noqa: BLE001
+            # 抽帧失败是「证据缺失」，不是「本镜没问题」：记下来，F7 会把它报成 fail。
+            if fails is not None:
+                fails.append("%s@%.2fs: %s" % (s.get("id"), t, e))
+            continue
+        tiles.append((png, "%s  %.1fs" % (s["id"], float(s["at"]))))
     if not tiles:
         return None
     im0 = Image.open(tiles[0][0])
@@ -532,9 +566,12 @@ def run_all(foot, work, out, tl, edl, strict=False):
         r = rows.get(s["id"]) or {}
         base = float(r.get("shot_start") or 0.0)
         times.append(round(base + float(s["len"]) * 0.6, 2))
-    sheet = make_contact_sheet(out, edl, tl, work / "qa" / "footage-sheet.png")
+    snap_fails = []
+    sheet = make_contact_sheet(out, edl, tl, work / "qa" / "footage-sheet.png",
+                               fails=snap_fails)
     ctx = {"run_id": run_id, "fingerprint": fp, "sample_times": times,
-           "contact_sheet": sheet}
+           "contact_sheet": sheet, "snap_fails": snap_fails,
+           "shots_expected": len((edl or {}).get("shots") or [])}
     results = []
     for fn in GATES:
         gate_id = fn.__name__.split("_")[0].upper()

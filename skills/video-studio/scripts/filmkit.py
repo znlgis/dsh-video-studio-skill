@@ -1985,7 +1985,10 @@ def tts(text, out_mp3, voice="zh-CN-YunyangNeural", rate="+0%", pitch="+0Hz",
         m["persona"] = str(persona)
     if tone:
         m["tone"] = str(tone)
-    json.dump(m, open(meta_path, "w", encoding="utf-8"), ensure_ascii=False)
+    # 用 with：json.dump 走的是文件对象，CPython 引用计数虽会及时关，但 PyPy / 异常路径下
+    # 可能留下半截文件；句柄早关也能让随后的读回（缓存校验）拿到完整内容。
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(m, fh, ensure_ascii=False)
     return m
 
 
@@ -2201,7 +2204,8 @@ def write_srt(scenes, path, max_hold=None):
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
-    open(path, "w", encoding="utf-8").write("\n".join(rows))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(rows))
     return len(rows)
 
 
@@ -2260,7 +2264,8 @@ def write_ass(scenes, path, max_hold=None, font_name="Microsoft YaHei", size=52,
     d = os.path.dirname(os.path.abspath(path))
     if d:
         os.makedirs(d, exist_ok=True)
-    open(path, "w", encoding="utf-8").write("\n".join(head + body) + "\n")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(head + body) + "\n")
     return len(body)
 
 
@@ -2347,12 +2352,38 @@ class FrameSink:
 
 # ---------------------------------------------------------------- 合成与封装
 def media_dur(path):
+    """读容器时长；读不到返回 0.0。
+
+    只给「显示/估算」用。**关键判定不许用它**：0.0 是假值，`if vd and ad and abs(vd-ad)>0.05` 这种
+    等长校验会被 0.0 整条跳过（ffprobe 偶发失败 = 门禁静默失效）。要判等长请用
+    media_dur_checked()，它读不到就抛错。
+    """
     p = _run([ffprobe_path(), "-v", "error", "-show_entries", "format=duration",
               "-of", "csv=p=0", str(path)])
     try:
         return float((p.stdout or b"0").decode().strip() or 0)
     except Exception:
         return 0.0
+
+
+def media_dur_checked(path, what="媒体"):
+    """读容器时长；读不到 / rc!=0 / 解析失败都抛 RuntimeError（给门禁用）。"""
+    p = _run([ffprobe_path(), "-v", "error", "-show_entries", "format=duration",
+              "-of", "csv=p=0", str(path)])
+    rc = getattr(p, "returncode", 0)
+    if rc != 0:
+        err = (getattr(p, "stderr", b"") or b"").decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("%s 时长读取失败（%s，ffprobe rc=%s）：%s"
+                           % (what, path, rc, (err[-1] if err else "无 stderr")[:200]))
+    raw = (p.stdout or b"").decode("utf-8", "replace").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        raise RuntimeError("%s 时长解析失败（%s）：ffprobe 输出 %r"
+                           % (what, path, raw[:80])) from None
+    if val <= 0:
+        raise RuntimeError("%s 时长非正（%s）：ffprobe 输出 %r" % (what, path, raw[:80]))
+    return val
 
 
 def probe(path):
@@ -2384,9 +2415,11 @@ def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
         print("   [WARN] loudnorm 两遍测量失败（拿不到可用测量值：全静音/极短音频会给出 -inf），"
               "本次不做响度标准化", flush=True)
 
-    vd = media_dur(video)
-    ad = media_dur(audio)
-    if vd and ad and abs(vd - ad) > 0.05:
+    # 判等长必须用 checked 版：media_dur 读不到会返回 0.0，而 0.0 为假值，
+    # 下面那条校验会被整条跳过（ffprobe 偶发失败 = 交付物音画不同步却放行）。
+    vd = media_dur_checked(video, "视频流")
+    ad = media_dur_checked(audio, "音频流")
+    if abs(vd - ad) > 0.05:
         raise RuntimeError("音视频时长不一致：video %.3fs vs audio %.3fs（差 %.3fs）。"
                            "检查混音总线长度是否等于 timeline.total。"
                            % (vd, ad, abs(vd - ad)))
@@ -2544,11 +2577,24 @@ def sharpness(png_or_img):
 
 
 def snap(path, seconds, out_png):
+    """从视频第 seconds 秒抽一张 PNG，返回路径；**抽不出来就抛错**。
+
+    为什么要判：抽帧失败的产物路径会被调用方无条件 append/当作证据（联系表、QC 报告），
+    于是"少了一镜"在报告里看不出来——正是本项目最忌讳的静默失效。
+    """
     d = os.path.dirname(os.path.abspath(out_png))
     if d:
         os.makedirs(d, exist_ok=True)
-    _run([FFMPEG, "-y", "-v", "error", "-ss", "%.3f" % float(seconds), "-i", str(path),
-          "-frames:v", "1", str(out_png)])
+    p = _run([FFMPEG, "-y", "-v", "error", "-ss", "%.3f" % float(seconds), "-i", str(path),
+              "-frames:v", "1", str(out_png)])
+    rc = getattr(p, "returncode", 0)
+    if rc != 0:
+        err = (getattr(p, "stderr", b"") or b"").decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("抽帧失败（%s @ %.3fs，ffmpeg rc=%s）：%s"
+                           % (path, float(seconds), rc, (err[-1] if err else "无 stderr")[:200]))
+    if not os.path.exists(out_png) or os.path.getsize(out_png) <= 0:
+        raise RuntimeError("抽帧没有产出文件（%s @ %.3fs）：产物 %s 不存在或为空"
+                           % (path, float(seconds), out_png))
     return out_png
 
 

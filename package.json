@@ -1,6 +1,6 @@
 {
   "name": "@dsh-gis/dsh-video-studio-skill",
-  "version": "2.1.1",
+  "version": "2.3.0",
   "description": "Video Studio skill plugin for DeepSeek Harness: proposal-first, zero-template code-generated Chinese videos — run the skill's scripts in place (no copying) and keep only a film.json in your project; each brief is sampled into several distinct design candidates (no built-in style packs) and frozen into a design DSL after user confirmation; visual.subtitle / visual.layout_cycle make caption style and per-chapter layout adjustable; a cross-film design ledger keeps delivered videos from repeating; measured TTS timeline, deterministic PIL/browser rendering, programmatic SFX and score, cue-driven sound sync, sample-level mixing, ffmpeg encoding, batch production and multi-layer QA gates (preflight, full-film VMAF/SSIM, ASR readback).",
   "type": "module",
   "main": "index.js",
@@ -36,7 +36,8 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.1.0-rc.6 <0.3.0-0"
   },
   "homepage": "https://github.com/znlgis/dsh-video-studio-skill#readme",
   "bugs": {
@@ -74,5 +75,6 @@
       "optional": true
     }
   },
+  "_compatibilityNote": "engines.dsh = DSH 插件兼容性判据（含预发布版）；peerDependencies 中的 dsh-skill-filesystem 只服务 0.1.x 回退路径，0.2.x 走自带 provider、不 import 任何 @deepseek-ai/* 包。详见 README「兼容性」。",
   "license": "MIT"
 }

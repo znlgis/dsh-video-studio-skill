@@ -56,7 +56,7 @@
   48  批量清单解析：两种写法都认、上限卡死、坏条目在开跑前报错
   49  TTS 后端可替换：注册/注销/未知后端的接口契约
   50  web 风格载荷：style=None 时不得注入 __STYLE__（legacy 必须回落）
-  51  金帧回归：与 assets/golden_frames.json 的像素基线比对
+  51  金帧回归：横屏 + 竖屏整片像素基线都比对（golden_frames*.json）
   52  场景语法：10 类构图分流、选型确定性、段长降级门
   53  视觉语言包：默认采样必须是 plain + 无 HUD + 不推镜；12 个设计的结构签名互不相同；
       点名「括角」必须能采到 brackets（素净是默认，不是唯一）
@@ -1488,12 +1488,84 @@ def t_web_style_payload():
     return "有设计注入 %dx%d / 无设计回落 None" % (canvas["w"], canvas["h"])
 
 
+def _golden_profiles():
+    """金帧门禁必须覆盖的两个 profile：横屏（历史基线）+ 竖屏（1.7.0 起几何独立）。
+
+    为什么写死两个：selfcheck 只跑一次，导入期的 layoutkit profile 恒横屏，
+    `--layout portrait` 的基线在这种跑法下**永远选不中**——竖屏几何改了两个大版本
+    （1.7.0 compare/process、1.10/1.11 字号与逐类停留）没有任何报警，直到实测
+    `--layout portrait --check` 3/3 DIFF。只测当前 profile 的金帧门禁等于没门禁。
+    """
+    return (("横屏", "landscape"), ("竖屏", "portrait"))
+
+
+def _run_golden_json(tool, cwd, argv, timeout=600):
+    """跑 golden_frames.py 并把 --json 输出解析成 dict，返回 (proc, data, why)。
+
+    为什么必须读 JSON 而不是只看 returncode：工具是三档语义（pass / fail / skipped），
+    skipped 也是 exit 0，只看退出码会把"这次根本没比"记成通过。
+    命令没产出 JSON / 解析失败时 data=None、why 写原因，由调用方按 SKIP 处理
+    （与改写前的整片金帧用例一致：拿不到结论就不许冒充通过）。
+    """
+    p = subprocess.run([sys.executable, tool] + list(argv),
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=cwd, env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                       timeout=timeout)
+    out = (p.stdout or "").strip()
+    i = out.find("{")
+    if i < 0:
+        return p, None, "没输出 JSON：%s" % ((p.stderr or out)[:120])
+    try:
+        return p, json.loads(out[i:]), ""
+    except json.JSONDecodeError as e:
+        return p, None, "JSON 解析失败：%s" % e
+
+
+def _check_golden_profile(tool, root, label, profile):
+    """整片时刻金帧：跑一个 profile 的 --check，返回 (status, detail)。
+
+    status 三档：pass = 真比过且一致；skip = 基线缺失/字体或环境指纹不同（没比）；
+    像素不一致或工具自己判 fail 直接抛 AssertionError——同字体同环境还变就是渲染回归，
+    降级成 skip 等于把 FAIL 洗成"没查"，仓库铁律 SKIP != 通过。
+    """
+    base = os.path.join(root, "skills", "video-studio", "assets",
+                        "golden_frames.json" if profile == "landscape"
+                        else "golden_frames_%s.json" % profile)
+    if not os.path.exists(base):
+        return "skip", "%s没有金帧基线 assets/%s（先跑 --layout %s --write 重录）" % (
+            label, os.path.basename(base), profile)
+    p, d, why = _run_golden_json(tool, root, ["--layout", profile, "--check", "--json"])
+    if d is None:
+        return "skip", "%s golden_frames %s" % (label, why)
+    status = str(d.get("status") or "")
+    changed = d.get("changed") or []
+    if changed:
+        raise AssertionError(
+            "%s金帧变了（画面回归）：changed=%r；%s。若是有意改画风，确认后跑 "
+            "python tools/golden_frames.py --layout %s --write 重录基线"
+            % (label, changed, (d.get("reason") or "")[:160], profile))
+    if status == "pass" and p.returncode == 0:
+        return "pass", "%s %d 帧像素一致（font_fp %s）" % (
+            label, len(d.get("frames") or []), str(d.get("font_fp") or "")[:8])
+    if status == "fail" or p.returncode == 1:
+        # 工具自己说 fail（渲染炸了 / 帧号越界等）：这是回归，不是"环境不可比"。
+        raise AssertionError("%s golden_frames status=%s exit=%s：%s" % (
+            label, status or "-", p.returncode, (d.get("reason") or "")[:200]))
+    # 只剩 skipped：字体或环境指纹不同，像素不可比（跨机不误报），理由原样带出来。
+    return "skip", "%s status=%s exit=%s：%s" % (
+        label, status or "-", p.returncode, (d.get("reason") or "")[:160])
+
+
 def t_golden_frames():
-    """51 金帧回归：像素基线真的能拦住"画面变了"（仓库工具 tools/golden_frames.py）。
+    """51 金帧回归：横屏 + 竖屏整片像素基线都要真的比过（tools/golden_frames.py）。
 
     为什么放进 selfcheck 而不是只放 CI：改引擎/主题后"画面变了一点"是最难发现的一类回归，
-    而它只需要 0.65 秒。约定：基线缺失 / 字体或环境指纹不同 -> skip（跨机不误报），
-    同环境像素变了才是 fail。
+    而两个 profile 各渲三帧只要一两秒。约定：基线缺失 / 字体或环境指纹不同 -> skip
+    （跨机不误报），同环境像素变了才是 fail。
+
+    为什么是双 profile：竖屏整片基线（assets/golden_frames_portrait.json）在 1.7.0
+    改完竖屏几何后就没有任何自动入口——CI 恒横屏、旧用例写死横屏基线，它漂了两个版本
+    都没人知道（实测 3/3 DIFF）。两个 profile 各比一次才算守住了整片。
     """
     # HERE = <repo>/skills/video-studio/scripts -> 上溯三级才是仓库根
     # （两级会落到 <repo>/skills，工具与基线都找不到，这条就永远 skip —— 静默失效）
@@ -1501,34 +1573,16 @@ def t_golden_frames():
     tool = os.path.join(root, "tools", "golden_frames.py")
     if not os.path.exists(tool):
         return "skip（没有 tools/golden_frames.py）"
-    base = os.path.join(root, "skills", "video-studio", "assets", "golden_frames.json")
-    if not os.path.exists(base):
-        return "skip（没有金帧基线 assets/golden_frames.json）"
-    p = subprocess.run([sys.executable, tool, "--check", "--json"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       cwd=root)
-    out = (p.stdout or "").strip()
-    i = out.find("{")
-    if i < 0:
-        return "skip（golden_frames 没输出 JSON：%s）" % (p.stderr or out)[:120]
-    try:
-        d = json.loads(out[i:])
-    except json.JSONDecodeError as e:
-        return "skip（golden_frames JSON 解析失败：%s）" % e
-    changed = d.get("changed") or []
-    status = str(d.get("status") or "")
-    # 三档必须分开判：工具在"基线缺失 / 字体或环境指纹不同"时返回 exit 0 + status=skipped，
-    # 只认 returncode 会把"这次根本没比"记成 PASS。实测踩过：本机 Python 3.12.14、基线记的是
-    # 3.12.16，于是第 51 条显示"0 帧像素一致"进了 PASS 列——而它一帧都没比。
-    if changed:
-        raise AssertionError("金帧变了（画面回归）：changed=%r；若是有意改画风，"
-                             "确认后用 python tools/golden_frames.py --write 重录基线" % (changed,))
-    if status == "pass" and p.returncode == 0:
-        frames = d.get("frames") or []
-        return "%d 帧像素一致（font_fp %s）" % (len(frames),
-                                               str(d.get("font_fp") or "")[:8])
-    return "skip（golden_frames status=%s exit=%s：%s）" % (
-        status or "-", p.returncode, (d.get("reason") or "")[:120])
+    statuses, details = [], []
+    for label, profile in _golden_profiles():
+        status, detail = _check_golden_profile(tool, root, label, profile)
+        statuses.append(status)
+        details.append(detail)
+    if all(s == "pass" for s in statuses):
+        return "；".join(details)
+    # 只要有一个 profile 没比成（缺基线 / 换机），整体只能记 SKIP：不许拿另一个 profile
+    # 的 pass 冒充"两个 profile 都验过"。像素不一致在 helper 里已经抛 FAIL，到不了这里。
+    return "skip（%s）" % "；".join(details)
 
 
 # ============================================================================
@@ -2233,7 +2287,8 @@ def t_duration_target():
 
     过去 `_brief_of` 把 duration_target 恒填 None —— 用户写「做个 2 分钟的片」等于没写，
     成片永远按台词长度出（实测 23s / 30s）。这条守三件事：
-      ① 中文/阿拉伯数字的常见时长说法都能解析；
+      ① 中文/阿拉伯数字的常见时长说法都能解析（ASCII 单位 45s/2m 也要认，
+         否则文档示例照抄就会在 intake 处被判非法）；
       ② 解析出的时长进 design.structure.target_sec，并决定候选段落数；
       ③ 渲染时按"目标 vs 实测"对账（差 >15% 告警，但不截断旁白）。
     """
@@ -2247,6 +2302,20 @@ def t_duration_target():
             "时长解析 %r 得到 %r，期望 %r" % (text, got, want)
     assert PP.parse_duration("深蓝科技解说") is None, "没有时长时不该硬凑"
     assert PP.parse_duration("两小时") is None, "超出 3–1800s 契约范围应拒绝"
+    # ASCII 单位：README / SKILL / intake 三处文档的示例都写 --set duration:45s，
+    # 解析器不认就等于"照文档执行必失败"（intake 会报"不是合法选项"）。
+    ascii_cases = {"45s": 45.0, "2m": 120.0, "1.5min": 90.0, "90sec": 90.0}
+    for text, want in ascii_cases.items():
+        got = PP.parse_duration(text)
+        assert got is not None and abs(got - want) < 1e-6, \
+            "ASCII 时长解析 %r 得到 %r，期望 %r" % (text, got, want)
+    # 「每 5 分钟走 20 秒」是在说节拍，只取首个匹配（5 分钟 = 300 s）。
+    # 相加成 320 s 会把整片长度排错，所以这里钉住 300.0 而不是"至少认出一个"。
+    multi = PP.parse_duration("每5分钟走20秒")
+    assert multi == 300.0, "多时长句子应只取首个匹配 300.0（5 分钟），实际 %r" % (multi,)
+    # 下限语义与 ASCII 单位要能叠加：「不少于45s」是 45 s 的下限，不是精确目标。
+    assert PP.parse_duration_spec("不少于45s") == (45.0, "at_least"), \
+        "ASCII 单位没接住下限语义：%r" % (PP.parse_duration_spec("不少于45s"),)
     b = PP._brief_of("深蓝，科技，2分钟，硬切", {"title": "t"})
     assert b.get("duration_target") == 120.0, "brief 没接住时长：%r" % (b,)
     d = DK.sample_designs(b, n=2, seed=9)[0]
@@ -2254,7 +2323,7 @@ def t_duration_target():
         "目标时长没进设计：%r" % (d["structure"],)
     plan = DK.design_to_plan(d)
     assert plan.get("target_sec") == 120.0, "目标时长没进计划：%r" % (plan.get("target_sec"),)
-    return "6 种时长说法解析正确；进 design/plan；超范围拒绝"
+    return "6 种中文 + 4 种 ASCII 时长说法解析正确；多时长只取首个；进 design/plan；超范围拒绝"
 def t_zoom_stability():
     """68 缩放取景的帧间稳定性（抖动回归）。
 
@@ -2719,40 +2788,63 @@ def t_portrait_profile():
     return "10 类构图 1080x1920 全部出图 / 过宽文字被钳进安全区"
 
 
+def _check_compose_profile(tool, root, label, profile):
+    """构图金帧：跑一个 profile 的 --compose --check，返回 (status, detail)。
+
+    与整片金帧同一套三档语义：pass 真比过且一致 / skip 基线缺失或环境不可比 /
+    像素或工具失败直接 AssertionError。显式 --layout 保证子进程 profile 与基线一致，
+    不受父进程环境变量影响。
+    """
+    name = "golden_frames_compose%s.json" % ("_portrait" if profile == "portrait" else "")
+    base = os.path.join(root, "skills", "video-studio", "assets", name)
+    if not os.path.exists(base):
+        return "skip", "%s没有 %s（先跑 tools/golden_frames.py --layout %s --compose --write）" % (
+            label, name, profile)
+    p, d, why = _run_golden_json(tool, root, ["--layout", profile, "--compose", "--check", "--json"])
+    if d is None:
+        # 导出不是合法 JSON 说明工具/环境已经坏了，不是"不可比"——按失败处理。
+        raise AssertionError("%s构图层金帧导出不是合法 JSON：%s" % (label, why))
+    status = str(d.get("status") or "")
+    changed = d.get("changed") or []
+    if changed:
+        raise AssertionError(
+            "%s构图层金帧变了：%s；若是有意改绘制器，确认后跑 "
+            "python tools/golden_frames.py --layout %s --compose --write 重录基线"
+            % (label, "、".join(str(x) for x in changed), profile))
+    if status == "pass" and p.returncode == 0:
+        return "pass", "%s 10 类构图与基线逐类一致" % label
+    if status == "fail" or p.returncode == 1:
+        raise AssertionError("%s golden_frames --compose status=%s exit=%s：%s" % (
+            label, status or "-", p.returncode, (d.get("reason") or "")[:200]))
+    return "skip", "%s status=%s exit=%s：%s" % (
+        label, status or "-", p.returncode, (d.get("reason") or "")[:160])
+
+
 def t_compose_golden():
-    """76 构图层金帧：10 类构图各自有像素基线，且当前渲染与之一致。
+    """76 构图层金帧：横屏 + 竖屏 10 类构图各自有像素基线，且当前渲染与之一致。
 
     为什么单独一条：整片金帧用的是夹具 film.json，它只有 hook/body/outro 三类——
     `compare` / `process` / `chart` 这些"按 scene_type 分派"的绘制器改了，整片金帧
     **一个像素都不会变**。1.7.0 给这三类各加了竖屏实现，如果只靠自检"分支存在"，
     改坏它们依然不会有任何报警。这条补的就是那个洞。
 
-    两侧都验：当前 profile 的构图层基线必须存在且逐类一致；缺基线记为 SKIP（不是 PASS）。
+    两个 profile 都验：旧实现按导入期 K.H/K.W 只挑当前 profile，而 CI 恒横屏，
+    竖屏构图基线 `_compose_portrait.json` 因此永远选不中——等于没有门禁。
+    缺基线记为 SKIP（不是 PASS）；像素不一致记 FAIL。
     """
-    tool = os.path.join(os.path.dirname(HERE), "..", "..", "tools", "golden_frames.py")
-    tool = os.path.abspath(tool)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+    tool = os.path.join(root, "tools", "golden_frames.py")
     if not os.path.exists(tool):
         return "skip（没有 tools/golden_frames.py：只拷了 scripts/）"
-    portrait = int(K.H) > int(K.W)
-    base = os.path.join(HERE, "..", "assets",   # HERE = scripts/，上一级是 video-studio/
-                        "golden_frames_compose%s.json" % ("_portrait" if portrait else ""))
-    base = os.path.abspath(base)
-    if not os.path.exists(base):
-        return "skip（没有 %s：先跑 golden_frames.py --compose --write）" % os.path.basename(base)
-    r = subprocess.run([sys.executable, tool] + (["--layout", "portrait"] if portrait else [])
-                       + ["--compose", "--check", "--json"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=600)
-    assert r.returncode == 0, "构图层金帧不一致：%s" % ((r.stdout or r.stderr or "")[-400:])
-    try:
-        got = json.loads((r.stdout or "").strip())      # --json 是整段 pretty JSON，不是单行
-    except Exception as e:                                 # noqa: BLE001
-        raise AssertionError("构图层导出不是合法 JSON：%s" % e) from None
-    status = str(got.get("status") or "")
-    if status == "skipped":
-        return "skip（%s）" % (got.get("reason") or "环境不可比")
-    assert status == "pass", "构图层金帧没有通过：%s" % (got.get("changed") or status)
-    return "%s 的 10 类构图与基线逐类一致" % ("竖屏" if portrait else "横屏")
+    statuses, details = [], []
+    for label, profile in _golden_profiles():
+        status, detail = _check_compose_profile(tool, root, label, profile)
+        statuses.append(status)
+        details.append(detail)
+    if all(s == "pass" for s in statuses):
+        return "；".join(details)
+    # 有一个 profile 没比成（缺基线 / 换机）就整体 SKIP，不许拿另一个的 pass 冒充都验过。
+    return "skip（%s）" % "；".join(details)
 
 
 def t_enum_enforced():
@@ -3299,7 +3391,7 @@ CASES = [
     ("48 批量清单解析（预检先于执行）", t_batch_manifest),
     ("49 TTS 后端可替换（接口契约）", t_tts_backend),
     ("50 web 风格载荷（legacy 必须回落）", t_web_style_payload),
-    ("51 金帧回归（像素基线）", t_golden_frames),
+    ("51 金帧回归（横屏+竖屏像素基线）", t_golden_frames),
     ("52 场景语法（10 类分流/确定/段长门）", t_scene_grammar),
     ("53 视觉语言包（结构签名互不相同）", t_visual_languages),
     ("54 场景类型单真值（4 处集合一致）", t_scene_types_single_truth),
@@ -3324,7 +3416,7 @@ CASES = [
     ("73 画布/安全区单一真源（layoutkit）", t_layout_single_source),
     ("74 审美质检（离线/确定/联系表不误判）", t_critic_offline),
     ("75 竖屏 profile（画布/出图/文字不出画）", t_portrait_profile),
-    ("76 构图层金帧（10 类构图各自有像素基线）", t_compose_golden),
+    ("76 构图层金帧（横竖屏各 10 类构图都有像素基线）", t_compose_golden),
     ("77 枚举校验真的在执行（enum 不许只写在 SPEC 里）", t_enum_enforced),
     ("78 画幅开关（问诊/尺寸枚举/filmcheck/propose 都认竖屏）", t_canvas_switch),
     ("79 真峰目标可覆盖（竖屏片默认 -1.5 dBTP 会 G5 fail）", t_mux_true_peak_override),

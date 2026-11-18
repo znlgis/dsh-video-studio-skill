@@ -26,9 +26,11 @@
     python intake.py --work work --questions --json
 
     # 2) 收集答案（每个 --set 一次；id:value，value 用逗号分隔多选）
+    #    每个 id 的可选值以 --questions 打印出来的 options[].value 为准；
+    #    duration 允许自定义原话（"不少于 12 分钟" / "45s" / "2m"，3–1800 秒）。
     python intake.py --work work --set topic:"AI 大模型的三年" --set duration:45s \
         --set tone:bright-lively --set voice:female-warm --set music:upbeat \
-        --set format:1920x1080 --set note:"结尾放一个二维码"
+        --set format:1080p30 --set note:"结尾放一个二维码"
 
     # 3) 全部答完 -> 校验并合成 brief
     python intake.py --work work --finalize        # 写 intake.brief.txt

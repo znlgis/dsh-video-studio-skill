@@ -130,9 +130,9 @@ def _canvas():
         return W, H
 
 
-# 当前画布（模块级）：import 时定一次。排期公式读它，免得把画布一路透传。
+# 当前画布（模块级）：import 时定一次（见下面的 _CANVAS = _canvas()）。
 # 与 scenes/filmkit 同一约定：改画布必须在导入前用 VIDEO_STUDIO_LAYOUT 定死。
-_CANVAS = (1920, 1080)
+# 这里不再预置一个占位常量：占位值会被下一行真值覆盖，留着只会让人以为"改这里有效"。
 
 
 def _cost_factor(w, h):
@@ -747,7 +747,10 @@ def print_report(rep):
               "会自动改用真实帧数。")
     style = v.get("style")
     if style is None:
-        style = "(没写 style 字段 = legacy 行为)"
+        # style 键已废弃且不生效：外观只由 work/design.json 决定。still 剧本里写了
+        # 什么都当没写（filmcheck 会报「inert」警告），所以这里回一句能照着做的话，
+        # 而不是旧版的「legacy 行为」——legacy 分支已经从 scenes.draw_frame 删掉了。
+        style = "(没写；外观由 work/design.json 决定，先 propose --confirm)"
     print("  《%s》  片长 %.1f s / %d 帧 / %dx%d@%d / engine=%s / crf=%s preset=%s / style=%s"
           % (v.get("title") or "(未写 title)", v["duration_s"], v["frames"], v["width"], v["height"],
              v["fps"], v["engine"], v["crf"], v["preset"], style))

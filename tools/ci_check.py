@@ -8,8 +8,8 @@
 
   1  语法：scripts/ + assets/ + tools/ 下的 .py 全部能编译（SyntaxWarning 也算失败）
   2  JS 语法：根目录与 assets/web/ 的 .js 通过 node --check
-  3  JSON：所有 .json 能被解析（locale / marketplace-entry / assets / package.json），
-     且 package.json 的 version 与 README 徽章一致
+  3  JSON：所有 .json 能被解析（locale / marketplace-entry / assets / schemas / package.json），
+     schemas/ 的契约文件必须有以 http 开头的 $schema 方言，且 package.json 的 version 与 README 徽章一致
   4  技能清单：SKILL.md 的 frontmatter 有 name/description，name 与目录名一致
   5  依赖白名单：scripts/*.py 与 assets/*.py 只允许 stdlib + numpy/PIL/cv2/scipy/edge_tts/playwright
      （技能是"整目录拷走就能跑"的，偷偷引入一个三方依赖会在用户机器上炸）
@@ -20,10 +20,11 @@
   9  Markdown 围栏成对（不平衡会让整篇渲染成代码块；按围栏状态机判，不是数出现次数）
   10  CI workflow：step 名的裸冒号（会让整份 workflow 静默不跑），
      以及 run 里 python <路径>.py 指向的文件必须存在
-  11  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
-  12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验夹具（规则只留一份）
-  13  footage.json 契约：schemas/footage.schema.json + footagekit.load_footage 载入模板
-      （缺 numpy / Pillow 时记 SKIP —— 那次没执行，不等于通过）
+  11  体积：单个受检文本文件不超过 400 KB（媒体资产与缓存目录不计）
+  12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py --json 校验夹具（skipped=true 也算失败）
+  13  footage.json 契约：schemas/footage.schema.json 用 jsonschema 真校验回归样例与模板，
+      再 exec footagekit.load_footage 载入模板（缺 jsonschema / numpy / Pillow 时记 SKIP ——
+      那次没执行，不等于通过；包内本地模块导入失败则 FAIL）
 
 三档结论（与技能自己的门禁账本同口径）：PASS = 这次真的查了且通过；FAIL = 查了没过；
 SKIP = **这次没执行**（比如本地没装 node / npm），**不等于通过**。
@@ -82,8 +83,15 @@ DESC_MAX_CHARS = 400
 CI_CHECK_COUNT = 14
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
-SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv"}
-SIZE_SKIP_EXT = {".mp4", ".mp3", ".wav", ".mov", ".webm", ".gif", ".webp", ".zip", ".tgz"}
+# 缓存目录（.ruff_cache 等）以前会被算进来：它们随工具链生成、随时变化，既不是仓库内容
+# 也不进包（打包卫生那一项按 npm 实际内容判），拿它们的单个文件大小判仓库卫生是错口径。
+SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv",
+                  ".ruff_cache", ".pytest_cache", ".mypy_cache", ".tmpcheck"}
+# 二进制后缀统一排除：这条查的是"仓库里的文本内容会不会太大"，不是媒体资产。
+# 以前只排除 .png，.jpg/.jpeg 却参与判定——同一类派生帧图（联系表）两种口径，实测量到
+# 回归联系表 182 KB 时没事，稍大一档就会报"文本文件太大"却找不到大文本文件。
+SIZE_SKIP_EXT = {".mp4", ".mp3", ".wav", ".mov", ".webm", ".gif",
+                 ".jpg", ".jpeg", ".png", ".webp", ".zip", ".tgz"}
 
 _results: list[tuple[str, str, str]] = []
 
@@ -157,10 +165,25 @@ def t_syntax_js():
     if node is None:
         return "跳过（没装 node）"
     js = [p for p in ROOT.glob("*.js")] + sorted((ASSETS / "web").glob("*.js"))
+    # glob 匹配为空时不能算 PASS：文件被误删/路径写错时，"0 个 .js 全部通过" 是假绿
+    # （实测把全部 .js 删掉后本项仍报 PASS）。至少要有插件入口与页面示例这两类。
+    assert js, "没找到任何 .js（index.js / assets/web/*.js）：路径写错或文件被删，本项等于没查"
     for p in js:
         r = subprocess.run([node, "--check", str(p)], capture_output=True, text=True)
         assert r.returncode == 0, "%s: %s" % (p.name, (r.stderr or r.stdout).strip()[:300])
-    return "%d 个 .js 全部通过 node --check" % len(js)
+    # 语法过了不等于能挂上技能：DSH 0.2.x 换成了 ctx.skills.registerProvider，
+    # 而旧入口仍只走 0.1.x 的 dsh-skill-filesystem.apply()——在 0.2.2-rc.5 上
+    # import 解析不到那个包，apply 只打一条日志就返回（registerProvider 调用 0 次），
+    # 于是技能一个都没挂上，而 node --check / selfcheck / 插件行全绿。实测复现。
+    # 这里用 tools/plugin_entry_check.mjs 拿最小 ctx 桩真的跑一遍 apply，
+    # 断言 provider 确实注册且 list/get 能拿到 SKILL.md。
+    smoke = ROOT / "tools" / "plugin_entry_check.mjs"
+    assert smoke.is_file(), "缺 tools/plugin_entry_check.mjs（插件入口冒烟：防止技能静默挂不上）"
+    r = subprocess.run([node, str(smoke)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=120)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    assert r.returncode == 0, "插件入口冒烟失败（技能可能挂不上）：%s" % out[-500:]
+    return "%d 个 .js 全部通过 node --check；插件入口冒烟通过（provider 注册 + list/get）" % len(js)
 
 
 def _which(exe: str):
@@ -173,11 +196,27 @@ def t_json():
     files = [ROOT / "package.json", ROOT / "marketplace-entry.json"]
     files += sorted((ROOT / "locale").glob("*.json"))
     files += sorted(ASSETS.glob("*.json"))
+    # schemas/ 以前**不在**解析清单里：把 design.schema.json 改成坏 JSON 之后，这项仍然报
+    # "11 个 .json 全部可解析"——契约文件坏了却没人查，正是本仓库最怕的"看着在查，其实没查"。
+    # 契约文件还多一条硬要求：必须有以 http 开头的 $schema 方言声明（draft-07 与 2020-12
+    # 的语义不同，没有方言声明时校验器只能猜）。
+    schema_files = sorted((ROOT / "schemas").glob("*.json"))
+    files += schema_files
+    parsed = {}
     for p in files:
         try:
-            json.loads(p.read_text(encoding="utf-8"))
+            parsed[p] = json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:                                  # noqa: BLE001
             raise AssertionError("%s: %s" % (p.relative_to(ROOT), e)) from None
+    assert schema_files, "schemas/ 下没有任何 .json：契约目录缺失或路径写错"
+    bad_dialect = []
+    for p in schema_files:
+        doc = parsed[p]
+        dialect = doc.get("$schema") if isinstance(doc, dict) else None
+        if not isinstance(dialect, str) or not dialect.startswith("http"):
+            bad_dialect.append("%s: $schema=%r（契约文件必须写以 http 开头的方言 URL）"
+                               % (p.relative_to(ROOT), dialect))
+    assert not bad_dialect, "；".join(bad_dialect)
     # 版本号三处必须一致：package.json / README 徽章 / marketplace-entry 描述里提到的 vX.Y。
     # 这条以前没人查，于是 README 的徽章停在 0.6.0、包已经是 0.7.1 也没人发现（真发生过）。
     ver = json.loads((ROOT / "package.json").read_text(encoding="utf-8")).get("version", "")
@@ -196,8 +235,9 @@ def t_json():
     assert m, "CHANGELOG.md 里找不到 \"## X.Y.Z\" 形式的版本标题"
     assert m.group(1) == ver, ("CHANGELOG 顶部版本 %s 与 package.json version %s 不一致"
                                "（发版时两处必须同时改）" % (m.group(1), ver))
-    return ("%d 个 .json 全部可解析；version=%s 与 README 徽章 / CHANGELOG 顶部一致"
-            % (len(files), ver))
+    return ("%d 个 .json 全部可解析（含 schemas/ %d 个，均带 $schema 方言）；"
+            "version=%s 与 README 徽章 / CHANGELOG 顶部一致"
+            % (len(files), len(schema_files), ver))
 
 
 # ---------------------------------------------------------------- 3 技能清单
@@ -224,27 +264,10 @@ def t_manifest():
 
 
 # ---------------------------------------------------------------- 4 依赖白名单
-def _stdlib_names():
-    """标准库模块名集合（**兼容 3.9**）。
-
-    `sys.stdlib_module_names` 是 3.10 才有的；这个文件要在 3.9 上跑
-    （py39 job 就是为了验证"仓库真的还能在 3.9 上跑"），所以不能直接用。
-    3.9 上退回"内建模块 + stdlib 目录里的顶层 .py 名"，够识别 import 的顶层名。
-    """
-    names = set(sys.builtin_module_names)
-    getter = getattr(sys, "stdlib_module_names", None)
-    if getter is not None:
-        names.update(getter)
-        return names
-    # 3.9 没有 stdlib_module_names。这里**不**去"扫目录猜名字"——踩过两次坑：
-    #   ① 只扫 stdlib 顶层 .py 会漏 C 扩展（unicodedata 在 DLLs/）；
-    #   ② 加了扩展目录还是漏（Linux 的 math/binascii 在 lib-dynload/ 子目录里）。
-    # 枚举布局永远漏，所以改成**对每个真实 import 的名字逐个判定归属**（见 _is_stdlib）。
-    # 这个函数在 3.9 上只作为"已知能排除的白名单"，真正判定交给 _is_stdlib。
-    names.update(getattr(sys, "stdlib_module_names", None) or ())
-    return names
-
-
+# 判据只有一处：_is_stdlib()（逐个 import 名问解释器）。这里以前还有
+# _stdlib_names() / _stdlib_roots() / _stdlib_names_by_search() 三个"扫目录枚举标准库"
+# 的辅助函数：全仓 0 调用，且与 _is_stdlib 的 docstring 明确否定的方案重复——
+# 留着只会让下一个人以为标准库判定有两套实现。已删除（2026-11 审查）。
 def _is_stdlib(name):
     """name（import 的顶层名）是否属于标准库。
 
@@ -293,102 +316,6 @@ def _is_stdlib(name):
         if any(ap == r or ap.startswith(r + os.sep) for r in prefix_roots):
             return True
     return False
-
-
-def _stdlib_module_names():
-    """标准库顶层名（3.10+ 直接问解释器；3.9 用 find_spec 实测）。"""
-    return _stdlib_names()
-
-
-def _stdlib_roots():
-    """标准库目录（含 platstdlib）；找不到返回空列表。"""
-    try:
-        import sysconfig
-        paths = sysconfig.get_paths()
-    except Exception:                                       # noqa: BLE001
-        return []
-    out = []
-    for key in ("stdlib", "platstdlib"):
-        p = paths.get(key) or ""
-        if p and os.path.isdir(p):
-            out.append(os.path.abspath(p))
-    return out
-
-
-def _stdlib_names_by_search():
-    """在没有 sys.stdlib_module_names 的解释器上，扫出标准库顶层模块名（含 C 扩展）。
-
-    做法：先收"顶层可见"的候选（.py / 包目录 / DLLs 里的扩展），再对每个候选
-    **用 find_spec 验证真实来源**——来源在 stdlib 根下且不在 site-packages 才算。
-    这样 lib-dynload/ 这种子目录布局（Linux 的 math、binascii 在那里）自然覆盖。
-    """
-    roots = _stdlib_roots()
-    if not roots:
-        return set()
-    cand = set()
-    for root in roots:
-        subdirs = [root]
-        # Linux：扩展模块在 lib-dynload/；Windows：在 DLLs/（DLLs 通常在 stdlib 旁）
-        for extra in ("lib-dynload", "DLLs", os.path.join(os.pardir, "DLLs")):
-            p = os.path.normpath(os.path.join(root, extra))
-            if os.path.isdir(p):
-                subdirs.append(p)
-        for d in subdirs:
-            try:
-                entries = os.listdir(d)
-            except OSError:
-                continue
-            for entry in entries:
-                if entry in ("site-packages", "dist-packages", "__pycache__",
-                             "lib-dynload", "DLLs"):
-                    continue
-                if entry.endswith(".py"):
-                    cand.add(entry[:-3])
-                elif "." not in entry and os.path.isdir(os.path.join(d, entry)):
-                    cand.add(entry)
-                else:
-                    base, ext = os.path.splitext(entry)
-                    if ext.lower() in (".pyd", ".so", ".dll", ".dylib"):
-                        cand.add(base.split(".")[0])
-    # 归属判据：**在 Python 安装前缀里，且不在 site-packages/dist-packages 里**。
-    # 不能只认 stdlib 目录：Windows 的 C 扩展在 <prefix>/DLLs/（stdlib 是 <prefix>/Lib），
-    # Linux 的在 <prefix>/lib/python3.X/lib-dynload/ —— 两者都在 prefix 内但不在 stdlib 内。
-    # 实测踩过：只认 stdlib 目录时 unicodedata 被判成第三方，estimate.py 直接报
-    # "import unicodedata（不在白名单）"。
-    site_parts = ("site-packages", "dist-packages")
-    prefix_roots = []
-    for base in (getattr(sys, "base_prefix", "") or "", getattr(sys, "prefix", "") or ""):
-        if base and os.path.isdir(base):
-            prefix_roots.append(os.path.abspath(base))
-    prefix_roots.extend(roots)
-    good = set()
-    for name in cand:
-        if not name.isidentifier():
-            continue
-        try:
-            spec = importlib.util.find_spec(name)
-        except (ImportError, ValueError, AttributeError):
-            continue
-        if spec is None:
-            continue
-        raw_paths = [getattr(spec, "origin", None) or ""]
-        raw_paths.extend(list(getattr(spec, "submodule_search_locations", None) or []))
-        for raw in raw_paths:
-            if not raw:
-                continue
-            if raw in ("built-in", "frozen"):
-                good.add(name)
-                break
-            try:
-                ap = os.path.abspath(raw)
-            except (TypeError, ValueError):
-                continue
-            if any(sep in ap for sep in site_parts):
-                break                       # 第三方包目录里的，不算标准库
-            if any(ap == r or ap.startswith(r + os.sep) for r in prefix_roots):
-                good.add(name)
-                break
-    return good
 
 
 def t_deps():
@@ -449,6 +376,10 @@ def t_pack():
     # 必须全部进包。手写 must 列表对新增文件天然免疫：gates.py / stagewatch.py /
     # preflight.py / qavmaf.py / qaasr.py / tools/golden_frames.py 都曾被漏在列表外——
     # "必需文件必须在包里"这条检查对**新增文件天然免疫**，等于只保护了第一版写下的那些路径。
+    # 注意 "docs"：现在仓库里**没有**这个目录（`if not base.is_dir(): continue` 直接跳过），
+    # 列进来是给将来放效果图用的。**加 docs/ 的那次提交必须同时把 "docs" 写进 package.json 的
+    # files**，否则本项会红且提示"这些文件在仓库里但没进包"——那不是误报，是这条派生检查在
+    # 提醒你"文档站资源也该随包分发"（或者你根本不该把它放进仓库）。
     shipped_dirs = ("skills", "schemas", "locale", "tools", "docs")
     on_disk = []
     for d in shipped_dirs:
@@ -544,16 +475,20 @@ def t_doc_refs():
 # ---------------------------------------------------------------- 7 体积
 def t_size():
     big = []
+    checked = 0
     for p in [p for p in ROOT.rglob("*") if p.is_file()
               and not (set(p.parts) & SIZE_SKIP_DIRS)
               and not str(p.relative_to(ROOT)).startswith("tmp_scratch_")
-              and p.suffix.lower() not in SIZE_SKIP_EXT
-              and p.suffix != ".png"]:
+              and p.suffix.lower() not in SIZE_SKIP_EXT]:
+        checked += 1
         n = p.stat().st_size
         if n > MAX_FILE_BYTES:
             big.append("%s %.0f KB" % (p.relative_to(ROOT), n / 1024.0))
     assert not big, "；".join(big)
-    return "所有文本文件 < %.0f KB" % (MAX_FILE_BYTES / 1024.0)
+    # 文案必须与判定口径一致：旧文案写"所有文本文件"，实际却把 .jpg 也算进来，于是读者看到
+    # "文本文件太大"却找不到大文本文件。"受检"= 跳过缓存目录与媒体后缀之后剩下的文件。
+    return ("%d 个受检文本文件 < %.0f KB（媒体资产与缓存目录不计）"
+            % (checked, MAX_FILE_BYTES / 1024.0))
 
 
 
@@ -687,6 +622,8 @@ def t_ci_workflow():
         return "跳过（没有 .github/workflows）"
     bad = []
     files = sorted(wf.glob("*.yml")) + sorted(wf.glob("*.yaml"))
+    # 同 t_syntax_js：0 个 workflow 不能算通过（删掉 ci.yml 后本项曾报"0 个 workflow…"PASS）。
+    assert files, "没找到任何 workflow（.github/workflows/*.yml）：目录存在但没有文件，本项等于没查"
     for f in files:
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             m = re.match(r"^(\s*)-\s+name:\s*(.+)$", line)
@@ -718,6 +655,9 @@ def t_film_contract():
     为什么要进 CI：film.json 是唯一内容真源，而未知键以前是**静默忽略**的
     （hold 写成 holds、kind 拼错、cue 的 at 指向不存在的句子，全都"跑得通但效果没了"）。
     这里不重写校验逻辑，直接调技能里的 filmcheck.py——校验规则只允许有一份。
+    调用必须带 --json 并检查 skipped：filmcheck 遇到"不是 film.json 的产物形态"（顶层
+    没有 title/lines，比如配乐报告）时会打印 [SKIP]、退出码仍是 0；只看退出码会让这项在
+    夹具变形之后照样 PASS——契约项在空转，而 PASS 会让所有人以为查过了。
     """
     import subprocess
     scripts = ROOT / "skills" / "video-studio" / "scripts"
@@ -731,13 +671,24 @@ def t_film_contract():
     checker = scripts / "filmcheck.py"
     if not checker.exists():
         raise AssertionError("缺 skills/video-studio/scripts/filmcheck.py")
-    p = subprocess.run([sys.executable, str(checker), str(film)],
+    # --json 有第二个用处：机读输出里带 skipped 字段。skipped=true 表示 filmcheck 认为
+    # 夹具根本不是 film.json（没有 title/lines），此时它 rc=0 但契约校验一次都没跑。
+    # 这里必须把它当失败：夹具换成别的产物形态，等于第 12 项静默失效。
+    p = subprocess.run([sys.executable, str(checker), str(film), "--json"],
                        cwd=str(scripts), capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=120)
     out = (p.stdout or "") + (p.stderr or "")
     assert p.returncode == 0, ("夹具 film.json 没过契约校验（exit=%d）：\n%s"
                                % (p.returncode, out.strip()[-600:]))
-    return ("夹具 film.json 通过契约校验（schema %d 字节）"
+    try:
+        report = json.loads(p.stdout or "")
+    except json.JSONDecodeError as e:
+        raise AssertionError("filmcheck --json 的 stdout 不是可解析 JSON（%s）：\n%s"
+                             % (e, out.strip()[-600:])) from None
+    assert not report.get("skipped"), (
+        "filmcheck 判定夹具不是 film.json（skipped=true）：夹具变成了别的产物形态，"
+        "第 12 项等于空转。夹具必须含 title + lines（契约见 schemas/film.schema.json）")
+    return ("夹具 film.json 通过契约校验（schema %d 字节，skipped=false）"
             % len(schema.read_text(encoding="utf-8")))
 
 
@@ -745,34 +696,79 @@ def t_film_contract():
 def t_footage_contract():
     """素材剪辑线（footage.json）的契约同样只留一份真源。
 
-    校验规则不在这里重写：直接 exec footagekit 再调 load_footage（结构硬错误由它自己报）。
+    校验分两层：
+      1) schemas/footage.schema.json 用 jsonschema 真校验两个真实 JSON
+         （assets/footage/regression/footage.json 与 assets/footage/footage.template.json）。
+         为什么必须真跑：schema 曾经与仓库里**唯一**真实样例互斥（根不允许 _comment、
+         sources 不允许 burned_subs / watermark），而 footageqa 明确消费这两个字段做
+         F2/F3 几何判定——契约文件把"合法配置"判成非法，等于把回归样例排除在契约之外。
+         缺 jsonschema 时记 SKIP（那次没执行，不等于通过）。
+      2) exec footagekit 再调 load_footage（结构硬错误由它自己报），但**只有**缺三方依赖
+         白名单里的包才记 SKIP；包内本地模块（filmkit 之类）导入失败说明包坏了，必须
+         FAIL——以前任何 ModuleNotFoundError 都记 SKIP，实测把 import filmkit 改坏后
+         仍然打印"SKIP 跳过（缺 filmkit_xxx）"，指引完全错误（坏的是包，不是环境）。
+
     **为什么要单独一项**：footagekit 顶层 import filmkit，而 filmkit 要 numpy + Pillow。
     合成在 film 那项里时，任何**没装这两个可选依赖**的环境（裸 python、3.9 job）都会把
     "契约"整项测成 FAIL——测出来的其实是"这台机器没装 numpy"，不是"契约坏了"（v2.1.0
     CI 三红的根因之一）。拆开后缺依赖只让**这一项**记 SKIP：SKIP 会单列打印原因、绝不
-    写成 PASS；CI 的 repo job 装了 numpy/Pillow，那里这一项是真跑。
+    写成 PASS；CI 的 repo job 装了 numpy/Pillow/jsonschema，那里这一项是真跑。
     """
     footage_schema = ROOT / "schemas" / "footage.schema.json"
     footage_tpl = ROOT / "skills" / "video-studio" / "assets" / "footage" / "footage.template.json"
+    footage_reg = (ROOT / "skills" / "video-studio" / "assets" / "footage"
+                   / "regression" / "footage.json")
     assert footage_schema.exists(), "缺 schemas/footage.schema.json（footage.json 的契约）"
     try:
-        json.loads(footage_schema.read_text(encoding="utf-8"))
+        schema_doc = json.loads(footage_schema.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        raise AssertionError("schemas/footage.schema.json 不是合法 JSON：%s" % e) from e
+        raise AssertionError("schemas/footage.schema.json 不是合法 JSON：%s" % e) from None
     assert footage_tpl.exists(), "缺 footage 模板：assets/footage/footage.template.json"
+    assert footage_reg.exists(), "缺 footage 回归样例：assets/footage/regression/footage.json"
+    # jsonschema 是**仓库体检的校验工具**，不是技能运行期依赖，所以不能写进脚本白名单
+    # （第 5 项会把它当成"偷偷引入的三方依赖"）。这里用 importlib 动态取模块而不是
+    # 顶层 import：t_deps 扫的是 ast.Import/ImportFrom 节点，动态导入不会污染白名单判据；
+    # 缺包时记 SKIP（那次没执行，绝不写成 PASS）。
+    try:
+        importlib.util.find_spec("jsonschema")
+        jsonschema = importlib.import_module("jsonschema")
+    except (ImportError, ValueError):
+        return "跳过（缺 jsonschema，无法校验契约）"
+    validator = jsonschema.Draft202012Validator(schema_doc)
+    bad = []
+    for sample in (footage_reg, footage_tpl):
+        try:
+            doc = json.loads(sample.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            bad.append("%s 不是合法 JSON：%s" % (sample.relative_to(ROOT), e))
+            continue
+        for err in sorted(validator.iter_errors(doc),
+                          key=lambda e: tuple(str(x) for x in e.absolute_path)):
+            path = "/".join(str(x) for x in err.absolute_path) or "<root>"
+            bad.append("%s: %s: %s" % (sample.relative_to(ROOT), path, err.message))
+    assert not bad, "footage schema 判真实样例非法：" + "；".join(bad[:8])
     kit = SCRIPTS / "footagekit.py"
     assert kit.exists(), "缺 scripts/footagekit.py（素材剪辑线核心库）"
     try:
         spec = importlib.util.spec_from_file_location("_ci_footagekit", str(kit))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-    except ModuleNotFoundError as e:                # 缺 numpy / PIL 这类可选依赖
-        return "跳过（缺 %s；装上 numpy + Pillow 后本项会真跑）" % (e.name or "三方依赖")
+    except ModuleNotFoundError as e:
+        # 只有"这台机器缺可选三方依赖"才允许 SKIP；包内本地模块导入失败 = 包坏了。
+        # 判据复用第 5 项的三方依赖白名单，而不是再手写一份（白名单只有一个真源）。
+        top = str(e.name or "").split(".")[0]
+        if top in ALLOWED_THIRD_PARTY:
+            return ("跳过（缺三方依赖 %s；schema 已用 jsonschema 校验两个样例，"
+                    "但 footagekit 的运行时契约没跑）" % top)
+        raise AssertionError(
+            "footagekit 导入失败：找不到本地模块 %r（不在三方依赖白名单 %s 里）。"
+            "这是包坏了（文件被删/改名），不是这台机器缺可选依赖"
+            % (e.name, "/".join(sorted(ALLOWED_THIRD_PARTY)))) from None
     try:
         mod.load_footage(str(footage_tpl))          # 有硬错误会直接 SystemExit
     except SystemExit as e:
         raise AssertionError("footage 模板没过 load_footage：%s" % (e.code or "")) from None
-    return ("schema %d 字节可解析；footage 模板通过 load_footage"
+    return ("schema %d 字节：回归样例 + 模板均 0 error；footage 模板通过 load_footage"
             % len(footage_schema.read_text(encoding="utf-8")))
 
 # ---------------------------------------------------------------- 14 断言条数一致
@@ -787,6 +783,11 @@ def t_case_count():
     口径：只扫**断言类**句子（同一行里同时出现 selfcheck/回归护栏/针对真实缺陷/断言
     与"N 条"），CHANGELOG 里"17 条反模式"这种无关计数不会被误伤；CHANGELOG 是历史
     记录，本来就会保留旧数字，不参与这项检查。
+    数字错一律 FAIL，**不再放过 <10 的值**：旧逻辑把"85 条改成 9 条"当成编号忽略，
+    于是错数字可以一路 PASS。序数误伤由正则的第-lookbehind 兜住（"第 54 条"不命中）。
+    另外 SKILL.md / README.md / marketplace-entry.json 三篇必查文档各至少命中一次——
+    把整句改写成中文数字（"共八十五条"）或干脆删掉时正则一处都不命中，这项检查会在
+    那份文档上静默失效，所以"没写条数"本身也要 FAIL。
     """
     src = SCRIPTS / "selfcheck.py"
     assert src.is_file(), "缺 scripts/selfcheck.py"
@@ -814,23 +815,38 @@ def t_case_count():
     # 完全无关的数量一起抓进来（第一版就误报了 4 处）。
     claim_re = re.compile("(?<![第\\d/])(\\d{2,3})\\s*条(?=全绿|断言|回归护栏|针对真实缺陷)")
     selfcheck_re = re.compile("自检\\s*(\\d{2,3})\\s*条")
+    # 一位数的补充正则：主正则只认 2~3 位数字，于是"85 条断言"被改成"9 条断言"时
+    # 一处都不命中——错数字反而比正确写法更"安全"。这里只放宽位数，**lookahead 与
+    # 第-lookbehind 原样保留**（"第 5 条"这类序数依旧不算总数）；英语句式同样加这个
+    # lookbehind，防止把 "85" 里的 "5" 当成一条一位数声明（实测 marketplace-entry 的
+    # "85 self-check assertions" 会这样误命中）。
+    claim1_re = re.compile("(?<![第\\d/])(\\d)\\s*条(?=全绿|断言|回归护栏|针对真实缺陷)")
+    selfcheck1_re = re.compile("自检\\s*(\\d)\\s*条")
     # "仓库体检 12 项" 指的是本文件的检查项数，口径不同，单独核。
     ci_re = re.compile("仓库体检\\s*(\\d{1,2})\\s*项")
     # 英文口径同样要核：marketplace-entry.json 的英文简介曾长期写着"69 self-check
     # assertions and 12 repo checks"，而中文简介已是 76/13——旧正则只看中文句式，
     # 于是同一份分发页里中英两半各说各话，检查却一路 PASS。
     claim_en_re = re.compile("(\\d{2,3})\\s*self-check assertions?")
+    claim_en1_re = re.compile("(?<![第\\d/])(\\d)\\s*self-check assertions?")
     ci_en_re = re.compile("(\\d{1,2})\\s*repo checks?")
     bad = []
+    hit_docs = set()
     for doc in docs:
         if not doc.is_file():
             continue
         for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
-            for m in (list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line))
-                      + list(claim_en_re.finditer(line))):
+            claims = (list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line))
+                      + list(claim_en_re.finditer(line)) + list(claim1_re.finditer(line))
+                      + list(selfcheck1_re.finditer(line)) + list(claim_en1_re.finditer(line)))
+            if claims:
+                hit_docs.add(doc)
+            for m in claims:
                 n = int(m.group(1))
-                # 只认"具体条数"：<10 的多半是编号（第 5 条）或区间，不当作总数。
-                if n >= 10 and n != cases:
+                # 命中即必须是真总数。旧写法用 n>=10 过滤，把"85 条"改成"9 条"后 9 被当成
+                # 编号忽略，于是错数字照样 PASS；序数（"第 54 条"）由第-lookbehind 排除，
+                # 不需要再靠大小来猜。
+                if n != cases:
                     bad.append("%s:%d 写 %d 条（CASES 实际 %d 条）"
                                % (doc.name, ln_no, n, cases))
             for m in list(ci_re.finditer(line)) + list(ci_en_re.finditer(line)):
@@ -839,7 +855,16 @@ def t_case_count():
                     bad.append("%s:%d 写仓库体检 %d 项（实际 %d 项）"
                                % (doc.name, ln_no, n, CI_CHECK_COUNT))
     assert not bad, "；".join(sorted(set(bad))[:6])
+    # "数字写错"能查，"根本不写"查不到：把条数整句删掉或写成"共八十五条"后正则一处都不
+    # 命中，这项检查就在那份文档上静默失效。所以三篇必查文档每篇至少命中一次。
+    # CHANGELOG 不在必查里（它本来就保留历史数字）；ci.yml / locale 也不要求写条数。
+    required = [SKILL / "SKILL.md", ROOT / "README.md", ROOT / "marketplace-entry.json"]
+    no_hit = [d.name for d in required if d not in hit_docs]
+    assert not no_hit, (
+        "%s 没写可核对的断言条数（写成中文数字或删掉都算）：等于这项检查在这份文档上没生效"
+        % "、".join(no_hit))
     return ("CASES=%d 条 / ci_check=%d 项，与文档、CI 注释、分发页文案里的口径一致"
+            "（SKILL.md / README.md / marketplace-entry.json 各至少 1 处）"
             % (cases, CI_CHECK_COUNT))
 
 

@@ -9,8 +9,11 @@
 # 上界与下界一起给：这个项目以"可复现"为卖点，而 Pillow 的字体度量、
 # numpy 的 FFT 实现、edge-tts 的返回结构都可能在"下一个小版本"里变。
 # 下界 = 已验证过的最低版本；上界 = 已知会破坏契约的下一个大版本。
+# Pillow 13.0.0 已在本机实测通过整套自检（与 CI 当前装到的版本一致），
+# 所以上界放到下一个大版本 14：留出的空间是为了让 CI 装到与本地实测一致的版本，
+# 而不是让 pip 因一条过时的上界回退到 12.x、与"实测通过"的环境不一致。
 numpy>=1.24,<3
-Pillow>=10.0,<13
+Pillow>=10.0,<14
 # 旁白：唯一的时间轴权威（没有它只能用手工音频）
 edge-tts>=6.1,<8
 
@@ -44,6 +47,12 @@ opencv-python-headless>=4.8,<6
 #   tools/golden_frames.py  金帧回归（仓库工具）
 # 三个可选门禁都**不是** render.py 的硬依赖（用了 _try_module），缺了只让对应门禁
 # 记 skipped，不会 ModuleNotFoundError；但 qa 报告里会明确写"本次没查"。
+
+# ---- 仓库体检专用（不是技能运行期依赖）----
+# tools/ci_check.py 第 13 项用 jsonschema 真校验 schemas/footage.schema.json 与两个真实样例；
+# 它不是脚本 import 的运行期依赖（脚本白名单不允许它），只在本仓库的 CI / 本地体检里用。
+# 没装时第 13 项记 SKIP 并打印原因，不会写成 PASS。
+# jsonschema>=4.0,<5
 
 # ---- 不需要 ----
 # moviepy / pydub / soundfile / librosa / manim：本技能一行都不 import。

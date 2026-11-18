@@ -2831,7 +2831,27 @@ def main():
             raise SystemExit("[preview] 需要秒数，例如 --preview 15") from None
         if secs <= 0:
             raise SystemExit("[preview] 秒数必须 > 0")
-        tl = ensure_tl()
+        # 自动补前置（照抄 stills 分支的写法）：README 把 --preview 15 列在常用开关里，
+        # 可干净 work/ 下直接 ensure_tl() 会 SystemExit「先跑 --stage layout」——照文档
+        # 抄一遍必失败，而且用户看不出"只差一次 TTS + 排轴"。这里缺什么就真跑什么，
+        # 每一步都**明说**补的是哪一步（不偷偷跑）。
+        # 为什么每步都要 _stage_begin/_stage_end：否则 manifest 里没有 tts/layout 记录，
+        # 下次 --stage tts 会看到 tts.json 在、账本里却没记录 -> 误报「接手旧 work」。
+        if not os.path.exists(tts_p):
+            print("[preview] 没有 tts.json，自动先跑 --stage tts（需要联网合成旁白）")
+            _t0 = _stage_begin("tts")
+            lines = st_tts(script, a.work, force=a.force_tts)
+            _stage_end("tts", _t0, n_tts=len(lines) if isinstance(lines, list) else None)
+            _t0 = _stage_begin("layout")
+            tl = st_layout(script, a.work, lines)
+            _stage_end("layout", _t0)
+        elif not os.path.exists(tl_p):
+            print("[preview] 没有 timeline.json，自动先跑 --stage layout")
+            _t0 = _stage_begin("layout")
+            tl = st_layout(script, a.work)
+            _stage_end("layout", _t0)
+        else:
+            tl = ensure_tl()
         mod = load_scenes()
         pdir = os.path.dirname(os.path.abspath(a.out))
         os.makedirs(pdir, exist_ok=True)
