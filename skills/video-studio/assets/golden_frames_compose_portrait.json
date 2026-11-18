@@ -41,7 +41,7 @@
  "frames": [
   {
    "name": "hero",
-   "sha256": "2dd1341c384e6e4363e92c2d02ad1a63a1fee4a8e9a67c823ce0a64c0a7c4432",
+   "sha256": "24f723743d638f7a562cbf9fb1e78161d3460ba08bed2338665411cb09d289fc",
    "size": [
     1080,
     1920
@@ -49,7 +49,7 @@
   },
   {
    "name": "statement",
-   "sha256": "e4aa4335f15849251f5131df9d88b653146afc37ac2b2cfaf975cfd89978af23",
+   "sha256": "810ff4127e6b39b86fc960e208c8d6d413fa26ba4e6a0078e77377b8f33b922e",
    "size": [
     1080,
     1920
@@ -57,7 +57,7 @@
   },
   {
    "name": "list",
-   "sha256": "6f73954af8a61c52140f3bb49ab466d3f01db5fa33fade45daaa98460df38d14",
+   "sha256": "69fd04282e836b11823f574b9a956b298cbf0a351e180ce70cb4ae24ce5ee290",
    "size": [
     1080,
     1920
@@ -65,7 +65,7 @@
   },
   {
    "name": "stat",
-   "sha256": "2a7268012e04907c0ec4f0f103c4d6fff33a5c8e7e7f36fc9682e31944f4f2d7",
+   "sha256": "9a08be4d10364f77fba6aed668368023d60ad57528edb14a0a3da22172dfc861",
    "size": [
     1080,
     1920
@@ -73,7 +73,7 @@
   },
   {
    "name": "compare",
-   "sha256": "bb8b39650ff0e84d9ab67bdf83c2e24427328297a3e036faa53a7dcbf6f65b72",
+   "sha256": "d8a51e6480848d323114f8a0bc065f872c3cb1dd9a9f66f40869f49a1859d99c",
    "size": [
     1080,
     1920
@@ -81,7 +81,7 @@
   },
   {
    "name": "process",
-   "sha256": "5da04a2647e1d25a38d35f00d7272f9a1a7335f03249201be580bd65e689851c",
+   "sha256": "db3562710532e295bb55a2d8bd647d6ab4f555f8bbd969f0e8d3362c5a2e260f",
    "size": [
     1080,
     1920
@@ -89,7 +89,7 @@
   },
   {
    "name": "quote",
-   "sha256": "601f9f32e562835ca70becd2090707f4868d5201a5aa43556a0c0e62368a4d91",
+   "sha256": "3f847dc4ae7a59cc0ff69c07c72f171ed8dca7c7ada43de17e52f252affe5256",
    "size": [
     1080,
     1920
@@ -97,7 +97,7 @@
   },
   {
    "name": "chapter",
-   "sha256": "007ee5665f3d76a4ad25e1ad4df81ef8738b5a8c54dd23b031cf0e9cb66c1999",
+   "sha256": "ff0b4ad5e54d3b80ecd0560a2f6bd21c67bd8a8444586a6aea4a6780e41fa858",
    "size": [
     1080,
     1920
@@ -105,7 +105,7 @@
   },
   {
    "name": "chart",
-   "sha256": "8639b362232fbc0c4ac4c1741943ea88499cd3c89d9c51f030fb2ab121efca9f",
+   "sha256": "f65b0b9d905f65c79059559886997bb2310f4e099aae085bf438d7f8a39df33e",
    "size": [
     1080,
     1920
@@ -113,7 +113,7 @@
   },
   {
    "name": "outro",
-   "sha256": "485cb20bb39ef212018184d391903449f214450ab8b210a7a68081f2ee7ddf05",
+   "sha256": "1828ce171daf55a8fe8edc34b0a08eaec314dcb8e200e2ddca2c8f23c40e4ca4",
    "size": [
     1080,
     1920

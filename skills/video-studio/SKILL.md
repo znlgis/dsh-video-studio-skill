@@ -995,7 +995,7 @@ S.event(0.62, 'ring',   {});           // 纯装饰事件：用通用名，不�
 | 允许的输出尺寸 | 横屏 1920x1080 / 1280x720 / 960x540（2560x1440 在"允许列表"里但**会被上采样规则拒掉**）；竖屏 1080x1920 / 720x1280 / 540x960 |
 | 允许的 fps | 24 / 25 / 30 / 50 / 60 |
 | 竖屏 | **支持（experimental）**：加 `--layout portrait`（render / propose / filmcheck 都有这个参数），画布切到 1080x1920，安全区与字幕带随之重算。10 类构图**全部竖屏原生**（stat/quote/chapter/hero/statement/list/outro 纵向重排，compare 上下、process 竖向轴、chart 竖排条） |
-| 竖屏字号 | `layoutkit.TYPE_SCALE = 0.68`（横屏 1.0）：竖屏不是纯几何缩放（0.5625），手机上正文会小于舒适尺寸。档位定义在 profile 里，`scenes._font` 只读值 |
+| 竖屏字号 | `layoutkit.TYPE_SCALE = 0.89`（横屏 1.0）：判据是「正文 ≥ `MIN_BODY_PX = 30px`」，不是几何比例——designkit 的 body 基准是 34px，纯几何缩放 0.5625 只有 ~19px；30/34≈0.882，取 0.89 把正文抬到 30px |
 | 竖屏逐类停留 | `render._apply_type_hold`：chart +0.45 / compare +0.40 / process +0.40 / list +0.30 / stat +0.25 / chapter +0.15 / outro +0.15，hero/statement/quote 不加；总增量上限片长 6%。段变长会整体后移后续段并重算 total/frames。横屏零变化 |
 | 竖屏输出比例 | 非 9:16 的输出**直接报错**；横屏片与竖屏片都只能同比例下采样 |
 | 上采样 | **直接报错**。输出大于当前画布 = 把 1080p 包装成"更高分辨率"（假 4K）；要真高清得改内部构图 |

@@ -62,11 +62,13 @@ PORTRAIT = {
     "safe": (65, 120, 1015, 1610),
     "sub_band": (80, 1450, 1000, 1616),
     "sub_max_chars": 14,      # 竖屏一行装不下 24 个中文字，14 字接近满行
-    # 字号档（竖屏）：竖屏不是"把横屏缩小 0.56 倍"，而是**换一个观看距离**。
-    # 手机上 1920px 高的画面按 12cm 算，观看 30cm，角分辨率比横屏电视/显示器更细；
-    # 纯按 W/1920=0.5625 缩字会让正文在手机上小于舒适阅读尺寸（实测 46px 的正文
-    # 在 1080 宽里只剩 26px）。0.68 是首轮标定：比几何缩放大约 21%，而不是直接拉满。
-    "type_scale": 0.68,
+    # 字号档（竖屏）：判据是**可读性**，不是几何比例。
+    # designkit 的字号盘以 body=34px 为基准（见 designkit._type_scale 的注释）；
+    # 纯几何缩放（W/1920=0.5625）会让竖屏正文只有 ~19px，手机上必须凑近看。
+    # MIN_BODY_PX=30 是下限，反推 type_scale >= 30/34 ≈ 0.882。
+    # 0.89 把 34px 的 body 抬到 30.3px，标题 2 行、正文 1 行（实测最长句）；
+    # 0.96 会让标题涨到 3 行——所以取 0.89，而不是取整到 0.9（0.9 也合格，但没余量）。
+    "type_scale": 0.89,
 }
 
 _BY_KEY = {p["key"]: p for p in (LANDSCAPE, PORTRAIT)}
@@ -99,6 +101,16 @@ SUB_BAND = tuple(PROFILE["sub_band"])
 SUB_MAX_CHARS = int(PROFILE["sub_max_chars"])
 # 字号档：竖屏比几何缩放略大（见 profile 注释）。scenes 的 _font 读它。
 TYPE_SCALE = float(PROFILE.get("type_scale", 1.0))
+
+# 竖屏正文的最小可读字号（px）。这是竖屏字号档的**判据**，不是观感描述：
+# 手机上正文小于 ~30px 就需要凑近看（1080 宽、6 英寸屏、约 30cm 视距的经验下限）。
+# designkit 的 body 档在 1080p 横屏下约 46px，所以竖屏 type_scale 至少要 30/46≈0.65。
+MIN_BODY_PX = 30.0
+
+
+def body_px(base_px=34.0):
+    """当前 profile 下正文字号的实际像素（base_px 是横屏 body 档的设计值）。"""
+    return float(base_px) * float(TYPE_SCALE)
 
 
 def profile(key=None):

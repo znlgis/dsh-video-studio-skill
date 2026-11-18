@@ -3165,6 +3165,7 @@ def t_portrait_type_scale_and_hold():
         "sys.path.insert(0, %r)" % assets,
         "import layoutkit as LK",
         "print(json.dumps({'canvas': [LK.W, LK.H], 'type_scale': LK.TYPE_SCALE,",
+        "                    'body_px': LK.body_px(), 'min_body_px': LK.MIN_BODY_PX,",
         "                    'prof': LK.PROFILE.get('key')}, ensure_ascii=False))",
     ])
     io.open(probe, "w", encoding="utf-8").write(body)
@@ -3183,12 +3184,16 @@ def t_portrait_type_scale_and_hold():
     assert land["canvas"] == [1920, 1080] and abs(land["type_scale"] - 1.0) < 1e-6, \
         "横屏字号档必须是 1.0：%r" % (land,)
     assert port["canvas"] == [1080, 1920], "竖屏画布不对：%r" % (port,)
-    assert abs(port["type_scale"] - 0.68) < 1e-6, \
-        "竖屏字号档变了（文档写 0.68）：%r" % (port["type_scale"],)
-    # 竖屏字号必须**大于**纯几何缩放 W/1920（否则等于没做这个档位）
+    # 竖屏字号档的判据是**可读性**，不是某个数字：正文必须 >= layoutkit.MIN_BODY_PX。
+    # 为什么不再断言字面值：这里曾写死 0.68，后来按「正文 >= 30px」重新扫描发现 0.88
+    # 才刚好达标（0.68 只有 ~31px 是把 46px 当基准算错了档位比例）——写死数字会让
+    # 「按判据修正」这件事本身变成红灯。
     geo = float(port["canvas"][0]) / 1920.0
-    assert port["type_scale"] > geo + 1e-6, \
-        "竖屏字号档 %.3f 不大于几何缩放 %.3f，等于没有单独标定" % (port["type_scale"], geo)
+    assert port["type_scale"] > geo + 0.05, \
+        "竖屏字号档 %.3f 太接近几何缩放 %.3f（等于没做这个档位）" % (port["type_scale"], geo)
+    body_px = float(port["body_px"])
+    assert body_px >= float(port["min_body_px"]) - 1e-6, \
+        "竖屏正文只有 %.1fpx，低于可读下限 %.1fpx" % (body_px, port["min_body_px"])
 
     # 逐类停留：用一个小 timeline 直接调 render._apply_type_hold（横屏必须原样返回）
     import render as R
