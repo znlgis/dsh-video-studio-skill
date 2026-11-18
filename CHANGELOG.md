@@ -6,6 +6,44 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.1.1 — CI 三红修复：lint 归零 + 契约检查不再因缺可选依赖误红（2026-11-18）
+
+> 2.1.0 推上去后 GitHub Actions 是红的：repo check（ubuntu/windows）红在 ruff，
+> py39 红在 ci_check。听起来是两件事，其中一件其实是**同一类错误的两个面**：
+> 新增的 footage 脚本既没过 lint，又让"契约检查"依赖上了 numpy —— 而那台机器上没装。
+
+### P0：CI 三红
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| repo check（ubuntu/windows）红在 `lint (ruff)` | v2.1.0 的 footage 四件套 + 自检共 10 条 F/E9/B：3 处未用 import、2 处未用变量、`footageqa.py` 里 **`make_contact_sheet`/`write_report` 各写了两份**（第二份覆盖第一份）、`_visible_box` 里一段空 for、`footagekit.load_footage` 的 `except` 没写 `from None` | 删掉重复定义与死循环、`silent` 改成真断言（concat 产物必须存在，缺了在 assemble 之前报）、`raise ... from None`；`ruff check .` 归零 |
+| py39 / repo check 红在 `ci_check` 第 12 项 | 该项为了"契约规则只留一份"直接 `exec` `footagekit.py`，而它 `import filmkit` -> numpy + Pillow。CI 的 repo/py39 job 只装 ruff，于是模块导入失败被记成**契约坏**（错的是环境，不是契约） | 第 12 项收回成只查 `film.json`（纯标准库），**新增第 13 项**查 `footage.json`：缺 numpy/Pillow 时记 **SKIP 并打印缺哪个包**，绝不写成 PASS；repo job（3.12）装上 numpy/Pillow，这一项真跑；py39 不装（numpy 2.x 要求 ≥3.10），那里如实 SKIP |
+
+### P1：顺带修掉的真缺陷（写门禁时的边界）
+
+- `_visible_box` 承诺"没写 crop 时可见区就是整帧"，实际返回 `None`，于是 F2/F3 在**没有 crop 的契约**上
+  走到 pass 分支取 `box[1]` 抛 `TypeError`，被 `run_all` 兜成"门禁执行异常 = fail"——判据没执行，结论却是 fail。
+  现在缺 crop 明确返回 **skipped（可见区未知）**，并在 detail 里写清"补上 crop 后重跑"；docstring 同步改正。
+- `footage_selftest.run_chain` 里 `silent = concat_video(...)` 赋值后从未使用：concat 没产出时
+  要等到 `assemble` 才炸，报错点离原因很远。现在断言产物存在，失败点回到 concat。
+
+### 口径与版本
+
+- `package.json` / README 徽章 / 本文件顶部：2.1.0 -> **2.1.1**。
+- `ci_check` 检查项 13 -> **14 项**（原第 13 项"断言条数一致"顺延为第 14 项）；
+  CI 注释、README 两处清单、`marketplace-entry.json` 中英文简介同步改口。
+- 断言语义不变：PASS = 真查了且通过；FAIL = 查了没过；**SKIP = 这次没执行，不等于通过**。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `python -m ruff check .` | **0 违规**（10 条全清） |
+| `python tools/ci_check.py -v`（装 numpy/Pillow） | **PASS 14 / FAIL 0 / SKIP 0** |
+| `python tools/ci_check.py -v`（屏蔽 numpy/Pillow，模拟裸机） | **PASS 13 / FAIL 0 / SKIP 1**（第 13 项明确打印"缺 numpy"），**退出码 0** |
+| `python tools/footage_selftest.py` | **PASS 7 / FAIL 0**（离线约 30 秒） |
+| 真 CI | 待本次推送验证（repo ubuntu/windows + py39 三个 job 全绿才算收尾） |
+
 ## 2.1.0 — 素材剪辑线（footage 模式）：有素材就剪，没素材才画（2026-11-18）
 
 > 起因是一次真实需求：用户要"介绍四渡赤水的视频"，先按零素材线出（代码逐帧画图文），

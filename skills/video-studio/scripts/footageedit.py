@@ -14,8 +14,6 @@ footagekit.build_treatment_filter，与抽帧预览共用同一份，避免"预�
 """
 from __future__ import annotations
 
-import json
-import os
 import subprocess
 import sys
 import wave

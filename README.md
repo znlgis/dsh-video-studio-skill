@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -211,7 +211,7 @@ skills/video-studio/
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
 schemas/film.schema.json     film.json 的契约（draft-07 子集）
-tools/ci_check.py            仓库级体检（13 项；语法/JSON/依赖白名单/打包卫生/文档引用/film 契约/断言条数，不需 ffmpeg）
+tools/ci_check.py            仓库级体检（14 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；含 preflight/vmaf/asr）
 tools/golden_frames.py       金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
 tools/silhouette_qa.py       剪影可区分门禁 G13（换设计不能只是换色）
@@ -256,12 +256,13 @@ peer 范围 `@deepseek-ai/dsh-skill-filesystem >=0.1.0-rc.6 <0.3.0-0`，覆盖 D
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 13 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
+python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /
                                 #         Markdown 围栏（状态机）/ CI workflow /
-                                #         单文件体积 / film.json 契约（调 filmcheck.py，规则只留一份）
+                                #         单文件体积 / film.json 契约（调 filmcheck.py，规则只留一份）/
+                                #         footage.json 契约（调 footagekit.load_footage；缺 numpy/Pillow 记 SKIP）
 ```
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。

@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -178,6 +177,8 @@ def run_chain(foot, work, out, edl_strict=False):
     mix = footageedit.mix_tracks(rows, tl, cut, foot, work)
     ass = footageedit.write_ass(tl, foot, work / "sub.ass")
     silent = footageedit.concat_video(cut, work)
+    if not Path(silent).is_file():          # 无声成片是 assemble 的输入，产物缺了要在这里说清楚
+        raise RuntimeError("concat 没有产出无声成片：%s" % silent)
     movie = footageedit.assemble(foot, work, out, ass_path=ass["path"])
     rep = footageqa.run_all(foot, work, movie, tl, edl, strict=False)
     return dict(timeline=tl, edl=edl, cut=cut, mix=mix, movie=movie, report=rep)

@@ -22,6 +22,8 @@
      以及 run 里 python <路径>.py 指向的文件必须存在
   11  体积：单个文件不超过 400 KB（技能要能塞进上下文与包里）
   12  film.json 契约：schemas/film.schema.json + scripts/filmcheck.py 校验夹具（规则只留一份）
+  13  footage.json 契约：schemas/footage.schema.json + footagekit.load_footage 载入模板
+      （缺 numpy / Pillow 时记 SKIP —— 那次没执行，不等于通过）
 
 三档结论（与技能自己的门禁账本同口径）：PASS = 这次真的查了且通过；FAIL = 查了没过；
 SKIP = **这次没执行**（比如本地没装 node / npm），**不等于通过**。
@@ -77,7 +79,7 @@ MAX_FILE_BYTES = 400 * 1024
 DESC_MAX_CHARS = 400
 # 本文件的检查项数（main() 里那张 checks 表的长度）。文档与分发页写的"仓库体检 N 项"
 # 要与它一致；改这里必须同批改 CHECKS 表，否则这项自检会先失败——这是故意的。
-CI_CHECK_COUNT = 13
+CI_CHECK_COUNT = 14
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
 SIZE_SKIP_DIRS = {".git", "node_modules", ".team", "work", "out", "__pycache__", ".venv", "venv"}
@@ -735,8 +737,21 @@ def t_film_contract():
     out = (p.stdout or "") + (p.stderr or "")
     assert p.returncode == 0, ("夹具 film.json 没过契约校验（exit=%d）：\n%s"
                                % (p.returncode, out.strip()[-600:]))
-    # 素材剪辑线（footage.json）的契约同样只留一份真源：
-    # schema 能被解析 + 模板能被 footagekit.load_footage 载入（结构硬错误在这里暴露）。
+    return ("夹具 film.json 通过契约校验（schema %d 字节）"
+            % len(schema.read_text(encoding="utf-8")))
+
+
+# ---------------------------------------------------------------- 13 footage.json 契约
+def t_footage_contract():
+    """素材剪辑线（footage.json）的契约同样只留一份真源。
+
+    校验规则不在这里重写：直接 exec footagekit 再调 load_footage（结构硬错误由它自己报）。
+    **为什么要单独一项**：footagekit 顶层 import filmkit，而 filmkit 要 numpy + Pillow。
+    合成在 film 那项里时，任何**没装这两个可选依赖**的环境（裸 python、3.9 job）都会把
+    "契约"整项测成 FAIL——测出来的其实是"这台机器没装 numpy"，不是"契约坏了"（v2.1.0
+    CI 三红的根因之一）。拆开后缺依赖只让**这一项**记 SKIP：SKIP 会单列打印原因、绝不
+    写成 PASS；CI 的 repo job 装了 numpy/Pillow，那里这一项是真跑。
+    """
     footage_schema = ROOT / "schemas" / "footage.schema.json"
     footage_tpl = ROOT / "skills" / "video-studio" / "assets" / "footage" / "footage.template.json"
     assert footage_schema.exists(), "缺 schemas/footage.schema.json（footage.json 的契约）"
@@ -745,17 +760,22 @@ def t_film_contract():
     except json.JSONDecodeError as e:
         raise AssertionError("schemas/footage.schema.json 不是合法 JSON：%s" % e) from e
     assert footage_tpl.exists(), "缺 footage 模板：assets/footage/footage.template.json"
-    kit = scripts / "footagekit.py"
+    kit = SCRIPTS / "footagekit.py"
     assert kit.exists(), "缺 scripts/footagekit.py（素材剪辑线核心库）"
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("_ci_footagekit", str(kit))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.load_footage(str(footage_tpl))       # 有硬错误会直接 SystemExit
-    return ("夹具 film.json 通过契约校验（schema %d 字节）；footage 模板通过 load_footage"
-            % len(schema.read_text(encoding="utf-8")))
+    try:
+        spec = importlib.util.spec_from_file_location("_ci_footagekit", str(kit))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except ModuleNotFoundError as e:                # 缺 numpy / PIL 这类可选依赖
+        return "跳过（缺 %s；装上 numpy + Pillow 后本项会真跑）" % (e.name or "三方依赖")
+    try:
+        mod.load_footage(str(footage_tpl))          # 有硬错误会直接 SystemExit
+    except SystemExit as e:
+        raise AssertionError("footage 模板没过 load_footage：%s" % (e.code or "")) from None
+    return ("schema %d 字节可解析；footage 模板通过 load_footage"
+            % len(footage_schema.read_text(encoding="utf-8")))
 
-# ---------------------------------------------------------------- 13 断言条数一致
+# ---------------------------------------------------------------- 14 断言条数一致
 def t_case_count():
     """文档里写的"N 条断言"必须等于 selfcheck.CASES 的真实长度。
 
@@ -847,7 +867,8 @@ def main(argv=None) -> int:
         ("10 CI workflow 语法", t_ci_workflow),
         ("11 单文件体积", t_size),
         ("12 film.json 契约", t_film_contract),
-        ("13 断言条数一致", t_case_count),
+        ("13 footage.json 契约", t_footage_contract),
+        ("14 断言条数一致", t_case_count),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)

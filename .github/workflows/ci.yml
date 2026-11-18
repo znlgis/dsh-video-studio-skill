@@ -1,9 +1,9 @@
 # 仓库体检 + 技能自检。
 #
 # 两个 job 分工明确（别把两者混为一谈）：
-#   repo     —— tools/ci_check.py 的 13 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
+#   repo     —— tools/ci_check.py 的 14 项（py/js 语法、JSON+版本一致性、技能清单、依赖白名单、
 #               打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、workflow 语法、单文件体积、
-#               film.json 契约、断言条数一致）。不需要 ffmpeg、字体、网络，
+#               film.json / footage.json 契约、断言条数一致）。不需要 ffmpeg、字体、网络，
 #               任何平台都能跑，所以 Ubuntu + Windows 各跑一遍。
 #   skill    —— skills/video-studio/scripts/selfcheck.py：85 条针对真实缺陷的回归断言
 #               （数为准的是 CASES 列表，不是文档里的任何数字）。
@@ -48,7 +48,7 @@ jobs:
           node-version: "20"
       # ruff 是**独立 step**，不进 ci_check 的检查表：ci_check 要能在裸机器（只装 python）
       # 上跑，而这条需要先装 ruff。分开的另一个好处是失败信息直指文件行号，
-      # 不用在 13 项汇总里再拆一层。
+      # 不用在 14 项汇总里再拆一层。
       #
       # 为什么必须有这一步：pyproject.toml 从很早就配了 ruff（select = F,E9,B），
       # 但 CI 从来没跑过它——于是 F821（undefined name）这种"导入即崩"的缺陷
@@ -57,6 +57,12 @@ jobs:
       # 配置存在却不执行，比没有配置更糟：它让人以为已经查过了。
       - name: install ruff
         run: python -m pip install --upgrade pip && pip install "ruff==0.17.4"
+      # ci_check 第 13 项（footage.json 契约）会 exec footagekit -> filmkit -> numpy + Pillow。
+      # v2.1.0 首次推送时这里没装依赖，于是两个平台的 repo check 一起红在"契约"上——
+      # 看着像契约坏了，实际是"这台机器没装 numpy"。装上这两个库，这一项才是真查；
+      # 裸机器（只装 python）本地跑时它会记 SKIP 并打印缺哪个包，不会伪装成 PASS。
+      - name: install ci_check deps (numpy/Pillow)
+        run: pip install numpy Pillow
       - name: lint (ruff)
         run: python -m ruff check . --output-format=github
       - name: repo check
@@ -229,6 +235,11 @@ jobs:
     # 这一条从 v1.3.0 加进 CI 起就一直是红的，因为没人看得到"红的是环境还是代码"。
     # 3.9 的生命周期本身也快到期：这个 job 留着是为了让 ci_check 第 8 项的
     # "3.9 语法兼容"断言真的有人验证。等仓库决定不再支持 3.9 时，连这个 job 一起删。
+    #
+    # 与 repo job 的唯一差别：**不装 numpy/Pillow**（numpy 2.x 要求 >=3.10，钉 1.x 又多一处
+    # 版本漂移）。于是 ci_check 第 13 项（footage 契约）在这里记 SKIP —— 汇总里单独打印
+    # "跳过（缺 numpy）"，不会写成 PASS；契约的真跑在 ubuntu/windows 的 repo job（3.12）。
+    # 第 12 项（film 契约）不需要三方依赖，照旧真跑。
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

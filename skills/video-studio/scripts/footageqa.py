@@ -78,7 +78,6 @@ def _longest_active_run(luma, spread, min_rows=40):
     取最长连续段才能稳定落在画面本身；用 min..max 会把自产字幕也圈进来
     （F2 第一版就栽在这：把自家字幕当成源字幕，比值 3.82 必然 fail）。
     """
-    import numpy as np
     # 阈值刻意放低：雾山、夜景、纯色暗部都是真实素材的常态，
     # 用 4.0/10 会把"低对比度但正常"的画面判成黑边，采样区漂到字幕带上。
     active = (luma > 8.0) & (spread > 2.0)
@@ -150,15 +149,14 @@ def _visible_box(foot):
 
     素材线的画面治理是"crop -> scale -> pad"，所以成片可见区 = crop 框本身；
     scale/pad 只是把它装进输出画布，不会把裁掉的内容加回来。
-    没写 crop 时可见区就是整帧。
+    没写 crop 时返回 None：源分辨率各不相同，算不出"整帧"到底是多大；调用方按
+    skipped 处理（可见区未知 != 通过）。
     """
     treatment = foot.get("treatment") or {}
     crop = _parse_crop(treatment)
     if crop:
         x, y, w, h = crop
         return x, y, x + w, y + h
-    for s in foot.get("sources") or []:
-        pass
     return None
 
 
@@ -249,6 +247,11 @@ def f2_subtitle_bleed(foot, work, out, tl, edl, ctx):
         return dict(gate="F2", status="fail", detail="；".join(problems[:3]),
                     values={"problems": problems, "visible_box": box,
                             "bright_suspicion": suspicion})
+    if box is None:
+        return dict(gate="F2", status="skipped",
+                    detail="没有 treatment.crop（可见区未知）；无法判定字幕带是否被裁掉。"
+                           "补上 crop 后重跑",
+                    values={"bright_suspicion": suspicion})
     if not checked:
         return dict(gate="F2", status="skipped",
                     detail="没有源声明 burned_subs（字幕带位置）；无法判定是否治理干净。"
@@ -288,6 +291,11 @@ def f3_watermark(foot, work, out, tl, edl, ctx):
     if problems:
         return dict(gate="F3", status="fail", detail="；".join(problems[:3]),
                     values={"problems": problems, "visible_box": box})
+    if box is None:
+        return dict(gate="F3", status="skipped",
+                    detail="没有 treatment.crop（可见区未知）；无法判定水印是否被裁掉。"
+                           "补上 crop 后重跑",
+                    values={"visible_box": None})
     if not checked:
         return dict(gate="F3", status="skipped",
                     detail="没有源声明 watermark（水印框）；无法判定水印是否去掉。"
@@ -422,54 +430,6 @@ def f7_signoff(foot, work, out, tl, edl, ctx):
 
 GATES = [f1_edl, f2_subtitle_bleed, f3_watermark, f4_av_equal,
          f5_provenance, f6_voice_dominance, f7_signoff]
-
-
-# ---------------------------------------------------------------- 联系表（F7 证据）
-def make_contact_sheet(out, edl, tl, path, cols=4, thumb=480):
-    """逐镜抽一帧拼联系表。这是 F7 的唯一证据，也是"人看过"的凭据。"""
-    from PIL import Image, ImageDraw
-    rows_by_id = {r["id"]: r for r in (tl or {}).get("lines") or []}
-    path = Path(path)
-    tiles = []
-    for i, s in enumerate((edl or {}).get("shots") or []):
-        r = rows_by_id.get(s["id"]) or {}
-        t = float(r.get("shot_start") or 0.0) + min(1.2, max(0.0, float(s["len"]) * 0.35))
-        png = path.with_name("_frame_%02d.png" % i)
-        png.parent.mkdir(parents=True, exist_ok=True)
-        filmkit.snap(str(out), t, str(png))
-        if png.exists():
-            tiles.append((png, "%s  %.1fs" % (s["id"], float(s["at"]))))
-    if not tiles:
-        return None
-    im0 = Image.open(tiles[0][0])
-    tw = int(thumb)
-    th = max(2, int(round(tw * im0.height / float(im0.width))))
-    rows = (len(tiles) + cols - 1) // cols
-    bar = 26
-    sheet = Image.new("RGB", (cols * tw, rows * (th + bar)), (10, 11, 13))
-    dr = ImageDraw.Draw(sheet)
-    for i, (png, label) in enumerate(tiles):
-        im = Image.open(png).convert("RGB").resize((tw, th), Image.LANCZOS)
-        x, y = (i % cols) * tw, (i // cols) * (th + bar)
-        sheet.paste(im, (x, y))
-        dr.text((x + 8, y + th + 5), label, fill=(230, 230, 230))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(str(path))
-    for png, _ in tiles:
-        try:
-            png.unlink()
-        except OSError:
-            pass
-    return str(path)
-
-
-# ---------------------------------------------------------------- 报告
-def write_report(out, results, extra, ctx):
-    """写人读的 QC 报告（每次完整重写：报告是快照，不做增量）。"""
-    tick = chr(96)
-    md = ["# 素材剪辑交付报告（footage 线）", ""]
-    md.append("- 运行编号：%s" % ctx.get("run_id"))
-    md.append("- 成片：%s" % out)
 
 
 # ---------------------------------------------------------------- 联系表（F7 证据）

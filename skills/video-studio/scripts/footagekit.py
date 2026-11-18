@@ -68,7 +68,7 @@ def load_footage(path):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except ValueError as e:
-            raise SystemExit("footage.json 不是合法 JSON：%s" % e)
+            raise SystemExit("footage.json 不是合法 JSON：%s" % e) from None
         base = p.parent
     if not isinstance(d, dict):
         raise SystemExit("footage.json 顶层必须是对象")
