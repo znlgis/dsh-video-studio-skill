@@ -33,15 +33,15 @@
   "platform": "Windows 11"
  },
  "inputs": {
-  "scenes_sha1": "99e2028801e9c036d7b51719e959010f77bfb8c9",
+  "scenes_sha1": "26f3159b330a3b3c2c03a2b5de221f6e9d5ac476",
   "filmkit_sha1": "e60148a5fd9a78b3a43f5148cf1d959e8a6bb90b",
-  "stylekit_sha1": "a0af53323fde91d757efa8eb812406281b7f1f1f",
+  "stylekit_sha1": "daf7d5af499287fdcf2b8ab969f399494d095100",
   "design_sha1": "38af167000934ff80b0ea10d82b135050ac91a33"
  },
  "frames": [
   {
    "name": "hero",
-   "sha256": "835317c4dcddb459fc0d8f54f2ff5d626169996f7cd7a6c2d5861c6a2c3dced7",
+   "sha256": "332a02bfa5901d3d449b75b715f6de1df108eabdd4fafc26901134e5086bfb87",
    "size": [
     1080,
     1920
@@ -49,7 +49,7 @@
   },
   {
    "name": "statement",
-   "sha256": "f9c948a292cd29ad024aa8d11e5fb4cd13bf483eceba0de5471d320d36b80611",
+   "sha256": "1374eaae35860546db670ece306846eeefb941ef4aa7511e43245c1cef1ca5fe",
    "size": [
     1080,
     1920
@@ -57,7 +57,7 @@
   },
   {
    "name": "list",
-   "sha256": "9c7c8384ab6ec681214348f502afa61587c7ce35950344920d34cfd593f244ae",
+   "sha256": "6ac5731322c07e221eb2ebfbfbeec69a08e3e848a789710dad2c302a14922fa1",
    "size": [
     1080,
     1920
@@ -113,7 +113,7 @@
   },
   {
    "name": "outro",
-   "sha256": "6fb49c2139562d615bb3b467578025ff16df9c86ec8f7e994308fff46f229b20",
+   "sha256": "0de7bba9ae147da9c31ce20b356b31453a37347d25104df8d3baa6253f40f74f",
    "size": [
     1080,
     1920

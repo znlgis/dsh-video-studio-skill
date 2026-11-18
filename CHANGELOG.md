@@ -6,6 +6,52 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 1.10.0 — 竖屏四种构图纵向重排 + 手改设计可直接 adopt + ASR 偏移改用词级真值（2026-11-18）
+
+> 上一版把 stat / quote / chapter 改成了竖屏原生，剩下的 hero / statement / list / outro 仍是
+> 「竖屏骨架 + 横屏内部」——能出片、字也不出画，但内容全挤在画面上三分之一、下半屏空 1000px。
+> 这一版把这四类也做了纵向重排，并顺手清掉三条会在真实使用里反复咬人的小问题。
+
+### P0：hero / statement / list / outro 竖屏纵向重排
+
+| 项 | 内容 |
+|---|---|
+| 根因 | 竖屏骨架（`stylekit.LAYOUTS_PORTRAIT`）的 y 是按横屏比例折过来的：`title_y=300` 在 1080 高里是 28%，在 1920 高里只有 15%；而 `statement` / `outro` 的块起点干脆是横屏常量（470 / 380），竖屏下必然贴顶 |
+| 骨架 | `LAYOUTS_PORTRAIT` 三套的 y 全部下移并拉开：left-stack `title_y` 300→430 / `panel_y` 600→780；center-stack `title_y` 520→700 / `panel_y` 900→1060；split-right `title_y` 250→380 / `panel_y` 520→720 |
+| hero | 标题块（kicker + 标题行 + 副标题）按块高在正文区垂直居中，不再依赖布局表的固定 y |
+| statement / outro | 大字块按块高在正文区垂直居中（`SAFE[1]+120` 到 `SUB_BAND[1]-60`），横屏仍用原来的 470 / 380 |
+| 效果 | 四类构图在竖屏下的像素与横屏**不再相同**（`selfcheck` 第 82 条守着这一点：相同就说明还只是缩放） |
+
+### P1：三条真实使用里的坑
+
+| 项 | 内容 |
+|---|---|
+| 手改设计后提案闸报 stale | `design.json` 本来就是开放字段（配色/节奏/字幕都能改），但 `proposal.json` 存的是确认那一刻的指纹，改完再渲染就判 stale。新增 `propose.py --adopt`：只重算指纹、不动候选，并说清「手改（符合预期）」还是「和候选也对不上（可能是选错文件）」。校验不过（比如对比度不达标）仍然拒绝 |
+| ASR 偏移误报 | 偏移原来拿 `voice_start`（整句 mp3 时长反推）当期望开口时刻。实测一部竖屏片报 `l26 -1.20s`，而词级首词只比 `voice_start` 晚 0.14s、混音能量起跳晚 0.15s——是 whisper 把上一句尾音算进了本段。现在**优先用 `timeline.scenes[].words_abs[0].start`**（TTS 自己报的首词绝对时刻）当期望值，没有词级数据才退回 `voice_start`。但实测 `words_abs` 的每段首词与 `voice_start` **完全相同**（55/55 段），所以这条改动没有实际收益——真正生效的是下一条。 |
+| ASR 跨句伪偏移（真修） | generator 的 segment 边界比句子粗：一部竖屏片 55 段里有 1 段报 `-1.20s`，查下来片段从**上一句尾音**就开始（200.82–203.52，本段 `voice_start` 是 202.015），「本段首字」的 `first_t` 被当成 200.82。修法是两条同时满足才剔除：① 本段首字就是片段起点；② 片段起点比期望开口早出阈值以上。命中就写进 `offset_straddle` 留痕（不静默丢弃）。改后同一份 `asr.json` 偏移告警归零，全片最大偏移 -0.31s |
+| qa 的报错指向不存在的文件 | 用 `--out out/portrait.mp4` 渲染后跑 `--stage qa`，报错只说「没有成片 out/film.mp4」。提示现在会把 `--out` 原样写出来并说明两条命令的 `--out` 必须一致 |
+
+### 回归网
+
+| 用例 | 守什么 |
+|---|---|
+| 82 竖屏纵向重排 | hero / statement / list / outro 在横屏与竖屏下的像素**必须不同**（相同 = 还是缩放）；两类画布尺寸正确、无异常 |
+| 83 ASR 跨句伪偏移 | 跨句片段（首字就是片段起点、且片段起点早出阈值）被剔除并记进 `offset_straddle`；**真实不同步仍要报**——用例里两种情形都断言了 |
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| selfcheck | **82 条全绿**（PASS 82 / FAIL 0 / SKIP 0） |
+| ci_check --strict | 13/13 PASS |
+| ruff | 0 违规 |
+| 竖屏金帧 | `golden_frames_compose_portrait.json` 重录：hero / statement / list / outro 四帧变化，stat / compare / process / quote / chapter / chart 六帧不变（说明只动了该动的）；横屏 `golden_frames.json` 三帧 sha256 仍未变 |
+| 目检 | 四类构图各渲一张 1080x1920 逐张看过：hero 标题块落到画面中段、statement / outro 居中、list 标题与条目拉开，四张均无 `_fit_px` 钳位 |
+
+### 仍未做
+
+- `PORTRAIT_PACE` 仍是首轮校准值（1.08），逐类构图的差异化停留没测；
+- 竖屏的 `chart` / `compare` / `process` 内部几何是原生，但**字号档**没有按竖屏单独标定（沿用横屏的 `_TYPE_SCALE` 折算）。
 ## 1.9.0 — 时长改成下限语义；竖屏补上原生 stat/quote/chapter 与节奏校准（2026-11-18）
 
 > 两件事都来自上一次真实出片暴露的缺口：

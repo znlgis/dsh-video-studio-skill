@@ -1932,6 +1932,9 @@ def _qa_asr_gate(lg, film, work, script, tl=None, cfg=None):
         kw["model_size"] = str(a["model"])
     print("   [asr] 回读成片音轨（模型 %s，CPU）" % (kw.get("model_size") or "small"))
     try:
+        # 偏移判据的期望开口时刻由 qaasr 从 timeline.scenes[].words_abs 直接读（那是
+        # TTS 自己报的首词绝对时刻）。这里**不**再传 work/words.json：它的 words[] 是
+        # 段内相对时间，当绝对秒用会得到荒谬结论（实测过 -202s）。
         res = qa_mod.report(film, tl, script,
                             out_json=os.path.join(str(work), "qa", "asr.json"), **kw)
     except Exception as e:                                  # noqa: BLE001
@@ -2934,7 +2937,11 @@ def main():
     if stage == "qa":
         # qa 不重渲、也不重新合成：缺成片就直接报错；缺 scenes.py 只丢参考帧、不阻断质检。
         tl = ensure_tl()
-        _need(os.path.exists(a.out), "没有成片 %s，先跑 --stage mux" % a.out)
+        # mux 的产出路径由 --out 决定，qa 读的是同一个 --out：提示必须把它写出来，
+        # 否则「out/portrait.mp4 明明在，qa 却说没有 out/film.mp4」，人只能靠猜。
+        _need(os.path.exists(a.out),
+              "没有成片 %s，先跑 --stage mux --out %s（qa 读的就是同一个 --out，两条命令的 --out 必须一致）"
+              % (a.out, a.out))
         mod = load_scenes(strict=False) if engine == "pil" else None
         _t0 = _stage_begin("qa")
         errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script, vmaf_mode=a.vmaf)

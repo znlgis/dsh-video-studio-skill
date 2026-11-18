@@ -154,7 +154,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；81 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；83 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -491,7 +491,24 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage styl
 870,912 种组合**，再乘配色这个连续量（色相 0–360° 任意取值，只是采样器会在锚点附近取）；
 **这个数是"字段能组合出多少种"，不是"推荐你从中挑一套"**——好看与否仍由对比度体检、分镜语法和你的目检决定。
 
-#### 5.5.1 字幕样式 `visual.subtitle`（可选）
+##### 5.5.0b 手改 `design.json` 之后：`--adopt`，别重跑提案
+
+`work/design.json` 的每个字段都是开放的（配色、节奏、字幕、母题都能改），但 `proposal.json`
+存的是**确认那一刻**的设计指纹。改完直接渲染，提案闸会判 `stale` 并在 QC 报告里留 WARN；
+而重跑 `propose --confirm` 会把你刚改的东西覆盖掉。正确做法是重新绑指纹：
+
+```bash
+python <SKILL_DIR>/scripts/propose.py --adopt --work work --script film.json
+#   == adopt：把 work/design.json 重新绑成 confirmed
+#      新指纹: 37f33435d890c2c3
+#      旧指纹: 92479a7fccfb917e（手改过 design.json（符合预期））
+```
+
+- 只改 `designHash`（+ 剧本指纹），**不动** candidates / chosen；
+- 设计过不了 `validate_design`（比如改出一个对比度不达标的强调色）时**拒绝**，不会把坏设计绑成已确认；
+- 旧指纹与提案里的候选指纹也对不上时，会把两种可能都说出来（手改 / 选错文件）。
+
+### 5.5.1 字幕样式 `visual.subtitle`（可选）
 
 字幕的字号 / 位置 / 背板透明度 / 圆角 / 字族 / 颜色 / 折行数都在设计 DSL 里。
 **不写 = 补齐默认值**（与最朴素的字幕带逐像素一致），所以手写的旧 `design.json` 不受影响。
@@ -766,7 +783,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（81 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（83 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1101,7 +1118,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 你要干的事 | 用哪个 |
 |---|---|
 | 出片前把 7 个问题问完 | `scripts/intake.py` |
-| 出候选 / 冻结设计 / 换方向重出 | `scripts/propose.py` |
+| 出候选 / 冻结设计 / 换方向重出 / 手改设计后 `--adopt` 重绑指纹 | `scripts/propose.py` |
 | 排轴 / 渲染 / 混音 / 质检 / 批量 / 断点续跑 | `scripts/render.py`（14 个 stage） |
 | 评候选静帧"好不好看"（离线打分 + 可选 VLM） | `scripts/critic.py` |
 | 记不住入口时 | `scripts/studio.py <子命令>`（薄门面） |
@@ -1110,7 +1127,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
 | 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
 | 浏览器逐帧渲染 | `webengine.py` |
-| 回归自检（81 条断言） | `selfcheck.py` |
+| 回归自检（83 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
@@ -1165,7 +1182,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 81 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 83 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

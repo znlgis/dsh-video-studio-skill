@@ -302,28 +302,31 @@ LAYOUT_IDS = tuple(LAYOUTS.keys())
 # （第一版就是这么写的，出图后当场看出来）。
 #
 # 数值来源：SAFE=(65,120,1015,1610)、SUB_BAND=(80,1450,1000,1616)。
+# 纵向分布：首版按横屏比例折过来，实测上半屏堆满、下半屏空 500px（1080x1920 的有效
+# 可视高度是 1490，横屏只有 916，同一套 y 坐标在竖屏必然挤在上半）。所以竖屏
+# 三套骨架的 y 一律下移并拉开：title_y 300->430 / panel_y 600->780（left-stack）等。
 # 正文底边留到 1430，给字幕带留出 20px 间隙。
 # ============================================================================
 LAYOUTS_PORTRAIT = {
     "left-stack": {
         "label": "竖屏 标题在上 / 卡片在下",
-        "title_x": 80, "title_y": 300, "title_w": 920,
-        "kicker_y": 230, "sub_y": 470, "sub_w": 920,
-        "panel_x": 80, "panel_y": 600, "panel_w": 920, "panel_h": 118, "panel_gap": 148,
+        "title_x": 80, "title_y": 430, "title_w": 920,
+        "kicker_y": 340, "sub_y": 600, "sub_w": 920,
+        "panel_x": 80, "panel_y": 780, "panel_w": 920, "panel_h": 118, "panel_gap": 148,
         "center": False,
     },
     "center-stack": {
         "label": "竖屏 居中大字",
-        "title_x": None, "title_y": 520, "title_w": 920,
-        "kicker_y": 450, "sub_y": 0, "sub_w": 920,
-        "panel_x": None, "panel_y": 900, "panel_w": 880, "panel_h": 112, "panel_gap": 140,
+        "title_x": None, "title_y": 700, "title_w": 920,
+        "kicker_y": 600, "sub_y": 0, "sub_w": 920,
+        "panel_x": None, "panel_y": 1060, "panel_w": 880, "panel_h": 112, "panel_gap": 140,
         "center": True,
     },
     "split-right": {
         "label": "竖屏 紧凑标题 / 高密度卡片",
-        "title_x": 80, "title_y": 250, "title_w": 920,
-        "kicker_y": 190, "sub_y": 420, "sub_w": 920,
-        "panel_x": 80, "panel_y": 520, "panel_w": 920, "panel_h": 104, "panel_gap": 132,
+        "title_x": 80, "title_y": 380, "title_w": 920,
+        "kicker_y": 290, "sub_y": 540, "sub_w": 920,
+        "panel_x": 80, "panel_y": 720, "panel_w": 920, "panel_h": 104, "panel_gap": 132,
         "center": False,
     },
 }

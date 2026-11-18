@@ -375,7 +375,10 @@ def _scenes_of(tl, script=None) -> list:
         if text is None:
             text = str(s.get("text") or "")
         row = {"id": sid, "start": start, "end": end, "text": text,
-               "voice_start": None, "voice_end": None}
+               "voice_start": None, "voice_end": None,
+               # 词级首词的**绝对**时刻：偏移判据的首选期望值（见 _judge 里的三级来源）。
+               # 不搬运它的话，QA 就只能拿 voice_start 当唯一真值，误报会一直存在。
+               "words_abs": s.get("words_abs")}
         # voice_start 是"旁白开口"的时刻；偏移判据以它为期望起点（见模块 docstring）
         for key in ("voice_start", "voice_end"):
             try:
@@ -745,7 +748,8 @@ def _assign_text(scenes, segments) -> list:
     anchor 记录来源片段下标（-1 = 没有重叠片段）。
     """
     n = len(scenes)
-    acc = [{"text": "", "first_t": None, "anchor": -1} for _ in range(n)]
+    acc = [{"text": "", "first_t": None, "anchor": -1, "seg_start": None}
+           for _ in range(n)]
     if not segments:
         return acc
     wins = _sentence_windows(scenes)
@@ -795,13 +799,63 @@ def _assign_text(scenes, segments) -> list:
             off = max(0.0, min(float(dur), off))
             if first_word_t is not None and c0 == 0:
                 acc[i]["first_t"] = first_word_t
+                # 片段起点就是本段首字：把片段起点一并记下来（判偏移时要区分
+                # 「whisper 把上一句尾音并进本片段」与「真的音画不同步」）。
+                acc[i]["seg_start"] = a
             else:
                 acc[i]["first_t"] = lo + off
+                acc[i]["seg_start"] = None
             acc[i]["anchor"] = si
     return acc
 
 
-def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECALL_WARN,
+
+
+def _load_words_abs(words_json=None):
+    """读词级首词绝对时刻 -> {scene_id: sec}；读不到返回空 dict。
+
+    数据来源与曾经踩的坑：
+      * `work/words.json` 里的 `words[].start` 是**段内相对**时间，直接当绝对秒用会得到
+        「偏差 -202s」这种荒谬结论（实测过）。
+      * 真正可用的是 `timeline.json` 的 `scenes[].words_abs`（含本段首词的绝对时刻），
+        它由 render 的 layout 阶段算好；`words.json` 的 `lines[].start` 是段起点，
+        两者相加也能还原，但只有前者是权威值。
+    所以这里只认 `words_json` 里**带绝对时间**的 `words_abs`（或调用方直接给的映射）；
+    都没有就返回空 dict，调用方退回 voice_start 的旧口径——绝不拿相对时间去凑。
+    """
+    if not words_json:
+        return {}
+    try:
+        if isinstance(words_json, dict):
+            data = words_json
+        else:
+            with open(str(words_json), encoding="utf-8") as fh:
+                data = json.load(fh)
+    except Exception:                                       # noqa: BLE001
+        return {}
+    lines = (data or {}).get("lines") if isinstance(data, dict) else None
+    if not isinstance(lines, dict):
+        return {}
+    out = {}
+    for lid, row in lines.items():
+        if not isinstance(row, dict):
+            continue
+        ws = row.get("words_abs")          # 只认绝对时间；没有就不猜
+        if not isinstance(ws, (list, tuple)) or not ws:
+            continue
+        first = ws[0]
+        try:
+            if isinstance(first, dict):
+                t = first.get("start")
+            else:
+                t = first
+            out[str(lid)] = float(t)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+def _judge(scenes, segments, *, words_abs=None, recall_pass=QA_RECALL_PASS,
+           recall_warn=QA_RECALL_WARN,
            offset_warn=OFFSET_WARN_S) -> dict:
     """纯函数：由段落 + ASR 片段算出召回率 / 缺句 / 偏移 / 三档结论。
 
@@ -820,6 +874,8 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
 
     assigned = _assign_text(scenes, segments)
     per_line, missing, offsets, offset_ref = [], [], {}, {}
+    offset_straddle = {}
+    offset_ref_extra = {}
     tot_ref, tot_hit = 0, 0
     lost_counter = Counter()                            # 全片"ref 有、ASR 没对上"的字符
     for sc, got in zip(scenes, assigned):
@@ -845,11 +901,53 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
         if got["first_t"] is not None and ref:
             vs = sc.get("voice_start")
             expected = float(vs if vs is not None else sc["start"])
-            offsets[sc["id"]] = round(float(got["first_t"]) - expected, 3)
+            # 期望起点优先用**词级时间戳的首词**（words.json 的 words_abs）：它是 TTS 自己
+            # 报的开口时刻，比 timeline 的 voice_start（由整句 mp3 时长反推）更接近真相。
+            # 为什么必须这么改：实测一部竖屏片 l26 报 -1.20s 偏移，但 words.json 首词
+            # 落在 voice_start 之后 0.14s、混音里能量起跳在 0.15s——真正的偏差是 whisper
+            # 把上一句尾音算进了本段首字。用 voice_start 当唯一真值只会持续误报。
+            # 期望开口时刻的三级来源（越靠前越权威）：
+            #   ① 本段词级首词的**绝对**时刻（timeline.scenes[].words_abs[0].start）——
+            #      TTS 自己报的开口时刻，不受 whisper 段起点估计误差影响；
+            #   ② 调用方显式传的映射（自测/离线回放用）；
+            #   ③ voice_start（整句 mp3 时长反推）——没有词级能力时的旧口径。
+            wa = None
+            was = sc.get("words_abs")
+            if isinstance(was, (list, tuple)) and was:
+                first_w = was[0]
+                try:
+                    wa = float(first_w.get("start") if isinstance(first_w, dict) else first_w)
+                    offset_ref_extra[sc["id"]] = "words_abs"
+                except (TypeError, ValueError):
+                    wa = None
+            if wa is None and words_abs:
+                wa = words_abs.get(sc["id"])
+                if wa is not None:
+                    offset_ref_extra[sc["id"]] = "words_abs(arg)"
+            if wa is not None:
+                expected = float(wa)
+            raw_off = round(float(got["first_t"]) - expected, 3)
+            # 跨句片段的伪偏移：whisper 的 segment 边界比句子粗，一个片段常常从上一句
+            # 尾音开始。此时「本段首字」的 first_t 就是片段起点，会系统性偏早一个
+            # 尾音长度（实测 l26 -1.20s，而该段真正开口时刻与 voice_start 只差 0.07s）。
+            # 判据要同时满足两条才降级，避免把真实的音画不同步也一起放过：
+            #   ① 本段首字**就是**片段起点（seg_start 有值）；
+            #   ② 片段起点比期望开口时刻早出阈值以上（早到不可能是同一句）。
+            seg_start = got.get("seg_start")
+            straddle = (seg_start is not None
+                        and float(seg_start) < expected - float(offset_warn) - 1e-9)
+            if straddle:
+                offset_straddle[sc["id"]] = {"first_t": round(float(got["first_t"]), 3),
+                                              "seg_start": round(float(seg_start), 3),
+                                              "expected": round(float(expected), 3)}
+                offset_ref[sc["id"]] = "跨句片段（偏移不可判）"
+            else:
+                offsets[sc["id"]] = raw_off
             # 期望起点用的是哪个字段要如实说：voice_start 缺省（或等于 start）时就是 start
-            offset_ref[sc["id"]] = ("voice_start"
-                                    if vs is not None and abs(float(vs) - float(sc["start"])) > 1e-9
-                                    else "start")
+            offset_ref[sc["id"]] = offset_ref_extra.get(
+                sc["id"],
+                "voice_start" if vs is not None and abs(float(vs) - float(sc["start"])) > 1e-9
+                else "start")
     recall = (tot_hit / float(tot_ref)) if tot_ref else 0.0
     warnings, errors = [], []
 
@@ -901,6 +999,7 @@ def _judge(scenes, segments, *, recall_pass=QA_RECALL_PASS, recall_warn=QA_RECAL
         "lost_top": [{"ch": ch, "n": n} for ch, n in lost_counter.most_common(20)],
         "per_line": per_line, "missing_lines": missing,
         "offsets": offsets, "offset_ref": offset_ref, "offset_warn_s": float(offset_warn),
+        "offset_straddle": offset_straddle,
         "gate": {"id": "asr", "title": "ASR 回读（原稿 vs 成片旁白）",
                  "status": status, "detail": detail},
         "warnings": warnings, "errors": errors,
@@ -921,7 +1020,7 @@ def _write_json(rep, out_json) -> None:
 
 def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json=None,
            recall_pass=QA_RECALL_PASS, recall_warn=QA_RECALL_WARN, log=print,
-           offset_warn=OFFSET_WARN_S,
+           offset_warn=OFFSET_WARN_S, words_json=None,
            limit_seconds=None, engine="auto", asr_json=None, whisper_model=None,
            vad=False) -> dict:
     """成片旁白的 ASR 回读校验，返回可直接进门禁的 dict。
@@ -1163,8 +1262,12 @@ def report(film_mp4, tl, script=None, *, model_size="small", lang="zh", out_json
         rep["audio_s"] = asr.get("audio_s")
     else:
         rep["audio_s"] = audio_info.get("duration")     # 前面探测过，不重复跑 ffprobe
-    judged = _judge(scenes, rep["asr_segments"], recall_pass=recall_pass,
-                    recall_warn=recall_warn, offset_warn=offset_warn)
+    # 期望开口时刻优先用词级时间戳（words.json 的 words_abs）：TTS 自己报的首词时刻
+    # 比 timeline 的 voice_start（整句 mp3 时长反推）更接近真相。没开词级能力时退回
+    # voice_start，行为与旧版完全一致。
+    judged = _judge(scenes, rep["asr_segments"], words_abs=_load_words_abs(words_json),
+                    recall_pass=recall_pass, recall_warn=recall_warn,
+                    offset_warn=offset_warn)
     for key in ("recall", "ref_chars", "hit_chars", "lost_top", "per_line", "missing_lines",
                 "offsets", "offset_ref", "gate", "warnings", "errors"):
         rep[key] = judged[key]

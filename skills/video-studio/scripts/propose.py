@@ -741,6 +741,59 @@ def _write_compare_sheet(rows, outdir):
     return out
 
 
+# ---------------------------------------------------------------- 手改后重新绑定
+def adopt(work, script=None, script_path="", by="user", note="", json_out=False):
+    """把手改过的 work/design.json 重新绑成 confirmed（不动候选、不重采样）。
+
+    为什么需要它：design.json 本来就是给人改的（配色/节奏/字幕都是开放字段），但
+    proposal.json 存的是**确认那一刻**的设计指纹。改完再跑 render，提案闸判 stale 并在
+    QC 报告里留一条 WARN——用户既没换方案也没换剧本，只是调了个颜色，却得重跑一遍
+    propose 才能消掉警告，而重跑会把他刚改的东西覆盖掉。
+
+    adopt 的语义是「现在这份 design.json 就是我要的那一版」：只重算指纹，
+    不改 candidates、不改 chosen；指纹与提案记录不一致时说清是「手改」还是「选错文件」。
+    """
+    design_path = os.path.join(str(work), "design.json")
+    if not os.path.isfile(design_path):
+        raise SystemExit("[proposal] --adopt 需要 %s（先用 --confirm 冻结一份设计）" % design_path)
+    design = _load_json(design_path)
+    if not isinstance(design, dict) or not isinstance(design.get("visual"), dict):
+        raise SystemExit("[proposal] %s 不像一份 design（缺 visual）" % design_path)
+    designkit = _designkit()
+    bad = designkit.validate_design(design)
+    if bad:
+        raise SystemExit("[proposal] %s 没过校验，不能 adopt：\n  - %s"
+                         % (design_path, "\n  - ".join(bad[:5])))
+    prev = _load_json(proposal_path(work), default=None)
+    if not prev:
+        raise SystemExit("[proposal] 没有 %s——先跑一次提案" % proposal_path(work))
+    fp_new = designkit.design_fingerprint(design)
+    fp_old = str(prev.get("designHash") or "")
+    cands = {str(c.get("id")): c for c in (prev.get("candidates") or [])}
+    row = cands.get(str(prev.get("chosen") or "")) or {}
+    prev["status"] = "confirmed"
+    prev["designHash"] = fp_new
+    prev["adoptedAt"] = _now()
+    prev["adoptedBy"] = str(by or "user")
+    prev["adoptNote"] = str(note or "")
+    if isinstance(script, dict) and script.get("lines"):
+        prev["scriptHash"] = _sha(script)
+        prev["scriptPath"] = os.path.abspath(str(script_path)) if script_path else ""
+    _atomic_write(proposal_path(work), json.dumps(prev, ensure_ascii=False, indent=1))
+    if json_out:
+        print(json.dumps({"ok": True, "designHash": fp_new,
+                          "path": proposal_path(work)}, ensure_ascii=False))
+        return prev
+    print("== adopt：把 work/design.json 重新绑成 confirmed")
+    print("   新指纹: %s" % fp_new)
+    if fp_old and fp_old != fp_new:
+        why = ("手改过 design.json（符合预期）" if row.get("design_fp") == fp_old
+               else "与提案里的候选指纹也不一致，确认一下改的是这份")
+        print("   旧指纹: %s（%s）" % (fp_old, why))
+    print("   已更新: %s" % proposal_path(work))
+    print("   现在可以: python render.py --stage frames（提案闸不会再报 stale）")
+    return prev
+
 # ---------------------------------------------------------------- 确认 / 修订
 def confirm(work, candidate, by="user", note="", json_out=False,
             script=None, script_path=""):
@@ -935,6 +988,8 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true", help="列出当前提案")
     ap.add_argument("--show", nargs="?", const="", default=None, help="看单个候选（给候选 id）")
     ap.add_argument("--confirm", action="store_true", help="确认某个候选（配 --candidate）")
+    ap.add_argument("--adopt", action="store_true",
+                    help="把手改过的 work/design.json 重新绑成 confirmed（只改指纹，不动候选）")
     ap.add_argument("--candidate", default="", help="要确认的候选 id（A/B/C…）")
     ap.add_argument("--by", default="user")
     ap.add_argument("--note", default="")
@@ -961,6 +1016,16 @@ def main(argv=None):
                 print("  %s  %-22s  %s" % (r.get("at") or "", (r.get("label") or "")[:22],
                                            r.get("fingerprint") or ""))
             print("  共 %d 条（最近 20 条）" % len(rows))
+            return 0
+        if a.adopt:
+            script = None
+            try:
+                if os.path.isfile(a.script):
+                    script = _load_script(a.script)
+            except SystemExit:
+                script = None
+            adopt(a.work, script=script, script_path=a.script, by=a.by,
+                  note=a.note, json_out=a.json)
             return 0
         if a.diff:
             diff(a.work, a.diff[0], a.diff[1], json_out=a.json)

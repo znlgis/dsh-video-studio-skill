@@ -3034,6 +3034,117 @@ def t_portrait_pacing_and_drawers():
     assert abs(float(r2.stdout.strip().splitlines()[-1]) - 1.0) < 1e-6, \
         "横屏节奏系数被改了：%r" % (r2.stdout, )
     return "竖屏 1.08 / 三类原生构图出图 1080x1920 / 横屏系数仍 1.0"
+
+def t_portrait_vertical_layout():
+    """82 竖屏构图必须是**纵向重排**，不是横屏缩小。
+
+    为什么单独守这一条：竖屏刚能出片时，hero/statement/list/outro 走的是「竖屏骨架 +
+    横屏内部」——画面能出、字不出画，但内容全挤在上三分之一、下半屏空 1000px。
+    改法是把这几类构图在竖屏下**重新纵向分布**（hero/statement/outro 按块高中线居中，
+    list 的标题与条目拉开）。这种改动没法用「有没有出画」测出来（本来就不出画），
+    只能测「同一段内容在横屏与竖屏下的像素是否仍然一致」——一致就说明还是缩放的。
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    assets = os.path.abspath(os.path.join(here, os.pardir, "assets"))
+    probe = os.path.join(tempfile.mkdtemp(prefix="vs-portrait3-"), "_probe.py")
+    body = chr(10).join([
+        "import hashlib, io, json, os, sys",
+        "sys.path.insert(0, %r)" % here,
+        "sys.path.insert(0, %r)" % assets,
+        "import designkit as DK, scenes as SC",
+        "design = json.load(io.open(os.path.join(%r, 'design_fixture.json'), encoding='utf-8'))" % assets,
+        "plan = DK.design_to_plan(design)",
+        "script = {'title': 'T', 'lines': [], '_style': plan, '_total': 60}",
+        "cases = {",
+        "  'hero': {'kind': 'hook', 'scene_type': 'hero', 'scene_layout': 'split-right',",
+        "           'chapter': '01 · 开场', 'kicker': 'K', 'text': '一句话',",
+        "           'big': '大标题', 'sub': '副标题'},",
+        "  'statement': {'kind': 'body', 'scene_type': 'statement',",
+        "                'scene_layout': 'center-stack', 'chapter': '02 · 正文',",
+        "                'text': '一句', 'big': '数字化 → 智能化', 'sub': '副标题'},",
+        "  'list': {'kind': 'body', 'scene_type': 'list', 'scene_layout': 'split-right',",
+        "           'chapter': '03 · 要点', 'kicker': 'K', 'text': '一句',",
+        "           'big': '三件事', 'sub': '副标题',",
+        "           'items': [{'text': '条目一'}, {'text': '条目二'}, {'text': '条目三'}]},",
+        "  'outro': {'kind': 'outro', 'scene_type': 'outro',",
+        "             'scene_layout': 'center-stack', 'chapter': '99 · 收尾',",
+        "             'text': '一句', 'big': '收尾大字', 'sub': '副标题'},",
+        "}",
+        "out = {'canvas': [SC.W, SC.H], 'sha': {}, 'err': {}}",
+        "for name, extra in cases.items():",
+        "    scene = {'id': 'p_' + name}",
+        "    scene.update(extra)",
+        "    try:",
+        "        img = SC.draw_frame(scene, 2.0, 7.0, 2.0, script, 60)",
+        "        out['sha'][name] = hashlib.sha256(img.tobytes()).hexdigest()[:16]",
+        "    except Exception as e:",
+        "        out['err'][name] = (type(e).__name__ + ': ' + str(e))[:120]",
+        "print(json.dumps(out, ensure_ascii=False))",
+    ])
+    io.open(probe, "w", encoding="utf-8").write(body)
+
+    def _run(env_extra):
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env.pop("VIDEO_STUDIO_LAYOUT", None)
+        env.update(env_extra or {})
+        p = subprocess.run([sys.executable, probe], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env, timeout=600)
+        assert p.returncode == 0, "构图探针失败：%s" % (p.stderr or p.stdout)[-400:]
+        return json.loads(p.stdout[p.stdout.find("{"):])
+
+    land = _run({})
+    port = _run({"VIDEO_STUDIO_LAYOUT": "portrait-9x16"})
+    assert land["canvas"] == [1920, 1080], "横屏画布不对：%r" % (land["canvas"],)
+    assert port["canvas"] == [1080, 1920], "竖屏画布不对：%r" % (port["canvas"],)
+    assert not land["err"] and not port["err"], \
+        "构图异常：横屏 %r / 竖屏 %r" % (land["err"], port["err"])
+    same = [k for k in ("hero", "statement", "list", "outro")
+            if land["sha"].get(k) == port["sha"].get(k)]
+    assert not same, ("这些构图在横屏与竖屏下像素完全相同（说明只是整体缩放，"
+                      "没有纵向重排）：%s" % same)
+    return "hero/statement/list/outro 竖屏像素与横屏不同（纵向重排生效）"
+
+def t_asr_offset_straddle():
+    """83 ASR 偏移：跨句片段的伪偏移要被识别出来，而不是报「音画不同步」。
+
+    实测事故：一部竖屏片 55 段里有 1 段（l26）报 -1.20s 偏移。查下来 whisper 的
+    segment 从上一句尾音就开始（200.82–203.52），而本段 voice_start 是 202.015——
+    「本段首字」的 first_t 被当成 200.82，凭空生出 -1.20s。真实的开口时刻与 voice_start
+    只差 0.07s。判据要能区分这两种情况，否则每部片都会随机冒出一条假告警。
+
+    判据（缺一不可）：① 本段首字**就是**片段起点；② 片段起点比期望开口早出阈值以上。
+    """
+    import qaasr
+    scenes = [
+        {"id": "a", "start": 0.0, "end": 5.0, "voice_start": 0.5, "voice_end": 4.8,
+         "text": "第一句旁白"},
+        {"id": "b", "start": 5.0, "end": 10.0, "voice_start": 5.5, "voice_end": 9.8,
+         "text": "第二句旁白"},
+    ]
+    # 跨句片段：从 a 的尾音 4.9 开始，一直说到 b 的正文之后
+    segs = [
+        {"start": 0.5, "end": 4.9, "text": "第一句旁白"},
+        {"start": 4.9, "end": 9.8, "text": "第二句旁白", "first_word_t": 4.9},
+    ]
+    j = qaasr._judge(scenes, segs)
+    assert "b" not in j["offsets"], \
+        "跨句片段的伪偏移没被剔除：b = %r" % (j["offsets"].get("b"),)
+    assert "b" in (j.get("offset_straddle") or {}), \
+        "跨句片段应该留下 offset_straddle 记录，而不是静默丢弃"
+    assert not [w for w in j["warnings"] if "偏移" in w or "偏 " in w], \
+        "仍然报了偏移 warning：%r" % (j["warnings"],)
+
+    # 真的不同步（片段起点不早于期望，但本段首字明显偏晚）仍然要报
+    segs2 = [
+        {"start": 0.5, "end": 4.9, "text": "第一句旁白"},
+        {"start": 7.2, "end": 9.8, "text": "第二句旁白", "first_word_t": 7.2},
+    ]
+    j2 = qaasr._judge(scenes, segs2)
+    assert "b" in j2["offsets"] and abs(float(j2["offsets"]["b"])) > 0.35, \
+        "真实的不同步被一起放过了：%r" % (j2["offsets"],)
+    assert [w for w in j2["warnings"] if "偏" in w], "真实不同步没报警告"
+    return "跨句伪偏移被剔除并留痕；真实不同步照旧报"
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3116,6 +3227,8 @@ CASES = [
     ("79 真峰目标可覆盖（竖屏片默认 -1.5 dBTP 会 G5 fail）", t_mux_true_peak_override),
     ("80 时长下限（不少于 N 分钟 / 自定义原话）", t_duration_floor),
     ("81 竖屏节奏与三类原生构图（stat/quote/chapter）", t_portrait_pacing_and_drawers),
+    ("82 竖屏纵向重排（hero/statement/list/outro 不是缩放）", t_portrait_vertical_layout),
+    ("83 ASR 偏移：跨句片段伪偏移被识别", t_asr_offset_straddle),
 ]
 
 

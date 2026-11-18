@@ -1438,6 +1438,15 @@ def _draw_hero(scene, t, dur, tg, script, frame, plan, th):
     # "00 · 开场"直接压在"价值与代价来自同一个选择"中间。
     # 按字号算间距后，换字体/换字号档（visual 语言包会改 ratio）都不会再压。
     _ky = min(float(lay["kicker_y"]), y - size * 1.05 - ksize * 0.35)
+    # 竖屏：标题块整体下移到正文区垂直中线附近。
+    # 横屏 hero 的 title_y=300 在 1080 高里是 28%，竖屏沿用同一数字会变成 15%（贴顶），
+    # 下面留 1200px 空白——实测出图就是这样。这里按块高（kicker + 标题行 + 副标题）重算。
+    if H > W:
+        block_h = size * 1.05 + ksize * 0.35 + len(lines) * lh + (len(lines) - 1) * 0
+        body_top, body_bot = float(SAFE[1]) + 260.0, float(SUB_BAND[1]) - 220.0
+        y = (body_top + body_bot - block_h) * 0.5 + block_h - len(lines) * lh
+        y = max(y, float(SAFE[1]) + 200.0)
+        _ky = y - size * 1.05 - ksize * 0.35
     p0 = ease(rng(t, 0.05, 0.85))
     _draw_text(img, th, v, kicker, ax + _entrance_x(th, p0, align),
                _ky + _entrance_y(th, p0), ksize, "bold",
@@ -1502,7 +1511,14 @@ def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
         size = int(size * 0.90)
         lines = _wrap(big, size, max_w, "bold", th)
     lh = int(size * gap)
-    top = 470.0 - (len(lines) - 1) * lh * 0.5
+    if H > W:
+        # 竖屏：正文可视区是 SAFE[1]..SUB_BAND[1]（120..1450），把大字块放到它的垂直中线。
+        # 横屏的 470 在 1080 高里是 43%，同一比例在 1920 高里也是 43% —— 但竖屏下方还要
+        # 落副标题与下划线，固定 470 会让整块悬在画面上三分之一（实测出图就是这样）。
+        body_top, body_bot = float(SAFE[1]) + 120.0, float(SUB_BAND[1]) - 60.0
+        top = (body_top + body_bot - len(lines) * lh) * 0.5
+    else:
+        top = 470.0 - (len(lines) - 1) * lh * 0.5
     if var == 1:                                  # variant 1：整体上移，留出落款区
         top -= 40.0
 
@@ -2690,7 +2706,12 @@ def _draw_outro(scene, t, dur, tg, script, frame, plan, th):
         lines = _wrap(big, size, min(float(lay["title_w"]), 1520.0), "bold", th)
     lh = int(size * gap)
     pa = ease(rng(t, 0.30, 1.30))
-    top = 380.0 - (len(lines) - 1) * lh * 0.5
+    if H > W:
+        # 竖屏：收尾块（大字 + 副标题 + 下划线）整体居中；横屏的 380 在竖屏里会贴到上方 1/5。
+        body_top, body_bot = float(SAFE[1]) + 160.0, float(SUB_BAND[1]) - 80.0
+        top = (body_top + body_bot - len(lines) * lh) * 0.5
+    else:
+        top = 380.0 - (len(lines) - 1) * lh * 0.5
     for i, ln in enumerate(lines):
         _draw_text(img, th, v, ln, W * 0.5, top + i * lh + _entrance_y(th, pa),
                    size, "bold", th["ink"], "center", 0.02 + 0.98 * pa, trk)
