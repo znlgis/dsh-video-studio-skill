@@ -6,6 +6,69 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.1.0 — 素材剪辑线（footage 模式）：有素材就剪，没素材才画（2026-11-18）
+
+> 起因是一次真实需求：用户要"介绍四渡赤水的视频"，先按零素材线出（代码逐帧画图文），
+> 被一句"不是这种视频，而是直接在网上找相关视频资源按照文案拼接起来，而不是做成这种
+> ppt 的效果"否掉。整片返工：**画面来自 1983 年八一厂《四渡赤水》4K 修复版**，
+> 旁白/时间轴/混音/字幕仍由代码保证，最终 3 分 11 秒 / 1080p / -16.5 LUFS 交付。
+> 这次返工的每一步都固化成了可复用的脚本与门禁。
+
+### P0：新增第二条生产线
+
+| 新增 | 作用 |
+|---|---|
+| `scripts/footagekit.py` | 取材层：契约读取与硬校验、素材体检（含"分段下载没有音轨"）、画面治理建议（含**要粘进契约的字幕带/水印框声明值**）、下载（直链 urllib / 页面 yt-dlp / sections 只下时间窗）、转写（喂 float32 PCM 绕开 PyAV 版本坑，内容指纹缓存）、关键词定位（含"中文关键词不要走 shell"的说明） |
+| `scripts/footageedit.py` | 剪辑层：由实测旁白反推镜头时间轴、EDL 与越界检查、逐镜切镜（统一画幅 + 抽原声当环境层）、三总线采样级混音、ASS 字幕（PlayRes=输出分辨率）、concat + 字幕 + loudnorm 成片 |
+| `scripts/footageqa.py` | 专属门禁 F1–F7 + 联系表 + `out/QC-REPORT-footage.md` + 内容指纹签核 |
+| `scripts/footage.py` | 一条龙入口：10 个 stage（probe/fetch/transcribe/locate/tts/edl/cut/mix/assemble/qa），阶段间硬依赖并给出"先跑哪个" |
+| `schemas/footage.schema.json` | `footage.json` 契约（与 `film.json` 并列、不通用） |
+| `references/footage.md` | 分诊规则、契约、八阶段、素材定位三条经验、治理配方、F1–F7 判据来源、10 条故障速查、交付清单 |
+| `assets/footage/` | `footage.template.json` 模板 + `regression/`（**只放配置与联系表，不含影视素材本体**） |
+| `tools/footage_selftest.py` | 离线自检：自己造带"烧录字幕 + 水印"的素材，跑完整链路并断言 F1–F7（7 项，约 30 秒） |
+
+### P1：分诊与文档
+
+- SKILL.md 新增 **§0.1 先分诊**：给了素材 -> footage；没给但网上能找 -> 先 fetch 再 footage；
+  都没有 -> 零素材线。并写明素材线的**提案层不适用**（外观由素材调色与遮幅决定）。
+- frontmatter 描述改成两条生产线的口径；§9 加 `references/footage.md`；
+  §10 脚本资产加 4 个 footage 脚本与 `footage_selftest.py`；§13 自检清单同步。
+- `ci_check` 的依赖白名单加 footage 四件套；第 12 项「film.json 契约」扩成"两种契约都只留一份真源"：
+  额外校验 `schemas/footage.schema.json` 可解析、`assets/footage/footage.template.json`
+  能被 `footagekit.load_footage` 载入。
+
+### P2：这次返工踩到、并已经在代码里修掉的坑
+
+1. **尾留白会截片**：`outro` 单独留空档 -> 视频比音频短 1.55s，`assemble` 等长校验直接拒片。
+   修法：把 `outro` 并进**最后一镜**。
+2. **越界镜头静默通过**：`make_edl` 调 `check_edl` 时没传 `sources_info`，源时长未知 ->
+   `at+len` 越界一条都不报（自检里 `at=22 + len=4.4 > 24s` 就是这么漏的）。修法：显式传，
+   并在 `--stage edl` 里先读 `work/sources.json`。
+3. **`-shortest` 吃掉片尾**：改成显式 `-t` + 先校验音视频等长（16 秒就是这么没的）。
+4. **`ass=filename='D:/a/b.ass'` 在 Windows 炸**：盘符冒号被滤镜参数解析器当分隔符。
+   修法：`cwd` 到 ass 所在目录 + 相对文件名。
+5. **`assemble` 把失败当成功**：`filmkit._run` 只调 subprocess 不查 returncode，
+   ffmpeg 失败时日志仍打 `[assemble] ->`、`out/` 却是空的。修法：判退出码 + 判产物存在与大小。
+6. **分段下载没有音轨**：`--download-sections` 只给视频流，混音阶段才发现原声是空的。
+   修法：`probe` 明报 `audio=NO`，原声改从整片音轨按绝对时间取。
+7. **转写崩溃在 `av.open(metadata_errors=...)`**：PyAV 与 faster-whisper 版本组合对不上。
+   修法：自己用 ffmpeg 解 float32 PCM 喂模型。
+8. **中文关键词走 shell 永远 0 命中**：Windows 控制台 GBK，参数进来已乱码。
+   修法：定位只走 Python 内部字符串 / JSON，写进文档与 `--keywords` 帮助。
+9. **F2/F3 第一版是错的**（重要）：先用"画面底部/中部能量比""亮像素占比""跨帧静止度"判字幕与水印，
+   实测在真实素材上**正反例区间重叠**（已治理成片 1.41、未治理原片 1.81；静止度 0.47 vs 1.07），
+   任何阈值都会误杀一类。改成**几何判定**：源声明 `burned_subs` / `watermark`，
+   算 `crop` 后的可见区，相交即 fail——"该裁的地方裁了没有"只有几何知道答案。
+   同时修掉"采样区按成片画布比例取，结果落在遮幅黑边上"的错（水印明明在画面里却报 energy=0.000）。
+
+### P3：验收
+
+- `python tools/footage_selftest.py` -> PASS 7 / FAIL 0（离线，含"未治理必 fail / 已治理必 pass /
+  只去水印时两条判据互不干扰 / 缺出处被抓 / 越界被拦 / 指纹随内容失效"）
+- `python tools/ci_check.py` -> PASS 13 / FAIL 0
+- 真实素材一次回放：`crop=1576:660:172:80` 对 `burned_subs y=750..824`、
+  `watermark x=1580..1896 y=16..60` -> F2/F3 pass；换成 `crop=1920:824:0:0` -> 双 fail。
+
 ## 2.0.0 — CI 双红修复：竖屏画布契约打通 + ASR 偏移判分不再崩（2026-11-18）
 
 > 起因是 CI run `44236586147` 两条红：`webengine selftest` 的「画布只收 16:9 横屏偶数尺寸」

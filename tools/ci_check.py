@@ -68,7 +68,9 @@ LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "ren
                  # 没有 presetkit（随预设目录一起移除）；这里不能再列它，
                  # 否则 ci_check 会去 import 一个不存在的模块
                  # 参数化配乐编排器（不提供曲风表，按参数现场编排）
-                 "musicgen"}
+                 "musicgen",
+                 # 素材剪辑生产线（footage 模式）：取材层 / 剪辑层 / 专属门禁 / 入口
+                 "footagekit", "footageedit", "footageqa", "footage"}
 MAX_FILE_BYTES = 400 * 1024
 # frontmatter description 的硬上限（理由见 t_manifest）：这行文字**每一轮**都进上下文，
 # 而它的读者只有“要不要触发技能”这一个判断。能力细节属于正文，不属于这一行。
@@ -733,7 +735,25 @@ def t_film_contract():
     out = (p.stdout or "") + (p.stderr or "")
     assert p.returncode == 0, ("夹具 film.json 没过契约校验（exit=%d）：\n%s"
                                % (p.returncode, out.strip()[-600:]))
-    return "夹具 film.json 通过契约校验；schema %d 字节" % len(schema.read_text(encoding="utf-8"))
+    # 素材剪辑线（footage.json）的契约同样只留一份真源：
+    # schema 能被解析 + 模板能被 footagekit.load_footage 载入（结构硬错误在这里暴露）。
+    footage_schema = ROOT / "schemas" / "footage.schema.json"
+    footage_tpl = ROOT / "skills" / "video-studio" / "assets" / "footage" / "footage.template.json"
+    assert footage_schema.exists(), "缺 schemas/footage.schema.json（footage.json 的契约）"
+    try:
+        json.loads(footage_schema.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise AssertionError("schemas/footage.schema.json 不是合法 JSON：%s" % e) from e
+    assert footage_tpl.exists(), "缺 footage 模板：assets/footage/footage.template.json"
+    kit = scripts / "footagekit.py"
+    assert kit.exists(), "缺 scripts/footagekit.py（素材剪辑线核心库）"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_ci_footagekit", str(kit))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.load_footage(str(footage_tpl))       # 有硬错误会直接 SystemExit
+    return ("夹具 film.json 通过契约校验（schema %d 字节）；footage 模板通过 load_footage"
+            % len(schema.read_text(encoding="utf-8")))
 
 # ---------------------------------------------------------------- 13 断言条数一致
 def t_case_count():

@@ -1,12 +1,31 @@
 ---
 name: video-studio
-description: 用代码从零生成中文视频（科普片/纪录片/宣传片/动画短片）：剧本→edge-tts 旁白→实测时长时间轴→逐帧渲染→ffmpeg 编码→采样级混音→自动质检。做视频/宣传片/动画/配音配字幕/把报告变成视频/修音画不同步/修视频画质糊，或提到 ffmpeg、字幕、分镜、配乐、混音时使用；开工前先跑 intake.py 把 7 个问题一次问完。 | Code-generated video from scratch (PIL/Canvas frames, ffmpeg, edge-tts, QA gates). Use when asked to make a video, turn a report into one, add narration or subtitles, or fix A/V sync or blurry text.
+description: 做中文视频的两条生产线：(A) 素材剪辑 footage——有素材（本地文件/链接/网上下载）就按文案剪成片，自带素材检索、转写定位镜头、字幕水印治理；(B) 零素材——没有素材且找不到时用代码逐帧画。两条都走 edge-tts 实测时长排轴 + 采样级混音 + 自动质检。做视频/宣传片/纪录片/配音配字幕/把报告变成视频/修音画不同步/修画面糊，或提到 ffmpeg、字幕、分镜、混音时使用；开工先跑 intake.py 问完 7 个问题。 | Two pipelines for Chinese videos: footage-cut (source clips -> narration -> timeline) or code-generated frames; ffmpeg, edge-tts, subtitles, QA gates.
 ---
 
 # 视频工作室（video-studio）
 
-**一句话：视频 = 剧本 + 音频实测时长 + 确定性逐帧函数 + ffmpeg 编码 + 自动质检。**
-画面与声音全部由代码生成，零素材、可复现、可断点续跑、可脚本化验收。
+**一句话：视频 = 剧本 + 音频实测时长 + 画面（素材或代码生成）+ ffmpeg 编码 + 自动质检。**
+两条生产线共用同一套底盘（TTS 实测时长、时间轴、采样级混音、loudnorm、门禁），
+区别只在"画面从哪来"。
+
+## 0.1 【铁律】先分诊：有素材走 footage，没素材才自己画
+
+> 用户说"做个视频"时，**先问自己手里有没有画面素材**，再决定走哪条线。
+> 走错线的代价是整片返工（拿代码画的图文去顶"有真实影像"的需求，用户一眼就否）。
+
+| 顺序 | 情形 | 走哪条 |
+|---|---|---|
+| 1 | 用户给了素材（视频 / 图片 / 链接 / 一个片子文件） | **footage 线**：`scripts/footage.py` |
+| 2 | 没给素材，但**网上能找到**可用画面（纪录片、新闻片、公有领域影像） | **先 `--stage fetch` 下载，再走 footage 线** |
+| 3 | 找不到，或题材不该用现成画面（数据、抽象、品牌、动画） | **零素材线**：`scripts/render.py` + `design.json` |
+
+- **footage 线的契约是 `footage.json`**（不是 `film.json`）：见 [references/footage.md](references/footage.md)。
+- **素材不必提前准备好**：`sources[]` 可以写 `url`，`--stage fetch` 负责下载；
+  本地 `path` 更可复现。
+- 两条线都遵守 §0 的其它铁律（音频先做、时间轴由实测驱动、采样级混音、交付前跑门禁）。
+- 走了素材线，**提案层（`propose.py` / 设计 DSL）不适用**——外观由素材本身的调色与遮幅决定，
+  不是"采样几个设计选一个"。
 
 ## 0. 铁律（违反任意一条，成片一定会出问题）
 
@@ -1093,6 +1112,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ## 9. 参考资料（按需加载）
 
+- `references/footage.md` — **素材剪辑线（footage 模式）**：分诊规则、`footage.json` 契约、八个 stage、素材定位（转写/关键词/中文关键词的 GBK 坑）、画面治理四类配方（烧录字幕/水印/画幅/调色）、F1–F7 门禁与签核、常见故障、交付清单
 - `references/proposal.md` — **提案优先**：为什么先出方案、`design.json` 契约、候选采样与设计距离、`visual.subtitle` / `layout_cycle` 字段、片间去重台账、提案闸五档、常见误用
 - `references/scene-grammar.md` — **场景语法**：10 类构图怎么选、`storyboard.json` 字段、设计五组视觉签名、加第 11 类构图的步骤、常见误用
 - `references/pipeline.md` — 八阶段详细规格、契约 JSON 格式、目录约定、并行分工
@@ -1129,6 +1149,8 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
 | 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
 | 浏览器逐帧渲染 | `webengine.py` |
+| **素材剪辑一条龙**（下载/转写定位/切镜/混音/字幕/门禁） | `scripts/footage.py`（10 个 stage） |
+| 素材线核心：取材 / 剪辑 / 专属门禁 | `footagekit.py` `footageedit.py` `footageqa.py` |
 | 回归自检（85 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
@@ -1190,6 +1212,7 @@ python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）
 python webengine.py --selftest       # 浏览器引擎（36 项，会真起无头浏览器，约 60 秒）
 python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
+python <REPO>/tools/footage_selftest.py   # 素材剪辑线（离线造素材跑全链 + F1–F7 断言）
 ```
 
 selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依赖任何成片**。
@@ -1204,5 +1227,7 @@ selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依
 >
 > ci_check 的第 12 项是「film.json 契约」：直接调 `scripts/filmcheck.py` 校验模板，
 >并把 `schemas/film.schema.json` 的存在与合法性一起断言——**校验规则只允许有一份**，
->不在这里重写一遍。
+>不在这里重写一遍。同一项里还会用 `footagekit.load_footage` 载入
+>`assets/footage/footage.template.json`，并校验 `schemas/footage.schema.json` 可解析
+>——素材剪辑线的契约同样只有一份真源（见 [references/footage.md](references/footage.md)）。
 
