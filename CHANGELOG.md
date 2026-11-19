@@ -6,6 +6,68 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.6.0 — hybrid 第三种形态「素材打底 + 小面积叠加」，并修 4 个实测真 bug（2026-11-19）
+
+> 起因是「自己画和素材结合」连做两版都被判定不好看：第一版图文段占 88% 时长是整屏卡片，
+> 被指"割裂"；第二版按 matchstyle 把图文段锚成素材的暗调，仍被指"还是不太行"。
+> 第三版换思路——**素材就是画面，自绘只做必要的那一点**——一次过。
+> 顺带查出 4 个会让画面悄悄变坏、且不报错的 bug。
+
+### 新增：`scripts/compose.py`（hybrid 形态 3 的合成入口）
+
+把「素材打底 -> 按时间窗叠 overlay -> 烧字幕 -> 两遍 loudnorm」做成受支持的一等入口，
+取代手写 ffmpeg 拼接（手写会漏 loudnorm，实测出过 -25.6 LUFS 的成片，容器/帧级门禁都查不出来）。
+
+| 项 | 行为 |
+|---|---|
+| 契约 | `overlay.json`：`layers[]` 各带 `png` + `bind: "line:<id>"` / `at` + `x`/`y` + `fade` |
+| 时间窗 | 优先 `bind`（绑该句旁白起止，改台词自动跟随）；`at` 无 `dur` 时挂到下一句起点 |
+| 帧对齐 | 出片前核对 `Σ镜头帧数 == round(total*fps)`，不等直接报错（不允许"差半秒也能出片"） |
+| 响度 | **强制**两遍 loudnorm，目标 TP 默认 -2.2（AAC 会抬高真峰 0.5~1.1 dB） |
+| 质检 | `--stage qa` 自动把镜头切点传给 `qa_frames --shots`，硬切不再误报闪烁 |
+| 分阶段 | `overlay / silent / audio / compose / qa`，可断点重跑 |
+
+### 新增：`assets/scenes_hybrid_template.py` + `tools/scenes_hybrid_selftest.py`
+
+「包装内置渲染器」的正确写法模板（只 patch `_plate` 垫素材纹理），把三个坑固化成断言：
+**先留原件**（`_ORIG_PLATE`）→ 否则递归爆栈；**返回副本**（`.copy()`）→ 否则缓存被就地绘制、
+帧依赖渲染历史；**缓存键与选素材用同一索引** → 否则不同进程命中不同素材。
+
+### 新增：`references/hybrid-overlay.md`
+
+hybrid 三形态对照表（按段拼接 / 整屏覆盖 / 小面积叠加）、**自绘占比预算**（面积 ≤15%、
+每句 ≤1 元素、覆盖 ≤80% 句数）、素材治理四配方、素材时长预算、matchstyle 适用边界、实测坑位表。
+
+### 修复
+
+| # | bug | 表现 | 修法 |
+|---|---|---|---|
+| 1 | **切镜按秒切，逐镜帧取整累积** | 24 镜累积 **0.469s**，越到后段字幕/叠加层越落后画面；还被帧级质检误报成"单帧闪烁" | `cut_shots` 改为按**累计帧**切；`check_edl` 增加帧数合计校验 |
+| 2 | **`loudnorm_two_pass` 默认 TP 留不够余量** | 目标 -1.5 -> AAC 后实测 **-1.0 dBTP**，正好压在门禁线上 | 默认改 **-2.2**，`assemble` 同步；docstring 写明 AAC 抬升幅度 |
+| 3 | **`qa_frames` 把硬切误报成单帧闪烁** | 素材线切点前后两帧结构不同，二阶差分必然尖峰 | 新增 `--shots` 切点白名单：切点 ±0.12s 内降级为 warning 并**留痕**（`flicker_shot_cut`） |
+| 4 | **`matchstyle` 会悄悄改掉设计意图** | 素材 luma=0.12（暗）+ 用户选的"明色"设计 -> 锚成近黑底，等于改需求 | 新增 `_day_night_conflict`：明暗族相反时**警告 + 三条出路**（不阻止），`day_night_conflict` 字段可机读 |
+
+### 文档与流程
+
+- `SKILL.md`：§0.1 hybrid 条目改为**三形态 + 判断法**（去掉"没有一键命令/只能按段拼接"的旧说法）；
+  §0.1.1 补"形态 3 下基本不需要 matchstyle"与警告处理顺序；§10 脚本表加 `compose.py`。
+- `intake.py`：hybrid 选项文案与 hint 改为"素材打底 + 只叠必要信息（默认推荐，自绘 ≤15%）"。
+- `README.md` / `SKILL.md` / `marketplace-entry.json` / `.github/workflows/ci.yml`：自检条数 85 -> **90**。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `python tools/ci_check.py` | **14/14 PASS** |
+| `python skills/video-studio/scripts/selfcheck.py` | **90/90 PASS**（新增 86–90 五条） |
+| `python tools/footage_selftest.py` | 7/7 PASS |
+| `python tools/matchstyle_selftest.py` | 5/5 PASS |
+| `python tools/scenes_hybrid_selftest.py` | 6/6 PASS（新增） |
+| `python qa_frames.py --selftest` | 22/22 PASS |
+| `compose.py` 端到端（真实工程 186s 片） | 出片 186.133s / 102.1 MB，**闪烁 0 / 空窗 0 / PASS** |
+
+---
+
 ## 2.5.0 — hybrid 不再给素材叠色：新增 `matchstyle.py`，让图文段向素材看齐（2026-11-19）
 
 > 起因是「选了自己画 + 素材剪辑结合时，不需要再加颜色主题，会在素材上叠一层颜色，

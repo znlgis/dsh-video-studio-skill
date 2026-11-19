@@ -92,6 +92,7 @@
 """
 import argparse
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -3406,6 +3407,141 @@ def t_asr_offset_uncertain():
         "真错位被当成不可判放过了：%r" % (j2["offsets"],)
     assert any("偏" in w for w in j2["warnings"]), "真错位必须报警告"
     return "弱起判不可判并聚合点名；1.7s 真错位仍报"
+def t_cut_frame_alignment():
+    """帧对齐切镜：Σround(len*fps) 必须等于 round(total*fps)。
+
+    背景（实测）：旧实现逐镜 -ss/-t 按秒切，每段各自取整到帧；24 镜累积 0.469s，
+    视频比时间轴长，越到后段字幕/叠加层越落后画面——还被帧级质检误报成"单帧闪烁"。
+    """
+    import footageedit as FE
+    fps = 30.0
+    # 造一个"每段都带 .4 帧尾巴"的 EDL：逐段四舍五入会累积，累计帧不会
+    shots = []
+    cum = 0.0
+    for i in range(24):
+        length = 7.41          # 7.41*30 = 222.3 帧，逐段 round 会各吞 0.3 帧
+        shots.append({"id": "s%02d" % (i + 1), "source": "x", "at": 0.0,
+                      "len": length, "why": "", "text": "t"})
+        cum += length
+    total = round(cum, 3)
+    # 复刻 cut_shots 的帧分配逻辑做断言（不真跑 ffmpeg，只验算法）
+    frames, acc = 0, 0.0
+    for s in shots:
+        f0 = int(round(acc * fps))
+        acc += float(s["len"])
+        frames += max(1, int(round(acc * fps)) - f0)
+    want = int(round(total * fps))
+    assert frames == want, "累计帧 %d != 时间轴 %d 帧（差 %d 帧）" % (frames, want, frames - want)
+    # 反证：逐段各自四舍五入会偏
+    naive = sum(int(round(s["len"] * fps)) for s in shots)
+    assert naive != want, "造的数据没能暴露逐段取整偏差（naive=%d want=%d）" % (naive, want)
+    return "24 镜累计帧精确；逐段取整会偏 %d 帧" % (naive - want)
+
+
+def t_loudnorm_tp_headroom():
+    """真峰默认留 AAC 余量：target_tp 默认必须是 -2.2 或更低。
+
+    背景（实测）：目标 -1.5 -> AAC 编码后实测 -1.0 dBTP，正好压在 -1.0 门禁线上；
+    另一片目标 -1.5 实测 -1.4。AAC 会抬高真峰 0.5~1.1 dB。
+    """
+    import inspect
+    import filmkit as K
+    sig = inspect.signature(K.loudnorm_two_pass)
+    tp = sig.parameters["target_tp"].default
+    assert tp <= -2.0, "loudnorm 默认 target_tp=%r 留的余量不够（AAC 会抬高 0.5~1.1 dB）" % tp
+    assert tp >= -3.0, "target_tp=%r 压得太狠，成片会明显偏轻" % tp
+    return "默认 TP %.1f dBTP" % tp
+
+
+def t_qa_frames_shots_whitelist():
+    """qa_frames 支持 --shots：硬切点附近的孤立尖峰降级为 warning（不误报闪烁）。
+
+    背景（实测）：素材线是硬切剪辑，切点前后两帧结构完全不同，二阶差分必然尖峰，
+    被当成"单帧闪烁"报 error。这类切点是作者声明的剪辑结构。
+    """
+    import inspect
+    import qa_frames as Q
+    assert hasattr(Q, "SHOT_WIN"), "qa_frames 没有 SHOT_WIN 常量"
+    assert Q.SHOT_WIN > 0, "SHOT_WIN 必须为正（窗口秒数）"
+    sig = inspect.signature(Q.report)
+    assert "shots_json" in sig.parameters, "report() 没有 shots_json 参数"
+    # 白名单加载器：秒数列表能读回
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        import json as _json
+        p = os.path.join(d, "shots.json")
+        _json.dump([1.5, 12.25], open(p, "w", encoding="utf-8"))
+        got = Q._load_shots(p)
+        assert got == [1.5, 12.25], "切点加载器读回 %r" % (got,)
+        assert Q._load_shots(os.path.join(d, "missing.json")) == [], "缺文件应返回空表不报错"
+    return "窗口 %.2fs，加载器可用" % Q.SHOT_WIN
+
+
+def t_compose_contract():
+    """compose.py 的 overlay 契约校验与时间窗解析（形态 3 的合成入口）。"""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "compose.py")
+    spec = importlib.util.spec_from_file_location("_compose_test", path)
+    C = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(C)
+    # 1) 窗口解析：bind=line:<id> 用时间轴的 start/end
+    tl = {"total": 30.0, "lines": [
+        {"id": "s01", "start": 0.5, "end": 5.0},
+        {"id": "s02", "start": 5.5, "end": 11.0},
+    ]}
+    wins = C.resolve_windows({"layers": [{"png": "a.png", "bind": "line:s02"}]}, tl)
+    assert len(wins) == 1 and abs(wins[0]["start"] - 5.5) < 1e-6, "bind 解析错：%r" % (wins,)
+    assert abs(wins[0]["end"] - 11.0) < 1e-6, "bind 结束时间错"
+    # 2) at 没给 dur 时挂到下一句起点
+    wins2 = C.resolve_windows({"layers": [{"png": "a.png", "at": 1.0}]}, tl)
+    assert abs(wins2[0]["end"] - 5.5) < 1e-6, "at 没挂到下一句：%r" % (wins2,)
+    # 3) 契约校验：缺 png / 缺时间窗都要挡
+    import tempfile
+    import json as _json
+    with tempfile.TemporaryDirectory() as d:
+        bad = os.path.join(d, "bad.json")
+        _json.dump({"layers": [{"id": "x"}]}, open(bad, "w", encoding="utf-8"))
+        try:
+            C.load_overlay(bad)
+            raise AssertionError("缺 png 的层没被挡下")
+        except SystemExit:
+            pass
+    return "bind/at 解析正确；坏契约被挡"
+
+
+def t_scenes_hybrid_template_purity():
+    """包装内置渲染器的模板：留原件 + 返回副本（帧纯度）。
+
+    背景（实测，最贵的坑）：patch 内置 _plate 时若返回**缓存对象本身**，内置绘制器会
+    在它上面画字，于是同场景每帧把文字叠到上一帧结果上——帧依赖渲染历史，
+    --jobs 4 各分块状态不同，VMAF 从 97 掉到 62.9，单帧完全看不出来。
+    """
+    import importlib.util
+    import json as _json
+    here = os.path.dirname(os.path.abspath(__file__))
+    tpl = os.path.join(os.path.dirname(here), "assets", "scenes_hybrid_template.py")
+    assert os.path.exists(tpl), "模板不存在：%s" % tpl
+    spec = importlib.util.spec_from_file_location("_hybrid_tpl_test", tpl)
+    M = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(M)
+    assert hasattr(M, "_ORIG_PLATE"), "模板没留 _ORIG_PLATE（会递归爆栈）"
+    assert M._ORIG_PLATE is not M._S._plate, "_ORIG_PLATE 与打补丁后的 _plate 相同"
+    # 真画两帧比对字节（需要合法 style plan）
+    import designkit as D
+    fx = os.path.join(os.path.dirname(here), "assets", "design_fixture.json")
+    design = _json.load(open(fx, encoding="utf-8"))
+    plan = D.design_to_plan(design)
+    script = {"title": "t", "_style": plan, "_total": 12.0,
+              "_design": design, "lines": [{"id": "s01", "text": "x"}]}
+    scene = {"id": "s01", "kind": "body", "text": "x", "sub": "x", "big": "x",
+             "scene_type": "statement", "dur": 3.0, "chapter": "c"}
+    a = hashlib.sha256(M.draw_frame(scene, 1.0, 3.0, 1.0, script, 30).tobytes()).hexdigest()
+    b = hashlib.sha256(M.draw_frame(scene, 1.0, 3.0, 1.0, script, 30).tobytes()).hexdigest()
+    assert a == b, "同帧重画不一致（缓存被就地绘制污染）：%s vs %s" % (a[:12], b[:12])
+    return "同帧重画逐字节一致"
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3492,6 +3628,11 @@ CASES = [
     ("83 ASR 偏移：跨句片段伪偏移被识别", t_asr_offset_straddle),
     ("84 竖屏字号档与逐类停留（横屏零变化）", t_portrait_type_scale_and_hold),
     ("85 ASR 偏移不可判（弱起被切 vs 真错位）", t_asr_offset_uncertain),
+    ("86 切镜帧对齐（Σ累计帧 == round(total*fps)）", t_cut_frame_alignment),
+    ("87 真峰留 AAC 余量（默认 TP <= -2.0）", t_loudnorm_tp_headroom),
+    ("88 qa_frames 切点白名单（硬切不误报闪烁）", t_qa_frames_shots_whitelist),
+    ("89 compose.py overlay 契约（bind/at/坏契约）", t_compose_contract),
+    ("90 包装模板帧纯度（留原件 + 返回副本）", t_scenes_hybrid_template_purity),
 ]
 
 

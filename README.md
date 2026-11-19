@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.5.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -102,7 +102,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，85 条断言，不联网）
+# 2) 环境自检（可选，90 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -193,7 +193,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（85 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（90 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/matchstyle.py      hybrid 风格对齐（素材画像 -> 图文段配色/画幅；--apply 前过 theme_lint，失败零写入）
   scripts/layoutkit.py       画布/安全区单一真源（横竖屏 profile；scenes/filmkit/designkit 共用）
@@ -287,7 +287,7 @@ python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**85 条**断言）。
+查的是"技能本身还能不能出片"（**90 条**断言）。
 
 三条产线级自检（都要 ffmpeg，在 `ci.yml` 的 skill job 里跑）：
 

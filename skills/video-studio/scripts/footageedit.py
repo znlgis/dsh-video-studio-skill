@@ -143,6 +143,21 @@ def check_edl(edl, footage, sources_info=None):
     if want and abs(got - want) > 0.6:
         problems.append("镜头总长 %.2fs 与时间轴 %.2fs 差 %.2fs（>0.6s：画面会被截断或留黑）"
                         % (got, want, abs(got - want)))
+    # 帧对齐核对：cut 现在是按累计帧切的，Σround(len*fps) 必须等于 round(total*fps)。
+    # 不等就说明 EDL 的 len 与时间轴对不上，音画会随片长累积错位（实测 24 镜差 0.469s）。
+    if want:
+        fps = float((footage.get("video") or {}).get("fps") or 30)
+        cum, frames = 0.0, 0
+        for s in edl["shots"]:
+            f0 = int(round(cum * fps))
+            cum += float(s["len"])
+            frames += int(round(cum * fps)) - f0
+        want_frames = int(round(want * fps))
+        if frames != want_frames:
+            problems.append("帧数合计 %d 与时间轴 %d 帧不符（差 %d 帧 / %.3fs）："
+                            "音画会随片长累积错位，检查 EDL 的 len 与 timeline.total"
+                            % (frames, want_frames, frames - want_frames,
+                               (frames - want_frames) / fps))
     return problems
 
 
@@ -163,22 +178,33 @@ def cut_shots(footage, edl, work, *, crf=16, preset="veryfast"):
     srcs = footagekit.source_map(footage)
     vf = footagekit.build_treatment_filter(footage.get("treatment") or {},
                                           footage.get("video") or {})
+    # 帧对齐切镜：逐镜 -t 取整会在 20+ 镜时累积到半秒级的音画错位
+    # （实测 24 镜差 0.469s，表现为后段字幕/叠加层落后画面，还可能被帧级质检误报成闪烁）。
+    # 这里按**累计帧**分配每镜帧数，Σframes == round(total*fps)，与时间轴严格一一对应。
+    fps = float((footage.get("video") or {}).get("fps") or 30)
     out = []
+    cum = 0.0
     for i, s in enumerate(edl["shots"]):
         src = footagekit.source_path(footage, srcs[s["source"]])
         dst = segs / ("%02d_%s.mp4" % (i, s["id"]))
         wav = segs / ("%02d_%s.wav" % (i, s["id"]))
-        log("  [cut] %02d %-8s %-24s at=%7.2f len=%.2f" %
-            (i, s["id"], src.name, s["at"], s["len"]))
+        f0 = int(round(cum * fps))
+        cum += float(s["len"])
+        f1 = int(round(cum * fps))
+        n = max(1, f1 - f0)                      # 本镜帧数（累计差，不是单段四舍五入）
+        span = n / fps                           # 与画面严格等长的秒数
+        log("  [cut] %02d %-8s %-24s at=%7.2f len=%.2f (%d 帧)" %
+            (i, s["id"], src.name, s["at"], span, n))
         _run([filmkit.FFMPEG, "-v", "error", "-y", "-ss", "%.3f" % s["at"],
-              "-t", "%.3f" % s["len"], "-i", str(src), "-vf", vf, "-an",
+              "-i", str(src), "-frames:v", str(n), "-r", "%g" % fps, "-vf", vf, "-an",
               "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
               "-pix_fmt", "yuv420p", str(dst)])
         _run([filmkit.FFMPEG, "-v", "error", "-y", "-ss", "%.3f" % s["at"],
-              "-t", "%.3f" % s["len"], "-i", str(src), "-vn",
+              "-t", "%.4f" % span, "-i", str(src), "-vn",
               "-af", "aresample=%d" % SR, "-ac", "2", "-ar", str(SR), str(wav)])
         out.append({"id": s["id"], "video": str(dst), "audio": str(wav),
-                    "len": s["len"], "at": s["at"], "source": s["source"]})
+                    "len": round(span, 4), "frames": n,
+                    "at": s["at"], "source": s["source"]})
     return out
 
 
@@ -395,7 +421,7 @@ def assemble(footage, work, out_path, *, ass_path=None, crf=19, preset="medium")
                          % (vd, ad, abs(vd - ad)))
     out_path = Path(out_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    af = filmkit.loudnorm_two_pass(str(mix), target_i=-16.0, target_tp=-1.5) or ""
+    af = filmkit.loudnorm_two_pass(str(mix), target_i=-16.0, target_tp=-2.2) or ""
     cmd = [filmkit.FFMPEG, "-v", "error", "-y", "-i", str(silent), "-i", str(mix)]
     if ass_path:
         ass_path = Path(ass_path).resolve()

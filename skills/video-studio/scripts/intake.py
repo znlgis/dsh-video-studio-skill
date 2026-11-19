@@ -105,14 +105,15 @@ QUESTIONS = (
              "brief": "自己画"},
             {"value": "footage", "label": "网上素材剪辑：找现成影像按文案剪（纪录片/新闻/实拍题材；footage 线）",
              "brief": "素材"},
-            {"value": "hybrid", "label": "两者结合：素材段 + 图文段按段拼接（素材保持原色，"
-                                   "图文段用 matchstyle.py 向素材看齐）",
+            {"value": "hybrid", "label": "两者结合：素材打底 + 只叠必要信息"
+                                   "（compose.py；也可按段拼接）",
              "brief": "结合"},
             {"value": "auto", "label": "你替我挑：按题材推荐（问诊单会带 recommended）", "brief": "你替我挑"},
         ],
         "hint": "自己画 = 零素材线（design.json 定外观，可提案）；网上素材剪辑 = footage 线"
-                "（契约是 footage.json，提案层不适用）；两者结合 = 两条线按段拼（技能没有一键 hybrid 命令），"
-                "素材段保持原色、图文段跑 matchstyle.py 向素材看齐（别在素材上叠主题色）。"
+                "（契约是 footage.json，提案层不适用）；两者结合有三种形态：素材打底 + 小面积叠加"
+                "（compose.py，默认推荐，自绘 <=15%）、按段拼接（素材段 + 图文段）、整屏卡片覆盖"
+                "（基本不该用，素材会被遮掉）。别默认按段拼——实测整屏卡片会被判割裂。"
                 "题材写好后加 --topic 或跑 --recommend，会给出推荐值与理由。",
     },
     {

@@ -54,8 +54,14 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 - 两条线都遵守 §0 的其它铁律（音频先做、时间轴由实测驱动、采样级混音、交付前跑门禁）。
 - 走了素材线，**提案层（`propose.py` / 设计 DSL）不适用**——外观由素材本身的调色与遮幅决定，
   不是"采样几个设计选一个"（`propose.py` 会在问诊记录 `mode=footage` 时明确提示这一点）。
-- **"两者结合"没有一键命令**：素材段走 `footage.py`、图文段走 `render.py`，最后用 ffmpeg
-  **按段拼接**（`concat`）。先定每一段用哪条线，再分别出片——别指望一个 stage 全包。
+- **"两者结合"有三种形态，先选对再动手**（详见 [references/hybrid-overlay.md](references/hybrid-overlay.md)）：
+  1. **按段拼接**：素材段走 `footage.py`、图文段走 `render.py`，最后 `concat`（图文段占 30~90%）
+  2. **整屏卡片覆盖**：基本不该用——素材被遮掉，等于没用素材
+  3. **素材打底 + 小面积叠加**（`compose.py`，**默认推荐**）：素材就是画面，
+     只把"必要的一点信息"（一行对照、一个标注）按时间窗叠上去，自绘面积 **≤15%**
+  判断法：先想"去掉所有自绘，只留素材 + 旁白还成立吗？" 成立 → 形态 3；不成立且缺的是
+  "对比/数据/流程"这类结构信息 → 形态 1。**别默认选 1**：实测 88% 时长画整屏卡片
+  会被判"割裂"，改成形态 3 反而更统一、工作量更小。
 - **别在素材上叠整帧主题色**：素材段保持原色（只有 crop/scale/遮幅 + 显式 `treatment.color`）。
   想让两段像一部片，方向反过来——素材不动，把**图文段的配色**锚到素材上：
   `python matchstyle.py --footage footage.json --work work --apply`（见 §0.1.1）。
@@ -64,6 +70,11 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 ### 0.1.1 hybrid 的一致性：素材不动，让图文段向素材看齐
 
 > 一句话：**素材是基准，图文段是跟随者**。反过来（拿主题色去盖素材）就是糊画面。
+>
+> **适用范围**：图文段占相当比例（形态 1）时才需要。走**形态 3**（素材打底 + 小面积叠加）
+> 时图文段只有 ~15%，套不套调色差别很小，**却可能把整套设计意图改掉**——所以
+> `matchstyle.py` 现在会检查"设计原本亮底 vs 素材把配色锚到暗底"并给出警告
+> （`day_night_conflict` 字段可机读）。出现警告时优先改形态 3，而不是硬套调色。
 
 ```bash
 python matchstyle.py --footage footage.json --work work --report               # 先看画像，零写入
@@ -238,7 +249,7 @@ JSON
 #    契约校验（可选，几秒）：
 python <SKILL_DIR>/scripts/filmcheck.py film.json
 
-# 2) 先自检一次环境（可选；85 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；90 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先出方案，再出片——同一个 brief 每次都不一样，所以必须让用户看过
@@ -870,7 +881,7 @@ python <REPO>/tools/audio_similarity.py --strict   # A/B/C 三组阈值，失败
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（85 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（90 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -1219,8 +1230,9 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 浏览器逐帧渲染 | `webengine.py` |
 | **素材剪辑一条龙**（下载/转写定位/切镜/混音/字幕/门禁） | `scripts/footage.py`（10 个 stage） |
 | 素材线核心：取材 / 剪辑 / 专属门禁 | `footagekit.py` `footageedit.py` `footageqa.py` |
+| **hybrid 形态 3 合成**（素材打底 + 小面积叠加 + 强制响度归一） | `scripts/compose.py` |
 | **hybrid 风格对齐**（素材画像 -> 图文段配色/画幅；素材本身不上色） | `scripts/matchstyle.py` |
-| 回归自检（85 条断言） | `selfcheck.py` |
+| 回归自检（90 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
@@ -1264,9 +1276,9 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```
 >
-> 两处总数别从示例里抄：发版前跑一遍把真实值填进去。真源是 `selfcheck.CASES`（当前 85 条断言）
+> 两处总数别从示例里抄：发版前跑一遍把真实值填进去。真源是 `selfcheck.CASES`（当前 90 条断言）
 > 与 `tools/ci_check.py` 的 `CI_CHECK_COUNT`（当前 14 项）；`tools/ci_check.py` 第 14 项会自动比对
-> 文档里的总数句式（「85 条断言 / 自检 85 条」这类），写错就红——所以示例里不再写死第二个总数。
+> 文档里的总数句式（「90 条断言 / 自检 90 条」这类），写错就红——所以示例里不再写死第二个总数。
 
 > 自查口令：如果一条门禁从来没失败过，先确认它是不是根本测不到。
 
@@ -1280,7 +1292,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 85 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 90 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

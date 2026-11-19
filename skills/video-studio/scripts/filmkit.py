@@ -2440,8 +2440,14 @@ def mux(video, audio, out, crf=18, preset="medium", audio_bitrate="192k",
     return str(out)
 
 
-def loudnorm_two_pass(src, target_i=-16.0, target_tp=-1.5, target_lra=11.0):
-    """两遍 loudnorm：先测量，再按测量值归一化。返回可直接给 -af 的滤镜串。"""
+def loudnorm_two_pass(src, target_i=-16.0, target_tp=-2.2, target_lra=11.0):
+    """两遍 loudnorm：先测量，再按测量值归一化。返回可直接给 -af 的滤镜串。
+
+    为什么 target_tp 默认是 -2.2 而不是 -1.5：
+    AAC 编码会把真峰**抬高 0.5~1.1 dB**（实测目标 -1.5 -> 成片 -1.0 dBTP，正好压在
+    -1.0 门禁线上；目标 -1.5 的另一片实测 -1.4）。要过 <=-1.0 dBTP 的门禁，
+    母带阶段必须留够编码余量，-2.2 是实测能稳定落到 -1.7~-1.8 的档位。
+    """
     p = _run([FFMPEG, "-hide_banner", "-nostats", "-i", str(src), "-af",
               "loudnorm=I=%.1f:TP=%.1f:LRA=%.1f:print_format=json"
               % (target_i, target_tp, target_lra), "-f", "null", "-"])

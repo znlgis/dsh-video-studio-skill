@@ -552,6 +552,44 @@ def _apply_design(design, palette):
     return clone
 
 
+def _day_night_conflict(design, family):
+    """设计原本偏亮、但素材把我们锚到暗底 —— 这是实测最贵的坑，必须显式说出来。
+
+    背景：一支宋画/实景混剪片，选中了「明色」设计（浅底、明亮活泼），但素材实测
+    luma=0.12（绢本暗调）。按 matchstyle 的规则把图文段配色锚到素材后，图文段变成
+    近黑底（bg=[13,12,11]）—— 与用户当初选的"明色"完全相反，等于偷偷改了需求。
+
+    判定：读 design.visual.palette 里 bg 的亮度；素材 family 给的明暗族；
+    两者相反就警告。**只警告不阻止**：确实要暗调片子的人应该能继续走，
+    但绝不能"套了才发现全片变黑"。
+    """
+    if not isinstance(design, dict):
+        return None
+    pal = (design.get("visual") or {}).get("palette") or {}
+    bg = pal.get("bg")
+    if not isinstance(bg, (list, tuple)) or len(bg) != 3:
+        return None
+    try:
+        # 感知亮度（Rec.601）：0=黑 1=白
+        bg_luma = (0.299 * float(bg[0]) + 0.587 * float(bg[1])
+                   + 0.114 * float(bg[2])) / 255.0
+    except (TypeError, ValueError):
+        return None
+    was_dark = bg_luma < 0.20
+    will_dark = bool(family.get("dark"))
+    if was_dark == will_dark:
+        return None
+    if was_dark and not will_dark:
+        return ("设计原本是暗底（bg 亮度 %.2f），素材把配色锚到**亮底**："
+                "原设计意图会被改写；若这不是你要的，先降自绘占比或换素材" % bg_luma)
+    return ("设计原本是亮底（bg 亮度 %.2f），素材把配色锚到**暗底**：图文段会变成近黑，"
+            "与「明亮」类设计意图相反。三条出路（按代价从低到高）："
+            "1) 降低自绘占比：改成 compose.py 的「素材打底 + 小面积叠加」，几乎不需要配色（推荐）；"
+            "2) 保留亮色设计，不用 --apply（素材段与图文段靠暗场过渡衔接）；"
+            "3) 接受暗调，但先跟需求方确认——这不是调色问题，是改需求。"
+            % bg_luma)
+
+
 def _warnings_of(prof, bars, measured_luma=None):
     out = []
     if prof["sampling"]["from"] == "uniform":
@@ -602,6 +640,10 @@ def run(args):
     bars = letterbox_of(footage, design)
     near_black = _near_black(family["hue"], family["sat"])
     prof["warnings"] = _warnings_of(prof, bars)
+    conflict = _day_night_conflict(design, family)
+    if conflict:
+        prof["warnings"].append(conflict)
+        prof["day_night_conflict"] = True
 
     out = {
         "schema": SCHEMA,
@@ -618,6 +660,7 @@ def run(args):
         "proposed": {"letterbox_color": _hex_rgb(near_black)},
         "applied": False,
         "warnings": prof["warnings"],
+        "day_night_conflict": bool(prof.get("day_night_conflict")),
         "next": [],
     }
     if args.align_bars:
