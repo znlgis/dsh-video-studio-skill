@@ -6,6 +6,57 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.7.0 — hybrid 默认形态改为「素材打底 + 小面积叠加」，并加素材预算 / F8 门禁（2026-11-20）
+
+> 起因是一次真实事故：6 分 25 秒的片子在问诊里答了 hybrid，产线路由却仍指向「素材段 + 图文段按段拼接」，
+> agent 照着命令做出一版整屏主题卡；同时全片只用了 2 个素材源，F1..F7 没有一条关心"画面种类够不够"。
+> 这一版把"默认该走哪条"钉进代码与文档，并给素材量补上门禁。
+
+### 变更：hybrid 默认形态 = 形态 3（素材打底 + 小面积叠加）
+
+| 项 | 行为 |
+|---|---|
+| 默认链路 | `footage.py --stage all`（底片/混音/字幕）→ 写 `overlay.json` → `compose.py --stage all`（叠层 + 烧字幕 + 两遍 loudnorm） |
+| 形态 1（按段拼接） | **保留**，但必须显式 `--hybrid-form 1`（素材段 `footage.py` + 图文段 `render.py` + `concat`） |
+| 默认形态不需要 | `propose.py` / `matchstyle.py` 只服务形态 1 |
+| 问诊 | `intake.py` 新增 `--hybrid-form {3,1}`（默认 3）；形态落盘 `intake.json` 的 `hybridForm`；`--finalize` 打印「形态: 3」与 compose 命令 |
+
+### 新增：素材预算 + F8 素材多样性门禁
+
+- `footagekit.source_budget()` / `source_usage()`：推荐 **3 个独立来源/分钟**、硬下限 **2 个/分钟**、
+  绝对下限 **3 个**（两条线各自向上取整后夹绝对下限）。
+- 门禁 `footageqa.f8_source_variety`（已注册进 `GATES`，素材线门禁集 F1..F7 -> **F1..F8**）：
+  `distinct < 硬下限` -> fail；`< 推荐` -> pass + warning；单源连续 ≥3 镜 / 重复取景窗 >0 -> warning；
+  `footage.json` 写 `licensing: {allow_sparse_sources: true, why: "..."}` 才记 skipped。
+- `footage.py` 新增两个逃生口：`--allow-sparse-sources`、`--allow-missing-sources`；
+  **EDL 阶段就用预算拦**（低于硬下限直接 SystemExit，不等切完镜）。
+
+### 新增：`compose.py` 叠加预算审计
+
+`audit_overlay()` / `layer_coverage()` 在叠之前量每层 PNG 的不透明覆盖率，判四条：单层面积 >=30% fail、
+>=18% warn；每句 >=3 层 fail；覆盖句数 >=95% fail、>=80% warn；时长覆盖 >=60% warn。
+封面/章节层须声明 `"role": "cover"`（<=3 层、面积 <=65%）。`--allow-overlay-budget` 可放行（仍记 error），
+审计结果落 `work/overlay_audit.json`。
+
+### 文档与流程
+
+- `SKILL.md`：§0.1 写明"技能默认形态 3（代码默认同此）、形态 1 需显式 `--hybrid-form 1`"；§0.1.1 补
+  "matchstyle 只服务形态 1"；§4 补 F8 判据与素材预算公式；§10 补 `--hybrid-form` 与 `footageqa` 的 F8。
+- `references/hybrid-overlay.md`：§0 前加默认形态说明；新增「叠加预算审计」一节（四条判据 + role=cover）。
+- `references/footage.md`：新增「素材预算」与「公有领域素材抓取配方」两节；门禁表补 F8（标题改 F1–F8）。
+- `references/change-impact.md`：补"改了 overlay / 叠加预算要重跑什么"。
+- `README.md` / `SKILL.md`：断言数 90 -> **92**、仓库体检 14 -> **15** 项、版本徽章 2.6.0 -> **2.7.0**。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `python tools/ci_check.py` | 检查项 14 -> **15 项**（新增「素材预算与 hybrid 形态路由」） |
+| `python skills/video-studio/scripts/selfcheck.py` | 用例 90 -> **92 条**（新增 91 hybrid 默认形态、92 素材预算与 F8） |
+| 素材抓取配方 | Commons API / thumb 路径 / 429 退避 / 验真 / 取景两种配方 入库 `references/footage.md` |
+
+---
+
 ## 2.6.0 — hybrid 第三种形态「素材打底 + 小面积叠加」，并修 4 个实测真 bug（2026-11-19）
 
 > 起因是「自己画和素材结合」连做两版都被判定不好看：第一版图文段占 88% 时长是整屏卡片，

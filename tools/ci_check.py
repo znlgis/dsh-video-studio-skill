@@ -80,7 +80,7 @@ MAX_FILE_BYTES = 400 * 1024
 DESC_MAX_CHARS = 400
 # 本文件的检查项数（main() 里那张 checks 表的长度）。文档与分发页写的"仓库体检 N 项"
 # 要与它一致；改这里必须同批改 CHECKS 表，否则这项自检会先失败——这是故意的。
-CI_CHECK_COUNT = 14
+CI_CHECK_COUNT = 15
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
 # 缓存目录（.ruff_cache 等）以前会被算进来：它们随工具链生成、随时变化，既不是仓库内容
@@ -868,6 +868,56 @@ def t_case_count():
             % (cases, CI_CHECK_COUNT))
 
 
+def t_budget_and_form_routing():
+    """素材预算与 hybrid 默认形态：代码与文档口径必须一致（v2.7.0 收到的一次真实事故）。
+
+    事故回顾：一部 6 分 25 秒的片子在问诊里答了 hybrid，但 intake 的产线路由指向
+    "素材段 + 图文段按段拼接"，agent 照着命令做出一版整屏主题卡；同时全片只用了
+    2 个素材源，F1..F7 一条都没有关心"画面种类够不够"。
+
+    这一项不跑出片，只做**静态一致性**检查（裸机器可跑，不需要 ffmpeg/numpy）：
+      1) footagekit 有 source_budget / source_usage，且常量 = 推荐 3/分钟、硬下限 2/分钟、绝对 3；
+      2) footageqa 的 GATES 里注册了 f8_source_variety（注册漏了等于门禁没执行）；
+      3) footage.py 有 --allow-sparse-sources / --allow-missing-sources 两个逃生口与 source_budget 调用；
+      4) compose.py 有叠加预算审计（OVL_AREA_FAIL / audit_overlay）；
+      5) intake.py 的 hybrid 路由文案指向 compose（不是 concat），且注册了 --hybrid-form；
+      6) SKILL.md 的 §0.1 明确写"默认形态 3 / 形态 1 显式"。
+    """
+    scripts = SKILL / "scripts"
+    kit = (scripts / "footagekit.py").read_text(encoding="utf-8")
+    for name in ("def source_budget(", "def source_usage("):
+        assert name in kit, "footagekit.py 缺 %s（素材预算的单一真源）" % name
+    for const, want in (("SOURCE_PER_MIN_RECOMMENDED = 3", "推荐密度应为 3/分钟"),
+                        ("SOURCE_PER_MIN_MINIMUM = 2", "硬下限应为 2/分钟"),
+                        ("SOURCE_ABS_MINIMUM = 3", "绝对下限应为 3")):
+        assert const in kit, "footagekit.py 的常量不对：%s" % want
+
+    qa = (scripts / "footageqa.py").read_text(encoding="utf-8")
+    assert "f8_source_variety" in qa, "footageqa.py 没有 F8 门禁函数"
+    assert "GATES = [" in qa and "f8_source_variety]" in qa.replace(" ", ""), \
+        "F8 没注册进 GATES（函数写了但没执行，等于没这门禁）"
+
+    fp = (scripts / "footage.py").read_text(encoding="utf-8")
+    for flag in ("--allow-sparse-sources", "--allow-missing-sources"):
+        assert flag in fp, "footage.py 缺逃生口 %s（门禁没有显式旁路就等于一刀切）" % flag
+    assert "source_budget" in fp, "footage.py 没在 EDL 阶段用素材预算"
+
+    cp = (scripts / "compose.py").read_text(encoding="utf-8")
+    for name in ("OVL_AREA_FAIL", "def audit_overlay(", "def layer_coverage("):
+        assert name in cp, "compose.py 缺叠加预算审计部件：%s" % name
+
+    it = (scripts / "intake.py").read_text(encoding="utf-8")
+    assert "--hybrid-form" in it, "intake.py 没注册 --hybrid-form（形态 1 就无法显式选择）"
+    hybrid_block = it[it.find("MODE_HYBRID: ("):]
+    hybrid_block = hybrid_block[:hybrid_block.find("}")]
+    assert "compose.py" in hybrid_block, \
+        "hybrid 的默认走法必须指向 compose.py（素材打底 + 小面积叠加）"
+    assert "concat" not in hybrid_block, \
+        "hybrid 的默认走法不该是按段拼接（那是 --hybrid-form 1 的显式选择）"
+
+    md = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert "--hybrid-form 1" in md, "SKILL.md 没写「形态 1 需显式 --hybrid-form 1」"
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印每一节的详细证据")
@@ -894,6 +944,7 @@ def main(argv=None) -> int:
         ("12 film.json 契约", t_film_contract),
         ("13 footage.json 契约", t_footage_contract),
         ("14 断言条数一致", t_case_count),
+        ("15 素材预算与 hybrid 形态路由", t_budget_and_form_routing),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)

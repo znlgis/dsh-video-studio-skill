@@ -600,8 +600,9 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
         # hybrid 的提示单独一条：这时候提案**有用**，但只对图文段有效，
         # 而且必须接着跑 matchstyle 才能和素材看齐（这是"两段像一部片"的唯一正路）。
         if not json_out and (intake_state.get("mode") or {}).get("resolved") == "hybrid":
-            print("   问诊: 制作方式=两者结合（hybrid）——本提案只决定**图文段**的外观；"
-                  "冻结后跑 matchstyle.py --apply 把配色锚到素材上，再分段出片拼接。")
+            print("   问诊: 制作方式=两者结合（hybrid）——默认形态是「素材打底 + 小面积叠加」，"
+                  "它**不需要**这份提案：画面是素材，自绘只有小面积信息层。\n"
+                  "         只有显式走 --hybrid-form 1（按段拼接）时，本提案才决定图文段外观。")
     else:
         intake_state, intake_bypassed = _intake_state(work), False
     brief = _brief_of(brief_text, script)
@@ -890,9 +891,10 @@ def confirm(work, candidate, by="user", note="", json_out=False,
         _mode = ((_load_json(os.path.join(str(work), "intake.json"), default=None) or {})
                  .get("mode") or {}).get("resolved")
         if _mode == "hybrid":
-            print("   下一步（hybrid）: python matchstyle.py --footage footage.json --work %s "
-                  "--apply --align-bars   # 把图文段配色/画幅锚到素材" % work)
-            print("   然后分段出片：素材段 footage.py，图文段 render.py，最后 ffmpeg concat")
+            print("   下一步（hybrid 形态 3，默认）: 本设计只对**小面积叠加层**有用；"
+                  "出片走 footage.py --stage all -> overlay.json -> compose.py --stage all")
+            print("   形态 1（按段拼接）才需要 matchstyle：python matchstyle.py "
+                  "--footage footage.json --work %s --apply --align-bars" % work)
         else:
             print("   现在可以: python render.py --script <film.json> --stage all")
     return prev

@@ -366,6 +366,73 @@ def download(footage, src, *, force=False, format_sel=None):
     return {"path": str(best), "skipped": False, "bytes": best.stat().st_size}
 
 
+
+# ============================================================================
+# 素材预算：按片长反算"至少要有几个不同素材源"
+# ============================================================================
+# 为什么需要它：素材线最容易偷懒的地方是"一路指同一个源"——40 个镜头全来自
+# 2 张图，片子里每一秒都是同一张画在平移。QA 的 F1..F7 一条都拦不住它
+# （EDL 不越界、没有字幕残留、音画等长、有出处），交付时只能靠人肉发现。
+# 实测反例：一部 6 分 25 秒的片子用了 2 个来源，门禁全绿。
+#
+# 口径（用户拍板）：
+#   * 推荐密度 3 个独立来源 / 分钟 -> 低于它 pass + warning（画面重复度偏高）
+#   * 硬下限 2 个 / 分钟           -> 低于它 fail（不许静默放过）
+#   * 再短的片子也不许少于 3 个来源（否则就是"一张图 + 字幕"）
+SOURCE_PER_MIN_RECOMMENDED = 3
+SOURCE_PER_MIN_MINIMUM = 2
+SOURCE_ABS_MINIMUM = 3
+
+
+def source_budget(total_sec, *, per_min_recommended=SOURCE_PER_MIN_RECOMMENDED,
+                  per_min_minimum=SOURCE_PER_MIN_MINIMUM,
+                  absolute_minimum=SOURCE_ABS_MINIMUM):
+    """按片长算素材预算：{recommended: 推荐数, minimum: 硬下限, total_sec, per_min}。
+
+    推荐值与硬下限**分开算**：推荐 3/min 是"画面不重复"的舒服线，硬下限 2/min
+    是"明显偷懒"的红线。只留一个数的话，要么放过 2 张图，要么把正常片拦死。
+    """
+    import math
+    t = max(0.0, float(total_sec or 0.0))
+    minutes = t / 60.0
+    recommended = max(absolute_minimum, int(math.ceil(minutes * per_min_recommended - 1e-9)))
+    minimum = max(absolute_minimum, int(math.ceil(minutes * per_min_minimum - 1e-9)))
+    minimum = min(minimum, recommended)
+    return {"total_sec": round(t, 3), "per_min": per_min_recommended,
+            "recommended": recommended, "minimum": minimum,
+            "fresh_shot_sec": round(t / max(1, recommended), 2)}
+
+
+def source_usage(edl):
+    """EDL 的素材使用情况：distinct 源数 / 每源镜头数 / 最长连续同源 / 重复取景窗。
+
+    只看 shot.source，不看文件名——同一张图被切成多个视频片段仍算**一个**来源，
+    这正是"素材量不足"最容易被伪装的地方（把一张图切成 40 段也算 40 个镜头）。
+    """
+    shots = list((edl or {}).get("shots") or [])
+    per_src, max_run, run_src, run = {}, 0, None, 0
+    for s in shots:
+        sid = str(s.get("source") or "")
+        per_src[sid] = per_src.get(sid, 0) + 1
+        if sid == run_src:
+            run += 1
+        else:
+            run_src, run = sid, 1
+        max_run = max(max_run, run)
+    # 重复取景窗：同源且 at 相差 < 0.5s，说明是同一个画面被反复用
+    dupes = 0
+    by_src = {}
+    for s in shots:
+        by_src.setdefault(str(s.get("source") or ""), []).append(float(s.get("at") or 0.0))
+    for _sid, ats in by_src.items():
+        ats.sort()
+        for a, b in zip(ats, ats[1:]):
+            if b - a < 0.5:
+                dupes += 1
+    return {"shots": len(shots), "distinct": len(per_src),
+            "per_source": per_src, "max_consecutive": max_run,
+            "duplicate_windows": dupes}
+
 def fetch_all(footage, *, force=False):
     out = {}
     for sid, src in source_map(footage).items():

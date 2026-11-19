@@ -181,9 +181,144 @@ def resolve_windows(spec, tl):
                     "x": str(ly["x"] if ly.get("x") is not None else "(W-w)/2"),
                     "y": str(ly["y"] if ly.get("y") is not None else "H-h-120"),
                     "fade": float(ly.get("fade") or 0.0),
+                    "role": str(ly.get("role") or "chip"),
                     "start": round(start, 3), "end": round(end, 3)})
     return out
 
+
+# ============================================================================
+# 叠加预算审计：形态 3 的红线是"素材还是画面"
+# ============================================================================
+# 第 3 种形态（素材打底 + 小面积叠加）一旦叠多了就退化成"整屏卡片"，观众看到
+# 的不再是素材。SKILL.md 写的是"自绘 <=15%"，但此前**没有任何代码量它**：
+# 实测一部 5 分半的片子叠了 43 层题头带，累计覆盖约 20%，门禁全绿。这里把它变成可执行判据：
+#   * 单层覆盖面积（图层 PNG 的不透明像素占全画面比例）
+#   * 每句的叠加层数（>=3 层 = 回到卡片）
+#   * 被叠加覆盖的句数占比（>=95% = 全片都在叠）
+#   * 时长加权覆盖（>60% 时长画面被叠）
+# 阈值刻意分两档：WARN 是"该看一眼"，FAIL 是"这就不是素材为主的片子了"。
+# 18.7% 是"一行对照/一条题头带"的常态面积（拿真片量出来的），阈值定 20% 才不会
+# 把正常设计全部标成 warning；30% 的 fail 线才是"整屏卡片"的红线。
+OVL_AREA_WARN = 0.20
+OVL_AREA_FAIL = 0.30
+# 封面/章节卡（role=cover）是**故意**整屏的：开场与转场各一张是形态 3 的正常表达。
+# 但它们必须显式声明且限量——否则"每句都盖一张"就能靠 role 混过去。
+OVL_COVER_AREA_MAX = 0.65
+OVL_COVER_MAX = 4
+# 小面积标注（一行对照、一个字卡）不算"覆盖句子"：它们不遮素材主体。
+# 这条是拿真片校准出来的——5 分半那版每句都有一张小卡，但面积只有 1.5%~6%，
+# 观感上素材仍然是画面；只按句子数算会把它误判成"全片都在叠"。
+OVL_COUNT_AREA = 0.06
+OVL_LAYERS_PER_LINE_FAIL = 3
+OVL_LINES_WARN = 0.80
+OVL_LINES_FAIL = 0.95
+OVL_TIME_WARN = 0.60
+
+
+def layer_coverage(png_path, canvas=None):
+    """图层覆盖**画布**的比例（0..1）。缺 PIL 时返回 None（由调用方记 skipped）。
+
+    按画布面积归一，不是按 PNG 自身面积：小卡片（760x150 的对照条）自身像素
+    几乎全不透明，若按自身面积算就是 99.9%，会把它误判成"整屏卡片"。
+    实测：5 分半那版 43 层信息层逐层 1.5%~19%，按画布算才读得出"素材仍是画面"。
+    """
+    try:
+        from PIL import Image
+    except Exception:            # noqa: BLE001 —— 没装 Pillow 不该让合成崩
+        return None
+    try:
+        im = Image.open(png_path)
+    except Exception:            # noqa: BLE001
+        return None
+    try:
+        alpha = im.convert("RGBA").getchannel("A")
+    except Exception:            # noqa: BLE001
+        return None
+    w, h = alpha.size
+    if not w or not h:
+        return None
+    # 统计"明显不透明"的像素（alpha >= 32）：抗锯齿边缘的 1~2 级不算覆盖
+    hist = alpha.histogram()
+    opaque = sum(hist[32:])
+    cw, ch = canvas if canvas else (1920, 1080)
+    return round(opaque / float(max(1, cw) * max(1, ch)), 4)
+
+
+def audit_overlay(windows, tl, root, canvas=(1920, 1080)):
+    """按预算审计叠加层，返回 {errors, warnings, stats}。
+
+    windows 是 resolve_windows() 的结果（已含 start/end），所以这里只做度量与判定。
+    """
+    rows = tl.get("lines") or []
+    total = float(tl.get("total") or 0.0)
+    n_lines = max(1, len(rows))
+    errors, warnings = [], []
+    stats = {"layers": len(windows), "lines": len(rows), "total_sec": round(total, 3),
+             "per_line": {}, "heavy_lines": {}, "area": {}, "covered_lines": 0,
+             "covered_ratio": 0.0, "time_weight": 0.0, "no_pil": False}
+    if not windows:
+        return {"errors": errors, "warnings": warnings, "stats": stats}
+    time_weight = 0.0
+    covers = [w for w in windows if str(w.get("role") or "chip") == "cover"]
+    stats["cover_layers"] = [w["id"] for w in covers]
+    if len(covers) > OVL_COVER_MAX:
+        errors.append("封面/章节卡声明了 %d 层（上限 %d）：role=cover 是给开场/转场的，不能每句都用"
+                      % (len(covers), OVL_COVER_MAX))
+    for w in windows:
+        png = _layer_png(w, root)
+        cov = layer_coverage(png, canvas)
+        if cov is None:
+            stats["no_pil"] = True
+            continue
+        stats["area"][w["id"]] = cov
+        # 每句层数**先**统计：它和面积无关（三个小卡叠在一起同样是"回到卡片"），
+        # 必须在"小面积 -> 跳过"之前做，否则这条判据永远不触发。
+        _owner, _best = None, 0.0
+        for _r in rows:
+            _s0 = float(_r.get("start") or 0.0)
+            _s1 = float(_r.get("end") or 0.0)
+            _ov = max(0.0, min(w["end"], _s1) - max(w["start"], _s0))
+            if _ov > _best:
+                _owner, _best = str(_r.get("id")), _ov
+        if _owner:
+            stats["per_line"][_owner] = stats["per_line"].get(_owner, 0) + 1
+            # 覆盖率只算"重层"（面积 >= 6%）：一行小对照/一个角标的信息量等于一句字幕，
+            # 不该被当成"盖住素材"。重层才是判定"素材还是画面"的对象。
+            if cov >= OVL_COUNT_AREA:
+                stats["heavy_lines"][_owner] = stats["heavy_lines"].get(_owner, 0) + 1
+                time_weight += max(0.0, float(w["end"]) - float(w["start"]))
+        if str(w.get("role") or "chip") == "cover":
+            if cov > OVL_COVER_AREA_MAX:
+                errors.append("封面层 %s 覆盖 %.1f%%（封面上限 %.0f%%）"
+                              % (w["id"], cov * 100, OVL_COVER_AREA_MAX * 100))
+            continue
+        # 面积小于 OVL_COUNT_AREA 的当"标注"（等同字幕），不参与面积告警，但仍计入每句层数
+        if cov < OVL_COUNT_AREA:
+            stats.setdefault("chips", []).append(w["id"])
+            continue
+        if cov >= OVL_AREA_FAIL:
+            errors.append("层 %s 覆盖 %.1f%% 画面（>= %.0f%%）：素材已经被盖住，这是整屏卡片不是叠加"
+                          % (w["id"], cov * 100, OVL_AREA_FAIL * 100))
+        elif cov >= OVL_AREA_WARN:
+            warnings.append("层 %s 覆盖 %.1f%% 画面（提示线 %.0f%%）：确认主体没被压住"
+                            % (w["id"], cov * 100, OVL_AREA_WARN * 100))
+    stats["covered_lines"] = len(stats["heavy_lines"])
+    stats["covered_ratio"] = round(len(stats["heavy_lines"]) / float(n_lines), 3)
+    stats["time_weight"] = round(time_weight / total, 3) if total > 0 else 0.0
+    for lid, n in stats["per_line"].items():
+        if n >= OVL_LAYERS_PER_LINE_FAIL:
+            errors.append("句 %s 同时叠了 %d 层（>= %d）：每句只该有 1 个信息元素"
+                          % (lid, n, OVL_LAYERS_PER_LINE_FAIL))
+    if stats["covered_ratio"] >= OVL_LINES_FAIL:
+        errors.append("%.0f%% 的句子都有叠加层（>= %.0f%%）：全片都在叠，素材成了背景板"
+                      % (stats["covered_ratio"] * 100, OVL_LINES_FAIL * 100))
+    elif stats["covered_ratio"] >= OVL_LINES_WARN:
+        warnings.append("%.0f%% 的句子都有叠加层（提示线 %.0f%%）：留几段纯素材让观众喘气"
+                        % (stats["covered_ratio"] * 100, OVL_LINES_WARN * 100))
+    if stats["time_weight"] >= OVL_TIME_WARN:
+        warnings.append("叠加覆盖了 %.0f%% 的片长（提示线 %.0f%%）"
+                        % (stats["time_weight"] * 100, OVL_TIME_WARN * 100))
+    return {"errors": errors, "warnings": warnings, "stats": stats}
 
 # ============================================================================
 # 二、各阶段
@@ -260,6 +395,20 @@ def st_compose(footage, work, out, spec, args):
             raise SystemExit("[compose] 缺 %s（先跑 --stage silent/audio）" % p)
     tl = _load_json(work / "timeline.json") or {}
     layers = [ly for ly in resolve_windows(spec, tl) if _layer_png(ly, args.root).exists()]
+    # 叠之前先算预算：叠多了就是"整屏卡片"，合成阶段是最后一道能拦住它的地方
+    _vw = int((footage.get("video") or {}).get("width") or 1920)
+    _vh = int((footage.get("video") or {}).get("height") or 1080)
+    audit = audit_overlay(layers, tl, args.root, canvas=(_vw, _vh))
+    for wmsg in audit["warnings"]:
+        log("  [overlay WARN] " + wmsg)
+    if audit["stats"].get("no_pil"):
+        log("  [overlay WARN] 没装 Pillow，量不出层面积（这条预算检查本次未执行）")
+    if audit["errors"]:
+        for emsg in audit["errors"]:
+            log("  [overlay FAIL] " + emsg)
+        if not getattr(args, "allow_overlay_budget", False):
+            raise SystemExit("[compose] 叠加预算超限（见上）；确需如此请加 --allow-overlay-budget")
+    _write_json(work / "overlay_audit.json", audit)
     vd, ad = media_dur(silent), media_dur(audio)
     if vd <= 0 or ad <= 0:
         raise SystemExit("[compose] 读不到底片/音轨时长（%.3f / %.3f）" % (vd, ad))
@@ -350,6 +499,8 @@ def main(argv=None):
     ap.add_argument("--crf", type=int, default=20, help="视频 CRF（默认 20）")
     ap.add_argument("--preset", default="medium", help="x264 preset")
     ap.add_argument("--force", action="store_true", help="忽略已有中间产物，强制重跑本阶段")
+    ap.add_argument("--allow-overlay-budget", action="store_true",
+                    help="叠加预算超限也继续（work/overlay_audit.json 仍记 error）")
     args = ap.parse_args(argv)
     _utf8_stdout()
 

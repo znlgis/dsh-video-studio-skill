@@ -196,6 +196,10 @@ def st_edl(foot, work, args):
     tl = footageedit.build_timeline(foot, tts_rows)
     _write_json(work / "timeline.json", tl)
     log("  时间轴 %.2fs（%d 句）" % (tl["total"], len(tl["lines"])))
+    _budget = footagekit.source_budget(tl["total"])
+    _have = len(footagekit.source_map(foot))
+    log("  素材预算：%.0fs -> 推荐 %d 个独立来源（硬下限 %d）；当前声明 %d 个"
+        % (_budget["total_sec"], _budget["recommended"], _budget["minimum"], _have))
     srcs_info = {}
     sp = work / "sources.json"
     if sp.exists():
@@ -211,6 +215,22 @@ def st_edl(foot, work, args):
     else:
         log("  [F1] EDL 通过（%d 镜 / %.2fs）"
             % (len(edl["shots"]), sum(s["len"] for s in edl["shots"])))
+    # 素材量闸（与 F8 同一口径，但**提前**到切镜之前）：切了 40 个镜头再发现
+    # "只有 2 个源"就等于白cut一遍。默认 fail-closed，显式 --allow-sparse-sources 才继续。
+    usage = footagekit.source_usage(edl)
+    if usage["distinct"] < _budget["minimum"]:
+        msg = ("素材太少：%d 个独立来源 / %.0fs（硬下限 %d、推荐 %d）。\n"
+               "  画面会全程是同一张图在平移。补素材，或加 --allow-sparse-sources 显式放行\n"
+               "  （F8 会把它记成 fail，不会因为放行就变成 pass）"
+               % (usage["distinct"], _budget["total_sec"],
+                  _budget["minimum"], _budget["recommended"]))
+        if args.allow_sparse_sources:
+            log("  [F8] WARN " + msg)
+        else:
+            raise SystemExit("[F8] " + msg)
+    elif usage["distinct"] < _budget["recommended"]:
+        log("  [F8] 提示：%d 个来源低于推荐 %d，画面重复度会偏高"
+            % (usage["distinct"], _budget["recommended"]))
     return {"timeline": tl, "edl": edl, "problems": problems}
 
 
@@ -281,6 +301,10 @@ def main(argv=None):
     ap.add_argument("--n", type=int, default=12, help="locate 返回的候选条数")
     ap.add_argument("--strict-edl", action="store_true", help="EDL 有问题直接失败")
     ap.add_argument("--strict-qa", action="store_true", help="F 门禁有 fail 直接失败")
+    ap.add_argument("--allow-sparse-sources", action="store_true",
+                    help="素材数低于硬下限也继续（会在 QC 报告里记 F8 fail 的旁路说明）")
+    ap.add_argument("--allow-missing-sources", action="store_true",
+                    help="有源下载失败也继续（默认 fail-closed：缺素材就别往下切）")
     ap.add_argument("--json", action="store_true", help="stdout 只输出 JSON")
     args = ap.parse_args(argv)
 
@@ -311,12 +335,24 @@ def main(argv=None):
                 if not missing:
                     log("== fetch 跳过（素材都在本地）")
                     continue
+                log("== fetch 需要下载 %d 个源：%s" % (len(missing), ", ".join(missing)))
             if name in ("transcribe", "locate"):
                 log("== %s 跳过（all 只跑出片必需阶段；定位请单独 --stage locate）" % name)
                 continue
         t1 = time.time()
         summary[name] = STAGES[name](foot, work, args)
         log("-- %s 完成（%.1fs）" % (name, time.time() - t1))
+        if name == "fetch":
+            still = [sid for sid, s in footagekit.source_map(foot).items()
+                     if not footagekit.source_path(foot, s).exists()]
+            if still:
+                msg = ("还有 %d 个源没落地：%s\n"
+                       "  素材不全就往下切＝成片少画面。修复素材或加 --allow-missing-sources"
+                       % (len(still), ", ".join(still)))
+                if args.allow_missing_sources:
+                    log("  [fetch] WARN " + msg)
+                else:
+                    raise SystemExit("[fetch] " + msg)
 
     dt = time.time() - t0
     payload = {"title": foot.get("title"), "stage": args.stage, "work": str(work),

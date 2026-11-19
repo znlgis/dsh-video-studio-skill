@@ -243,10 +243,14 @@ MODE_LABELS = {
 MODE_ROUTES = {
     MODE_DRAW: ("零素材线", "propose.py 定设计 -> render.py 出片（design.json 决定外观）"),
     MODE_FOOTAGE: ("素材剪辑线", "footage.py 一条龙（契约 footage.json；提案层不适用）"),
-    MODE_HYBRID: ("两条线按段结合",
-                  "素材段走 footage.py、图文段走 render.py，最后 ffmpeg 按段拼接（concat）；"
-                  "拼之前跑 matchstyle.py 把图文段配色/画幅锚到素材上"
-                  "（技能没有一键 hybrid 命令，素材段也不叠主题色）"),
+    # hybrid 的**默认形态**是形态 3（素材打底 + 小面积叠加）：素材就是画面，
+# 只在必要处叠一行对照/一个标注。为什么不是"按段拼接"：实测整屏图文段会让
+# 片子变成"两部片拼一起"，而且图文段外观还得再走一遍 propose。
+# 形态 1（按段拼接）保留为**显式选择**（--hybrid-form 1），适合"数据/流程段
+# 本身就独立成篇"的题材。
+    MODE_HYBRID: ("素材打底 + 小面积叠加（形态 3，默认）",
+                  "footage.py --stage all 出底片与混音 -> 写 overlay.json（只在必要处叠小面积信息）"
+                  " -> compose.py --stage all 叠层 + 字幕 + 响度归一（自绘面积默认 <=18%，超限会拦）"),
 }
 
 # 题材 -> 制作方式的**推荐**词表。只影响推荐，不限制选择。
@@ -360,7 +364,12 @@ def _topic_of(work, explicit=""):
                     if str(answers.get(k) or "").strip())
 
 
-def _next_steps(mode, brief, work):
+def HYBRID_FORM_LABEL(form):
+    """hybrid 的两种形态的中文标签（问诊/下一步共用一份，别在两处各写一遍）。"""
+    return "3 · 素材打底 + 小面积叠加（默认）" if int(form or 3) == 3 else "1 · 按段拼接（显式选择）"
+
+
+def _next_steps(mode, brief, work, form=3):
     """finalize 打印的下一步：每一档都给**能直接照抄**的命令，别只说"去剪吧"。"""
     propose = ("python <SKILL_DIR>/scripts/propose.py --brief \"%s\" "
                "--script film.json --work %s" % (brief, work))
@@ -370,9 +379,17 @@ def _next_steps(mode, brief, work):
         return [footage,
                 "素材线不走 propose.py：外观由素材的调色与遮幅决定；契约见 references/footage.md"]
     if mode == MODE_HYBRID:
+        overlay = ("python <SKILL_DIR>/scripts/compose.py --footage footage.json "
+                   "--overlay overlay.json --work %s --out out/film.mp4 --stage all" % work)
+        if form == 1:
+            return [footage,
+                    "形态 1（按段拼接）的图文段：" + propose,
+                    "拼之前跑 matchstyle.py 把图文段配色/画幅锚到素材上；再 ffmpeg concat"
+                    "（两段拼接必然有风格断层，先看 references/hybrid-overlay.md §0 的取舍）"]
         return [footage,
-                "素材层就位后，图文段再走：" + propose,
-                "两层的拼法（按段拼接或素材打底叠加）见 references/footage.md §0 与 SKILL.md §0.1"]
+                "然后写 overlay.json（素材打底 + 只在必要处叠小面积信息，自绘面积 <=18%），再跑：" + overlay,
+                "默认走形态 3：素材就是画面，不需要 propose / matchstyle。\n"
+                "  若内容需要整段独立成篇的图文（数据/流程），重跑 intake.py --finalize --hybrid-form 1"]
     return [propose]
 
 
@@ -587,6 +604,8 @@ def main(argv=None):
                     help="用推荐项补齐未答的选项题（明确调用才生效，绝不静默）")
     ap.add_argument("--finalize", action="store_true", help="校验并写 intake.brief.txt")
     ap.add_argument("--check", action="store_true", help="只校验：还没答完退 2")
+    ap.add_argument("--hybrid-form", type=int, choices=(3, 1), default=None,
+                    help="两者结合时的形态：3=素材打底+小面积叠加（默认）；1=按段拼接（显式选择）")
     ap.add_argument("--show", action="store_true", help="看当前答案")
     ap.add_argument("--topic", default="",
                     help="题材原话：给「制作方式」题算推荐值（配 --questions / --recommend）")
@@ -594,6 +613,9 @@ def main(argv=None):
                     help="按题材推荐制作方式（自己画 / 网上素材剪辑 / 两者结合）；"
                          "不给 TEXT 就用问诊单里已写的题材")
     a = ap.parse_args(argv)
+    _saved = _load(intake_path(a.work)) or {}
+    form = int(a.hybrid_form if a.hybrid_form is not None
+               else (_saved.get("hybridForm") or 3))
 
     try:
         if a.recommend is not None:
@@ -691,6 +713,7 @@ def main(argv=None):
                       % (len(miss), " / ".join(miss) or "缺题材"), file=sys.stderr)
                 return 2
             txt = data["brief"]
+            data["hybridForm"] = form
             _atomic_write(brief_path(a.work), txt)
             data["briefPath"] = brief_path(a.work)
             save(a.work, data)
@@ -709,7 +732,10 @@ def main(argv=None):
                          "" if mode.get("matches_recommendation") else "  <- 与推荐不一致"))
                 print("  理由: %s" % (mode.get("reason") or "-"))
                 print("  下一步（%s）: %s" % (route, mode.get("how") or "-"))
-                for ln in _next_steps(resolved, txt, a.work):
+                if resolved == MODE_HYBRID:
+                    print("  形态: %s" % (HYBRID_FORM_LABEL(3) if form == 3
+                                            else HYBRID_FORM_LABEL(1)))
+                for ln in _next_steps(resolved, txt, a.work, form=form):
                     print("    " + ln)
             return 0
         if a.json:

@@ -94,6 +94,7 @@ import argparse
 import io
 import hashlib
 import json
+import pathlib
 import os
 import subprocess
 import sys
@@ -3542,6 +3543,107 @@ def t_scenes_hybrid_template_purity():
     return "同帧重画逐字节一致"
 
 
+def t_hybrid_default_form3():
+    """91 hybrid 默认形态 = 素材打底 + 小面积叠加（不许退回整屏图文卡片）。
+
+    真实事故：问诊答了 hybrid，产线路由却指向"素材段 + 图文段按段拼接"，
+    agent 照着命令做出了一版整屏主题卡——文档写的默认（形态 3）和代码给的路由
+    是两回事。这条把"代码默认 = 形态 3"钉死：
+      ① MODE_ROUTES[hybrid] 的走法必须是 footage -> overlay.json -> compose；
+      ② _next_steps(form=3) 不许把 propose/render 当默认下一步；
+      ③ --hybrid-form 1 才给按段拼接的命令（保留，但要显式选择）；
+      ④ finalize 的 stdout 必须打出形态与 compose 命令（agent 照抄的就是它）。
+    """
+    import subprocess as _sp
+    import intake as IT
+
+    route, how = IT.MODE_ROUTES[IT.MODE_HYBRID]
+    assert "素材打底" in route, "hybrid 默认形态应是素材打底 + 小面积叠加，实际 %r" % route
+    assert "compose.py" in how, "hybrid 默认走法必须给出 compose.py，实际 %r" % how
+    assert "concat" not in how, "按段拼接不该是默认走法：%r" % how
+
+    steps3 = IT._next_steps(IT.MODE_HYBRID, "测试题材", "work", form=3)
+    joined3 = " ".join(steps3)
+    assert "compose.py" in joined3, "形态 3 的下一步必须包含 compose.py：%r" % (steps3,)
+    assert "footage.py" in joined3, "形态 3 的下一步必须包含 footage.py：%r" % (steps3,)
+    assert "concat" not in joined3, "形态 3 不该提 concat：%r" % (steps3,)
+
+    steps1 = IT._next_steps(IT.MODE_HYBRID, "测试题材", "work", form=1)
+    joined1 = " ".join(steps1)
+    assert "propose.py" in joined1, "显式选形态 1 时才给图文段的 propose：%r" % (steps1,)
+    assert "matchstyle.py" in joined1, "形态 1 要提示 matchstyle：%r" % (steps1,)
+
+    ap_src = pathlib.Path(HERE, "intake.py").read_text(encoding="utf-8")
+    assert "--hybrid-form" in ap_src, "intake.py 没注册 --hybrid-form"
+    assert "hybridForm" in ap_src, "intake.py 没把形态落盘（hybridForm）"
+
+    tmp = tempfile.mkdtemp(prefix="vs_hybrid_form_")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    sets = (("topic", "测试题材，讲给普通观众"), ("mode", "hybrid"),
+            ("duration", "at_least_3m"), ("tone", "deep-focus"),
+            ("voice", "male-steady"), ("music", "steady"))
+    cmd = [sys.executable, os.path.join(HERE, "intake.py"),
+           "--work", os.path.join(tmp, "work")]
+    for k, v in sets:
+        cmd += ["--set", "%s:%s" % (k, v)]
+    cmd.append("--finalize")
+    r = _sp.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=env, timeout=300)
+    assert r.returncode == 0, "intake --finalize 失败：%s" % (r.stderr or r.stdout)[-300:]
+    out = r.stdout
+    assert "compose.py" in out, "finalize 没给 compose.py 的下一步命令：%s" % out[-500:]
+    assert "形态: 3" in out, "finalize 没打出形态 3：%s" % out[-500:]
+    concat_lines = [ln for ln in out.splitlines()
+                    if ln.strip().startswith("python") and "concat" in ln]
+    assert not concat_lines, "默认形态的下一步命令不该是按段拼接：%r" % (concat_lines,)
+
+
+def t_source_budget_and_f8():
+    """92 素材预算 + F8 素材多样性（2 个源撑 6 分钟必须 fail）。
+
+    真实事故：一部 6 分 25 秒的片子只用了 2 个素材源（同一张长卷切窗口），
+    F1..F7 全绿——没有任何一条门禁关心"画面种类够不够"。这条把口径钉进代码：
+    推荐 3 个来源/分钟、硬下限 2 个/分钟、绝对下限 3 个。
+    """
+    import footagekit as FK
+    import footageqa as FQ
+
+    b = FK.source_budget(385.0)
+    assert (b["recommended"], b["minimum"]) == (20, 13), \
+        "385s 的预算应为 推荐 20 / 下限 13，实际 %r" % (b,)
+    b2 = FK.source_budget(329.4)
+    assert (b2["recommended"], b2["minimum"]) == (17, 11), "329s 预算应为 17/11：%r" % (b2,)
+    short = FK.source_budget(45.0)
+    assert short["minimum"] == 3, "再短的片子也不许少于 3 个来源：%r" % (short,)
+
+    edl_bad = {"shots": [{"id": "s%02d" % i, "source": "qm", "at": i * 9.0, "len": 9.0}
+                         for i in range(37)]}
+    tl = {"total": 385.0,
+          "lines": [{"id": "l%02d" % i, "start": i * 10.0, "end": i * 10.0 + 9.0}
+                    for i in range(38)]}
+    u = FK.source_usage(edl_bad)
+    assert u["distinct"] == 1 and u["max_consecutive"] == 37, "usage 统计不对：%r" % (u,)
+
+    r = FQ.f8_source_variety({}, None, None, tl, edl_bad, {})
+    assert r["status"] == "fail", "2 个源撑 385s 必须 fail，实际 %r" % (r["status"],)
+    assert "素材太少" in r["detail"], "fail 的理由要说人话：%r" % r["detail"]
+
+    edl_ok = {"shots": [{"id": "s%02d" % i, "source": "src%d" % (i % 20),
+                         "at": (i // 20) * 20.0, "len": 9.0} for i in range(37)]}
+    r_ok = FQ.f8_source_variety({}, None, None, tl, edl_ok, {})
+    assert r_ok["status"] == "pass", \
+        "20 个源应 pass，实际 %r（%s）" % (r_ok["status"], r_ok["detail"])
+
+    r_skip = FQ.f8_source_variety({"licensing": {"allow_sparse_sources": True,
+                                                  "why": "客户指定"}},
+                                  None, None, tl, edl_bad, {})
+    assert r_skip["status"] == "skipped", "显式豁免应记 skipped：%r" % (r_skip["status"],)
+
+    assert FQ.f8_source_variety in FQ.GATES, "F8 必须注册进 GATES 才会被执行"
+    fp_src = pathlib.Path(HERE, "footage.py").read_text(encoding="utf-8")
+    assert "--allow-sparse-sources" in fp_src, "footage.py 缺 --allow-sparse-sources 逃生口"
+    assert "source_budget" in fp_src, "footage.py 没在 EDL 阶段用素材预算"
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3633,6 +3735,8 @@ CASES = [
     ("88 qa_frames 切点白名单（硬切不误报闪烁）", t_qa_frames_shots_whitelist),
     ("89 compose.py overlay 契约（bind/at/坏契约）", t_compose_contract),
     ("90 包装模板帧纯度（留原件 + 返回副本）", t_scenes_hybrid_template_purity),
+    ("91 hybrid 默认形态 = 素材打底 + 小面积叠加（不退回图文卡片）", t_hybrid_default_form3),
+    ("92 素材预算与 F8（2 源撑 6 分钟必须 fail）", t_source_budget_and_f8),
 ]
 
 

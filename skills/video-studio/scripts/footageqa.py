@@ -412,6 +412,62 @@ def f6_voice_dominance(foot, work, out, tl, edl, ctx):
                         "voice_rms": round(v, 5), "gap_rms": round(g, 5)})
 
 
+# ---------------------------------------------------------------- F8
+def f8_source_variety(foot, work, out, tl, edl, ctx):
+    """素材量够不够：按片长反算独立来源数，防止"一张图平移到底"。
+
+    三档：
+      * distinct < budget.minimum        -> fail（明显偷懒：2 张图撑 6 分钟）
+      * distinct < budget.recommended    -> pass + warning（画面重复度偏高）
+      * 单源连续 >= 3 镜 / 重复取景窗 > 0 -> 附在 warning 里，指出是哪一段
+    逃生口：footage.json 写 licensing.allow_sparse_sources=true 才记 skipped，
+    并在 detail 里写明理由——**不许默认静默放过**（这正是本次要堵的口子）。
+    """
+    total = float((tl or {}).get("total") or 0.0)
+    if total <= 0:
+        return dict(gate="F8", status="skipped", detail="没有时间轴，量不出素材密度",
+                    values={})
+    usage = footagekit.source_usage(edl)
+    budget = footagekit.source_budget(total)
+    values = {"total_sec": budget["total_sec"], "distinct": usage["distinct"],
+              "shots": usage["shots"], "budget": budget,
+              "max_consecutive": usage["max_consecutive"],
+              "duplicate_windows": usage["duplicate_windows"],
+              "per_source": usage["per_source"]}
+    lic = (foot or {}).get("licensing") or {}
+    if lic.get("allow_sparse_sources"):
+        return dict(gate="F8", status="skipped",
+                    detail="已声明允许多次复用素材（why: %s）；%d 个来源 / %.1fs（推荐 %d、下限 %d）"
+                           % (str(lic.get("why") or "未写 reason")[:80], usage["distinct"],
+                              budget["total_sec"], budget["recommended"], budget["minimum"]),
+                    values=values)
+    if usage["distinct"] < budget["minimum"]:
+        return dict(gate="F8", status="fail",
+                    detail="素材太少：%d 个独立来源 / %.1fs（硬下限 %d、推荐 %d）。"
+                           "画面会全程是同一张图在平移——补素材，或写 licensing.allow_sparse_sources 显式豁免"
+                           % (usage["distinct"], budget["total_sec"],
+                              budget["minimum"], budget["recommended"]),
+                    values=values)
+    notes = []
+    if usage["distinct"] < budget["recommended"]:
+        notes.append("低于推荐密度 %d（建议再补 %d 个来源）"
+                     % (budget["recommended"], budget["recommended"] - usage["distinct"]))
+    if usage["max_consecutive"] >= 3:
+        notes.append("有素材连续用了 %d 镜（同一段画面停留过久）" % usage["max_consecutive"])
+    if usage["duplicate_windows"] > 0:
+        notes.append("%d 处取景窗重复（同源 at 相差 <0.5s）" % usage["duplicate_windows"])
+    if notes:
+        return dict(gate="F8", status="pass",
+                    detail="%d 个来源 / %.1fs（推荐 %d、下限 %d）；%s"
+                           % (usage["distinct"], budget["total_sec"],
+                              budget["recommended"], budget["minimum"], "；".join(notes)),
+                    values=values)
+    return dict(gate="F8", status="pass",
+                detail="%d 个来源 / %.1fs（推荐 %d、下限 %d）"
+                       % (usage["distinct"], budget["total_sec"],
+                          budget["recommended"], budget["minimum"]),
+                values=values)
+
 # ---------------------------------------------------------------- F7
 def f7_signoff(foot, work, out, tl, edl, ctx):
     # 抽帧失败 = 联系表少了镜 = "人看过"这件事没覆盖全片。这是 fail，不是 skipped：
@@ -453,7 +509,7 @@ def f7_signoff(foot, work, out, tl, edl, ctx):
 
 
 GATES = [f1_edl, f2_subtitle_bleed, f3_watermark, f4_av_equal,
-         f5_provenance, f6_voice_dominance, f7_signoff]
+         f5_provenance, f6_voice_dominance, f7_signoff, f8_source_variety]
 
 
 # ---------------------------------------------------------------- 联系表（F7 证据）

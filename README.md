@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.7.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -102,7 +102,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，90 条断言，不联网）
+# 2) 环境自检（可选，92 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -193,7 +193,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（90 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（92 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/matchstyle.py      hybrid 风格对齐（素材画像 -> 图文段配色/画幅；--apply 前过 theme_lint，失败零写入）
   scripts/layoutkit.py       画布/安全区单一真源（横竖屏 profile；scenes/filmkit/designkit 共用）
@@ -216,7 +216,7 @@ skills/video-studio/
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
 schemas/film.schema.json     film.json 字段说明（给人/IDE 补全；执行者是 scripts/filmcheck.py）
-tools/ci_check.py            仓库级体检（14 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数，不需 ffmpeg）
+tools/ci_check.py            仓库级体检（15 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数/素材预算与形态路由，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；含 preflight/vmaf/asr）
 tools/golden_frames.py       金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
 tools/silhouette_qa.py       剪影可区分门禁 G13（换设计不能只是换色）
@@ -276,23 +276,24 @@ DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时*
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
+python tools/ci_check.py -v     # 15 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /
                                 #         Markdown 围栏（状态机）/ CI workflow /
                                 #         单文件体积 / film.json 契约（调 filmcheck.py，规则只留一份）/
-                                #         footage.json 契约（调 footagekit.load_footage；缺 numpy/Pillow 记 SKIP）
+                                #         footage.json 契约（调 footagekit.load_footage；缺 numpy/Pillow 记 SKIP）/
+                                #         素材预算与 hybrid 形态路由（source_budget 常量、F8 注册、--hybrid-form）
 ```
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**90 条**断言）。
+查的是"技能本身还能不能出片"（**92 条**断言）。
 
 三条产线级自检（都要 ffmpeg，在 `ci.yml` 的 skill job 里跑）：
 
 ```bash
-python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F7 全链路
+python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F8 全链路
 python tools/matchstyle_selftest.py   # hybrid：素材画像 -> 图文段配色，含"左右黑带"回归
 python tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
 ```
