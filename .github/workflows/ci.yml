@@ -10,6 +10,8 @@
 #                     （数为准的是 CASES 列表，不是文档里的任何数字）。
 #                     需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #                     webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
+#   skill 里另有三个"整条产线"的自检：素材线 footage_selftest（F1–F7 全链路）、
+#   hybrid 风格对齐 matchstyle_selftest（配色同族 + 左右黑带回归）、以及各模块 --selftest。
 #   web            —— webengine.py --selftest：真起无头浏览器跑页面契约与逐帧截图。
 #   py39           —— 独立 job（**不在 repo 的 matrix 里**）：让 ci_check 第 8 项「3.9 语法兼容」
 #                     那条断言真的在 3.9 上执行过。
@@ -188,6 +190,22 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tools/silhouette_qa.py --selftest
+
+      # 素材线自检：自己合成一段带烧录字幕/水印的素材，跑 probe->tts->edl->cut->mix->assemble->qa
+      # 与 F1–F7 判据。它要真调 ffmpeg，所以只能在这个 job 里跑；不跑的话，
+      # 素材线的"门禁是不是真的在判"就没人验（selfcheck 第 70 条只查到产线路由）。
+      - name: 'selftest: footage（素材线 F1–F7 全链路）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/footage_selftest.py
+
+      # hybrid 风格对齐：合成一块已知色相的画面，断言量出来的色相、写进去的调色板、
+      # 以及"素材段不被上色"这三件事。它守的是 2.5.0 那条方向性修复（素材保原色、
+      # 图文段向素材看齐），不跑就等于回到"靠人眼记得"。
+      - name: 'selftest: matchstyle（hybrid 风格对齐，含画幅左右黑带回归）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/matchstyle_selftest.py
 
       # 音频"同质化"的四组验收（A 跨片配乐 / B 跨片音效 / C 片内分离 / D 旁白优先）
       # 一直是**只读诊断工具**，从没在 CI 里按阈值判过。它 --strict 跑完约 4.5 秒，

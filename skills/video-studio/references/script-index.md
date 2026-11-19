@@ -13,6 +13,7 @@
 |---|---|
 | `scripts/intake.py` | **出片前问诊**：固定 8 题（题材/制作方式/时长/气质/画幅/声线/配乐/补充）→ `work/intake.json` + `work/intake.brief.txt`。任何题材的气质推荐项都是「明亮活泼」；第 2 题「制作方式」按题材给推荐（`--recommend` / 问诊单的 `recommended`+`recommend_reason`：真实影像→footage、数据/原理→draw、两边都占→hybrid），`auto` 档落地成具体产线并写进 `intake.json` 的 `mode`（chosen/resolved/route）；`--finalize` 按产线打印下一步命令（素材线给 `footage.py`，不走 `propose.py`）。首次 `propose.py` 会因它没答完而拒绝 |
 | `scripts/propose.py` | **提案器**：`--brief` 出 N 个候选（各带静帧联系表 + 设计距离）/ `--revise` 重出 / `--diff` 对比 / `--confirm` 冻结 `work/design.json` / `--show` 查看；片间去重台账（`--no-ledger` / `--show-ledger` / `VIDEO_STUDIO_LEDGER`） |
+| `scripts/matchstyle.py` | **hybrid 风格对齐**：抽素材帧（有 EDL 就只抽真会用到的镜头）→ 中位色相/饱和度/明度 + 明暗族 → 交给 `designkit._solve_palette` 解出同族调色板 → `--apply` 写 `design.json` 的 `visual.palette` 与 `footage.json` 的 `treatment.letterbox_color`；`--align-bars` 连画幅一起对齐。写盘前过 `theme_lint`，失败零写入退 2。**素材本身不上色**，只让图文段向素材看齐 |
 | `scripts/designkit.py` | **设计 DSL**：`sample_designs`（确定性采样、两两 ≥2 维不同、配色色相分叉）/ `validate_design`（fail-closed）/ `design_to_plan` / `design_distance` / `subtitle_of`；CLI：`--sample` / `--lint` / `--list-palettes` |
 | `scripts/previewkit.py` | **离线预览**：合成时间轴 + `grammar.plan_scenes` + 场景绘制 + 联系表，不联网、不合成旁白 |
 | `scripts/grammar.py` | **场景语法**：按内容从 10 类构图里选 `type`，落 `work/storyboard.json`；`--help` 可查用法 |
@@ -22,9 +23,14 @@
 | `scripts/gates.py` | **门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
 | `scripts/stagewatch.py` | **阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
+| `scripts/layoutkit.py` | **画布/安全区单一真源**：横竖屏两套 profile（尺寸、正文区、字幕带、字号档）都在这里，scenes / filmkit / designkit 共用同一份定义（自检 #73 守住"只能有一个真源"） |
 | `scripts/critic.py` | **审美质检**：离线启发式 0-100 分（安全边距 / 明暗对比 / 色相分散 / 文字密度 / 重心平衡）+ `--vlm-cmd` 挂钩（prompt 走 stdin、stdout 收 JSON，本脚本不联网）。评 `proposals/rev*/<ID>/_sheet.png`；**不写 `proposal.json`**、不进 `--stage qa` 账本 |
 | `scripts/studio.py` | **薄门面**：`studio.py <子命令>` 转调 intake/propose/render/critic/check/lint/contract/explain；未知参数原样透传，退出码等于目标脚本 |
 | `scripts/selfcheck.py` | 回归自检：**85 条**针对真实缺陷的断言，不联网、约 10–25 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）/ 70 出片前问诊（固定 7 题，没答完首次提案必拦）/ 71 默认设计不画装饰细线（母题层/底纹/HUD 全关，按绘制调用断言）/ 72 前景不随镜头位移（1px 台阶回归）** |
+| `scripts/footage.py` | **素材线一条龙**（10 个 stage）：`probe/fetch/transcribe/locate/tts/edl/cut/mix/assemble/qa`；契约是 `footage.json`（`schemas/footage.schema.json`），画面治理走 `treatment`，门禁是 F1–F7 |
+| `scripts/footagekit.py` | 素材线核心 I：`load_footage`（结构硬错误）/ `probe_file` / `fetch_all`（yt-dlp + 直链）/ `transcribe` / `locate` / `build_treatment_filter`（crop→scale→pad→color→fps，切镜与抽帧共用一份，避免"预览和成片不一样"） |
+| `scripts/footageedit.py` | 素材线核心 II：`build_edl` / `check_edl`（越界与总长）/ `cut_shots`（按镜切 + 抽原声）/ `mix_tracks`（旁白 + 环境层 + 配乐，采样级叠加）/ `write_ass` + `assemble`（ASS 字幕按 PlayResY=1080 排版） |
+| `scripts/footageqa.py` | 素材线门禁 F1–F7：EDL 合法性 / 烧录字幕残留 / 水印残留 / 音画等长 / 溯源与署名 / 旁白主导 / 联系表与签核指纹（几何判定，不看"像不像字"） |
 | `scripts/preflight.py` | **渲染前资源闸门**：剧本结构 + 全部上屏文本逐字过字形检测（按字段选字重）+ 已有 TTS 音频可解析 + 字体可加载 + web 入口页存在。`render.py` 在 `frames` 之前调用，记门禁 `G0`；也可单独跑 `python preflight.py --script film.json [--json] [--strict]` |
 | `scripts/qavmaf.py` | **全片 VMAF/SSIM 门禁**：参考帧由场景函数**实时重渲**（不是成片抽帧），rawvideo 喂 ffmpeg 与成片逐帧比；一次调用同时算 VMAF 与 SSIM；门禁 `G11` |
 | `scripts/qaasr.py` | **ASR 回读门禁**：成片音轨转文字与剧本对账（字符级多重集召回 + 每句偏移）；引擎优先 faster-whisper，其次 ffmpeg whisper 滤镜，都不可用记 skipped；门禁 `G12` |

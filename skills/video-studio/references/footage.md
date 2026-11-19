@@ -23,7 +23,17 @@
 > **这条线由问诊第 2 题决定**：`intake.py` 的 `mode` 若解析成 `footage`（用户自己选了素材剪辑，
 > 或选了 `auto` 且题材是真实影像），`--finalize` 会直接给出 `footage.py` 的下一步命令，
 > 并提醒**提案层不适用**。走到这里说明产线已经定过了，别再回头跑 `propose.py` 给素材线定外观。
-> `mode=hybrid` 时：素材段走本线，图文段走 `render.py`，最后 ffmpeg 拼接/叠加（没有一键命令）。
+> `mode=hybrid` 时：素材段走本线，图文段走 `render.py`，最后用 ffmpeg **按段拼接**（`concat`）；
+> 没有一键 hybrid 命令。
+>
+> **拼接前先对齐风格**（否则就是"纪录片接 PPT"）：
+> ```bash
+> python matchstyle.py --footage footage.json --work work --report               # 只看素材画像
+> python matchstyle.py --footage footage.json --work work --apply --align-bars   # 锚配色 + 对齐画幅
+> python propose.py --adopt --work work                                          # 换了调色板要重绑
+> ```
+> 它把 **图文段** 的底色/主色锚到素材上，素材本身**一个像素都不上色**。
+> 反过来的做法（在素材上叠一层主题色）实测只会让素材发灰、发闷——那不是统一，是糊。
 
 ## 1. 契约：footage.json
 
@@ -141,6 +151,10 @@ treatment 一次定义、全片复用：
 
 > **别用 delogo 硬盖水印**：实测会留下竖条纹，比水印本身更显眼。
 > 能裁就裁，裁不掉就换素材。
+
+> **hybrid 里 treatment.color 只用来统一"素材之间"的色差**（白平衡/饱和度/对比度），
+> 不要写成"向设计主题看齐"的色罩：那会让素材失去自己的色彩，也让后面的 matchstyle
+> 失去可测的基准（它抽帧时会带上 treatment.color，色罩会把测量结果一起带偏）。
 
 ## 5. 门禁（F1–F7）
 

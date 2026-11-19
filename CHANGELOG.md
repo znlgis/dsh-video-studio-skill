@@ -6,6 +6,62 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.5.0 — hybrid 不再给素材叠色：新增 `matchstyle.py`，让图文段向素材看齐（2026-11-19）
+
+> 起因是「选了自己画 + 素材剪辑结合时，不需要再加颜色主题，会在素材上叠一层颜色，
+> 看着怪、素材也不清晰」。定位结论：**技能里没有"自动给素材上色"的代码**——
+> `footage.py` 从不读 `design.json`，素材画面只由 `treatment`（crop/scale/pad/color）决定。
+> 那个色罩是"为了统一风格"在素材上叠整帧主题层的人为做法。所以这次修的是**方向**：
+> 素材保持原色，把图文段的配色锚到素材上。
+
+### 新增：`scripts/matchstyle.py`（hybrid 专用）
+
+| 项 | 行为 |
+|---|---|
+| 抽样 | 按 `work/edl.json` 只抽**成片真会用到**的镜头（每镜 35%/75% 两点）；没有 EDL 才全片均匀抽，并在报告里声明来源 |
+| 统计 | 逐帧取中位色相（饱和度加权圆均值）/ 中位饱和 / 中位明度 / luma；不用算术平均（黑场与天空会把均值带跑） |
+| 明暗 | `luma < 0.35` 记暗底，与 `stylekit.is_dark` 同一判据；暗素材配浅底 = 两部片 |
+| 配色 | 喂 `designkit._solve_palette_retry((hue, sat, val, dark))`，色相全收、饱和度默认 ×0.6（`--sat-damp`）、明度映射进 `_PALETTE_SPACE`；求解失败逐档退让（降饱和→空间中值→熄灭饱和），**不回落固定配色** |
+| 画幅 | 读 `build_treatment_filter` 真实的 scale/pad，比自绘段 40/44px；`--align-bars` 把素材可见高算到自绘画幅（宽高比放不下时如实说明差多少） |
+| 落盘 | `design.json` 的 `visual.palette`（11 色）+ `footage.json` 的 `treatment.letterbox_color`（同族近黑）+ 可选 `treatment.scale`；**不动 `treatment.color`**（那是素材自己的调色，上色罩会让测量跟着偏） |
+| 闸门 | 写盘前跑 `validate_design` + `design_to_plan`（含 `theme_lint` 对比度门槛）；任一不过 → **零写入**退 2 |
+| 备份 | 覆盖前存 `work/backup/*.before-matchstyle.json` |
+| 退出码 | 0 成功 / 1 抽帧统计失败 / 2 前置条件不满足（缺 footage.json、缺 design.json、配色无解） |
+
+### 文档与提示语：把"叠信息层"这句错的删掉
+
+- `SKILL.md`：§0.1 的 hybrid 条目改为"按段拼接 + 素材不叠色"，新增 **§0.1.1 hybrid 的一致性**；
+  §10 脚本表加 `matchstyle.py`。
+- `references/footage.md`：hybrid 段给三步命令（`--report` / `--apply --align-bars` / `propose --adopt`）；
+  补一条"`treatment.color` 只统一素材之间的色差，别写成向主题看齐的色罩"。
+- `references/proposal.md`：hybrid 提示改为"只决定图文段外观，冻结后跑 matchstyle"。
+- `intake.py`：hybrid 选项文案与 hint 去掉"素材打底 + 代码叠加信息层"；
+  `MODE_ROUTES[hybrid]` 改为"按段拼接 + 先跑 matchstyle"。
+- `propose.py`：`mode=footage` 的提示改"仅供 hybrid 的**图文段**参考"；新增 `mode=hybrid` 专门提示。
+- `studio.py`：加子命令 `matchstyle`（薄门面只转发，不另立规则）。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `python tools/matchstyle_selftest.py` | 5/5：抽样色相≈合成源 210° / `--report` 零写入 / `--apply` 同族且过 `theme_lint` / 缺 design.json 退 2 零写入 / `--align-bars` 可见高贴到 996 |
+| 素材是否被上色 | 断言 `treatment.color` 不被写入；改后 `letterbox_color` 的 luminance < 0.05 |
+| `--align-bars` 左右黑带回归 | 首版只改 `scale`，640x360 素材对齐 996 高后右侧冒出 150px 黑带（实测左右列均值差 1e-2 级 → 现在断言 `crop` 存在且取景窗宽高比与目标画幅差 <1%）；修法：对齐时同步收缩 `crop`，让 pad 只补上下 |
+| 亲眼核对 | 素材帧上下 42px 近黑（0x0a0b0b）、图文帧黑边纯黑；两段底色同为深蓝灰（素材 ~[30,44,59]，图文 bg=[7,9,10]+bg2 渐变） |
+
+### 同版全面审查 + DSH 适配（2026-11-19）
+
+| 项 | 结果 / 改动 |
+|---|---|
+| DSH 适配基线 | 本机 DSH Desktop **0.2.2-rc.5**（nightly，`resources/runtime/runtime.json`）。插件走 `ctx.skills.registerProvider(create)` 主路径；实测 `apply()` 注册 1 个 provider、`list()` 返回 `rank=600/source=bundled/resourceBase=技能目录`、`get()` 读出 57 KB 正文，本会话 `skill` 工具能列出 `video-studio` 即技能真的挂上了 |
+| 适配判据 | `tools/plugin_entry_check.mjs`（`ci_check` 第 2 项真跑）当哨兵：DSH 换契约时插件会静默降成空行，只有跑一遍入口才发现。README「兼容性」补了"已实测 0.2.2-rc.5 + 升级 0.3 前先跑它再改 `engines.dsh` 上界" |
+| 自检进 CI | `ci.yml` 的 skill job 新增两步：`tools/footage_selftest.py`（素材线 F1–F7 全链路）、`tools/matchstyle_selftest.py`（hybrid 对齐 + 左右黑带回归）。这两条以前只在开发机上手跑 |
+| 文档漂移 | `script-index.md` 补 `layoutkit.py` / `footage.py` / `footagekit.py` / `footageedit.py` / `footageqa.py` 五行（29 个脚本此前 4 个没进索引）；`SKILL.md` §10 补 `matchstyle.py` 与三个 tools 自检；README 文件清单补 `matchstyle.py` / `layoutkit.py` |
+| 代码卫生 | ruff 3 条（两处 `raise ... from` 丢上下文、一处未用变量）修掉后 `ruff check .` 全绿；清掉 `skills/video-studio/scripts/.tmpcheck`（9.3 MB 的 pycache 残留）与两个临时脚本 |
+| 版本一致性 | `engines.dsh` 仍为 `>=0.1.0-rc.6 <0.3.0-0`；marketplace 中英文简介补 hybrid/matchstyle 一句，**保留**"自检 85 条 / 仓库体检 14 项"原句式（`ci_check` 第 14 项按句式核对，改写成中文数字会静默失效） |
+| 全绿证据 | `ci_check` 14/14、`selfcheck` 85/85、`footage_selftest` 7/7、`matchstyle_selftest` 5/5、`plugin_entry_check` PASS、`ruff` 全绿；安装副本（`~/.dsh/profiles/desktop/node_modules/@dsh-gis/...`）逐文件 `cmp` 与仓库一致 |
+| 版本 | `package.json` 与 README 徽章同步 2.5.0 |
+
 ## 2.4.0 — 问诊新增「制作方式」：自己画 / 网上素材剪辑 / 两者结合，按题材给推荐（2026-11-19）
 
 > 起因是「给用户的提问里增加一个问题，明确视频制作方式，并能根据要做视频的内容推荐用哪种」。

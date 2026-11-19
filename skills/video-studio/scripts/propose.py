@@ -592,11 +592,16 @@ def make_proposal(brief_text, script, work, n=3, seed=None, n_frames=4, json_out
             print("   问诊: 问诊单是旧版（schema 1），缺「制作方式」（mode）——建议补问一次；"
                   "本次提案照旧出方案，但 proposal.intake.mode 会是空的。")
         # 制作方式=素材剪辑时，提案层本身不适用：素材线的外观由素材调色/遮幅决定。
-        # 不失败（hybrid 的图文叠加层仍要设计），但必须说清楚，别让人以为提案能直接套到成片。
+        # 不失败（hybrid 的图文段仍要设计），但必须说清楚，别让人以为提案能直接套到成片。
         if not json_out and (intake_state.get("mode") or {}).get("resolved") == "footage":
             print("   问诊: 制作方式=网上素材剪辑（footage 线）——提案层不适用；"
                   "出片请用 footage.py（footage.json 契约见 references/footage.md），"
-                  "本提案仅供 hybrid 叠加层参考。")
+                  "本提案仅供 hybrid 的图文段参考。")
+        # hybrid 的提示单独一条：这时候提案**有用**，但只对图文段有效，
+        # 而且必须接着跑 matchstyle 才能和素材看齐（这是"两段像一部片"的唯一正路）。
+        if not json_out and (intake_state.get("mode") or {}).get("resolved") == "hybrid":
+            print("   问诊: 制作方式=两者结合（hybrid）——本提案只决定**图文段**的外观；"
+                  "冻结后跑 matchstyle.py --apply 把配色锚到素材上，再分段出片拼接。")
     else:
         intake_state, intake_bypassed = _intake_state(work), False
     brief = _brief_of(brief_text, script)
@@ -881,7 +886,15 @@ def confirm(work, candidate, by="user", note="", json_out=False,
         if prev.get("scriptHash"):
             print("   剧本指纹: %s（剧本改了要重新提案）" % prev["scriptHash"])
         print("   冻结设计: %s" % os.path.join(str(work), "design.json"))
-        print("   现在可以: python render.py --script <film.json> --stage all")
+        # hybrid 的下一步不是"直接 render"：先把图文段的配色锚到素材，否则两段是两部片。
+        _mode = ((_load_json(os.path.join(str(work), "intake.json"), default=None) or {})
+                 .get("mode") or {}).get("resolved")
+        if _mode == "hybrid":
+            print("   下一步（hybrid）: python matchstyle.py --footage footage.json --work %s "
+                  "--apply --align-bars   # 把图文段配色/画幅锚到素材" % work)
+            print("   然后分段出片：素材段 footage.py，图文段 render.py，最后 ffmpeg concat")
+        else:
+            print("   现在可以: python render.py --script <film.json> --stage all")
     return prev
 
 def revise(work, feedback, script_path, n=3, seed=None, n_frames=4, json_out=False,

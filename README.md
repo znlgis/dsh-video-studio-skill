@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.5.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -195,6 +195,8 @@ skills/video-studio/
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
   scripts/selfcheck.py       回归自检（85 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
+  scripts/matchstyle.py      hybrid 风格对齐（素材画像 -> 图文段配色/画幅；--apply 前过 theme_lint，失败零写入）
+  scripts/layoutkit.py       画布/安全区单一真源（横竖屏 profile；scenes/filmkit/designkit 共用）
   scripts/studio.py          薄门面（studio.py <子命令> 转调现成脚本，未知参数原样透传）
   scripts/sfxkit.py          物理建模音效库（24 配方，scipy 可选）
   scripts/scorekit.py        配乐合成原语（和声 / 律动 / 混音 / 响度 / 24-bit 落盘）
@@ -253,6 +255,12 @@ ffmpeg 路径可用环境变量 `FILMKIT_FFMPEG` 覆盖，字体候选在 `filmk
 DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时**只按它判**、忽略 `peerDependencies`，
 所以 0.2.2-rc.5 这类预发布版也在范围内（DSH 内部用 `semver.satisfies(..., {includePrerelease:true})`）。
 
+**已实测**：DSH Desktop **0.2.2-rc.5**（nightly 通道）上技能正常挂载——本会话里 `skill` 工具能列出
+`video-studio` 就是证据；`node tools/plugin_entry_check.mjs` 断言 `apply()` 注册了 1 个 provider、
+`list()` 返回 `rank=600 / source=bundled / resourceBase=技能目录` 的候选、`get()` 能读出 SKILL.md。
+**上界为什么钉在 0.3.0**：0.3 若改 `SkillProvider` 契约（`list/get` 签名或候选字段），插件会静默降级；
+升级 DSH 大版本前先跑一次 `plugin_entry_check.mjs`，它绿了再改 `engines.dsh` 上界。
+
 技能注册接口在 0.2.x 换过：
 
 | DSH | 技能注册接口 | 本插件怎么走 |
@@ -279,7 +287,18 @@ python tools/ci_check.py -v     # 14 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**85 条**断言）。两层都在 `.github/workflows/ci.yml` 里跑。
+查的是"技能本身还能不能出片"（**85 条**断言）。
+
+三条产线级自检（都要 ffmpeg，在 `ci.yml` 的 skill job 里跑）：
+
+```bash
+python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F7 全链路
+python tools/matchstyle_selftest.py   # hybrid：素材画像 -> 图文段配色，含"左右黑带"回归
+python tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
+```
+
+`plugin_entry_check.mjs` 是**DSH 兼容性的哨兵**：DSH 换技能注册接口时，插件会静默降级成"一行空插件"，
+语法检查、selfcheck 全绿，只有真的把 `apply()` 跑一遍才发现技能没挂上。
 
 ## License
 

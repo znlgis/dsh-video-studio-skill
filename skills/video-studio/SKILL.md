@@ -55,7 +55,37 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 - 走了素材线，**提案层（`propose.py` / 设计 DSL）不适用**——外观由素材本身的调色与遮幅决定，
   不是"采样几个设计选一个"（`propose.py` 会在问诊记录 `mode=footage` 时明确提示这一点）。
 - **"两者结合"没有一键命令**：素材段走 `footage.py`、图文段走 `render.py`，最后用 ffmpeg
-  拼接（或素材打底 + 代码叠加信息层）。先定每一段用哪条线，再分别出片——别指望一个 stage 全包。
+  **按段拼接**（`concat`）。先定每一段用哪条线，再分别出片——别指望一个 stage 全包。
+- **别在素材上叠整帧主题色**：素材段保持原色（只有 crop/scale/遮幅 + 显式 `treatment.color`）。
+  想让两段像一部片，方向反过来——素材不动，把**图文段的配色**锚到素材上：
+  `python matchstyle.py --footage footage.json --work work --apply`（见 §0.1.1）。
+  半透明色罩盖上去不会"统一"，只会让素材发灰、发闷、细节像蒙了雾。
+
+### 0.1.1 hybrid 的一致性：素材不动，让图文段向素材看齐
+
+> 一句话：**素材是基准，图文段是跟随者**。反过来（拿主题色去盖素材）就是糊画面。
+
+```bash
+python matchstyle.py --footage footage.json --work work --report               # 先看画像，零写入
+python matchstyle.py --footage footage.json --work work --apply --align-bars   # 落地
+python propose.py --adopt --work work                                          # 调色板变了，重绑确认
+```
+
+| 它做什么 | 为什么这么做 |
+|---|---|
+| 按 EDL 抽帧（只抽成片里真会用的镜头），取**中位数**色相/饱和度/明度 | 平均值会被一块黑场或一片天空带跑；观众记住的是"典型颜色" |
+| 明暗跟素材走（luma < 0.35 记暗底，与 `stylekit.is_dark` 同一判据） | 暗素材配浅底，观感就是"两部片拼一起" |
+| 色相全收，饱和度**打折**（默认 ×0.6，`--sat-damp` 可调） | 素材里一块高饱和招牌铺满整屏会变荧光板 |
+| 配色交给 `designkit._solve_palette`，写盘前过 `theme_lint` | 对比度门槛只有一份判据；写进去再发现，就是"渲完才看见字幕看不清" |
+| `letterbox_color` 改成**同族近黑** | 自绘段黑边是纯黑；素材黑边若是米色，拼接处会直接跳 |
+| `--align-bars` 把素材可见高算到自绘段画幅 | 40/44px vs 居中黑边，差 3px 以上就看得出画幅跳 |
+| `--align-bars` 会**同时收缩 crop** | pad 是纵向居中的：只改 scale 时，宽度不够的素材右边会冒出黑带（实测 640x360 素材对齐 996 高时右侧 150px）。取景窗宽高比必须等于目标画幅；代价是多裁几个百分点，报告会写清楚 |
+
+- 只改两块：`design.json` 的 `visual.palette` 与 `footage.json` 的 `treatment`（颜色 + 可选 scale）。
+  **不碰** `treatment.color`——那是素材自己的显式调色，不是主题色。
+- 失败一律零写入：配色无解 / 缺 `design.json` → 退 2 并打印"该补什么"；只写 `work/style_profile.json`。
+- 覆盖前留备份：`work/backup/*.before-matchstyle.json`（回滚靠它，不靠记忆）。
+- 算出来的颜色照样要**亲眼看**：`render.py --stage stills`，铁律 6 不因为"颜色是算出来的"就免掉。
 
 ## 0. 铁律（违反任意一条，成片一定会出问题）
 
@@ -1189,6 +1219,7 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 | 浏览器逐帧渲染 | `webengine.py` |
 | **素材剪辑一条龙**（下载/转写定位/切镜/混音/字幕/门禁） | `scripts/footage.py`（10 个 stage） |
 | 素材线核心：取材 / 剪辑 / 专属门禁 | `footagekit.py` `footageedit.py` `footageqa.py` |
+| **hybrid 风格对齐**（素材画像 -> 图文段配色/画幅；素材本身不上色） | `scripts/matchstyle.py` |
 | 回归自检（85 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
@@ -1197,7 +1228,8 @@ python render.py ... --run-id hero-v3     # 不给就按时间戳生成 rYYYYMMD
 
 仓库工具（在 `<REPO>/tools/`）：`estimate.py` 开渲前预演、`golden_frames.py` 金帧像素回归、
 `silhouette_qa.py` 剪影可区分（G13）、`ci_check.py` 仓库级体检、`audio_similarity.py` 音频相似度、
-`selftest_noscipy.py` 无 scipy 兜底路径。
+`selftest_noscipy.py` 无 scipy 兜底路径、`plugin_entry_check.mjs` 插件入口冒烟（技能要不要真的挂上）、
+`matchstyle_selftest.py` hybrid 风格对齐自检、`footage_selftest.py` 素材线自检。
 
 ## 11. 验收话术（不要自我宣称"做好了"）
 

@@ -43,6 +43,7 @@ COMMANDS = {
     "critic":   ("critic.py",    "审美质检：离线打分 + 可选 VLM 复评"),
     "check":    ("selfcheck.py", "回归自检：85 条断言，不联网"),
     "lint":     ("designkit.py", "设计 DSL 体检（--lint design.json）"),
+    "matchstyle": ("matchstyle.py", "hybrid 风格对齐：素材画像 -> 图文段配色/画幅"),
     "contract": ("filmcheck.py", "film.json 契约校验"),
     "explain":  ("render.py",    "哪些阶段过时了 + 最小重跑命令"),
 }
