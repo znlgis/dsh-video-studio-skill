@@ -1,4 +1,4 @@
-/* style.css — 1920x1080 固定画布（v0.3.0）
+/* style.css — 1920x1080 固定画布（v0.8.0）
  *
  * 为什么写死 1920x1080：webengine.py 用 viewport 1920x1080 / devicePixelRatio=1 截图，
  * 画布必须 1:1 铺满视口，截图才是"所见即所得"的 1080p 帧。

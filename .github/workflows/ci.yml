@@ -6,7 +6,7 @@
 #                     workflow 语法、单文件体积、film.json / footage.json 契约、断言条数一致）。
 #                     不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍
 #                     （matrix 展开 = 2 个 runner）。
-#   skill          —— skills/video-studio/scripts/selfcheck.py：92 条针对真实缺陷的回归断言
+#   skill          —— skills/video-studio/scripts/selfcheck.py：97 条针对真实缺陷的回归断言
 #                     （数为准的是 CASES 列表，不是文档里的任何数字）。
 #                     需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #                     webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
@@ -55,7 +55,7 @@ jobs:
           node-version: "20"
       # ruff 是**独立 step**，不进 ci_check 的检查表：ci_check 要能在裸机器（只装 python）
       # 上跑，而这条需要先装 ruff。分开的另一个好处是失败信息直指文件行号，
-      # 不用在 14 项汇总里再拆一层。
+      # 不用在 15 项汇总里再拆一层。
       #
       # 为什么必须有这一步：pyproject.toml 从很早就配了 ruff（select = F,E9,B），
       # 但 CI 从来没跑过它——于是 F821（undefined name）这种"导入即崩"的缺陷
