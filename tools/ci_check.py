@@ -260,6 +260,34 @@ def t_manifest():
         "frontmatter description 太长（%d 字 > %d）：它每轮都在上下文里，"
         "触发场景 + 一句能力边界就够，流程细节写进正文" % (d_len, DESC_MAX_CHARS))
     assert name.group(1) == "video-studio", "frontmatter name=%r，应为目录名 video-studio" % name.group(1)
+    # frontmatter 必须是**合法 YAML**，不只是"正则能抓到 name/description"。
+    # 真实事故：description 里写了 ASCII 冒号+空格（"Two pipelines for Chinese videos: footage..."），
+    # 块映射的裸标量里 ": " 非法 —— 官方 dsh-skill-filesystem 用真 YAML 解析，会把整个技能
+    # 判成 invalid frontmatter 并**静默跳过**；而本插件自带解析器与 ci_check 的正则都读得懂，
+    # 于是本仓库全绿、换到官方 provider 就挂不上。这里用标准库做一条最小但有效的守卫：
+    # 未加引号的标量值不许含 ": "（加引号/块标量则合法，这里不拦）。
+    bad_scalar = []
+    for line in fm.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("-"):
+            continue
+        if s[0] in " \t":
+            continue
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_-]*:", s):
+            continue
+        val = s.split(":", 1)[1]
+        if not val.strip():
+            continue
+        head = val.lstrip()[:1]
+        if head in ("|", ">", "[", "{", '"', "'", "&", "*", "!"):
+            continue
+        if ": " in val:
+            bad_scalar.append(s.split(":", 1)[0])
+    assert not bad_scalar, (
+        "frontmatter 不是合法 YAML：未加引号的标量里含 \": \"（%s）。"
+        "官方 YAML 解析器会判 invalid frontmatter 并静默跳过该技能；"
+        "改成中文冒号/破折号，或给整行值加引号。"
+        % " / ".join(bad_scalar))
     return "name=video-studio / description %d 字（上限 %d）" % (d_len, DESC_MAX_CHARS)
 
 

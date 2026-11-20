@@ -6,6 +6,86 @@
 与 `package.json` 的 `version` 字段只差前缀。历史上曾同时出现 `0.7.1` 与 `v0.7.1` 两种写法
 （前者指向一个未推送的孤儿提交，已删除），此后不再产生不带 `v` 的 tag。
 
+## 2.7.1 — 全面审查：修 11 个真 bug（门禁假绿 / 静默丢弃 / 指纹失效）并补 5 条回归（2026-11-20）
+
+> 这轮是对整个仓库（4 个域：渲染内核 / 文档与 CLI 契约 / 插件与 JS / schema 与工具）的全面审查。
+> 主线索是"门禁与指纹有没有真的在查"：审计出 11 个真 bug，其中 6 个属于**静默失效**——
+> 门禁该 fail 却记 skipped、签核该失效却照旧有效、契约该报错却无声丢弃、缓存该重算却复用跳过记录。
+> 连同 12 处文档与契约不一致一起修掉，并给最要命的 5 条补了自检（92 -> 97 条断言）。
+
+### 修：跨类别隐式互斥在采样前点名
+
+> 起点是一条照文档抄就会踩的路径：问诊按推荐答了「明亮活泼」，提案 brief 里写「深蓝」。
+> 深蓝锚点自带暗底、明亮活泼要浅底，两条要求互斥；旧实现每个候选都必然违规，
+> 重采样 50 次后只抛一句「气质='dark' 不满足 must_have「明亮活泼」」——
+> 用户看到的是"采样失败"，根因（两条要求互斥）一个字没说，还会被"用 --seed 固定后重试"误导。
+
+| 项 | 行为 |
+|---|---|
+| 根因 | `_PALETTE_ANCHOR` 的每个配色词都自带明暗（深蓝=暗底、暖纸=浅底），而 `_make_design` 里 `dark = anchor` 写在气质分支之后；两者相反时采样必然失败 |
+| 旧行为 | 重采样 50 次 -> `ValueError`：只报最后一条被拒原因，不说互斥，也不说该删哪条 |
+| 新行为 | `designkit._resolve_constraints` 在**采样前**比对配色锚点的明暗与气质约束的明暗要求，互斥时直接报错：点名两个词、说清冲突在明暗上、给出三种改法（去配色 / 换成同明暗的气质 / 换成同明暗的配色词） |
+| 覆盖面 | must_have 侧（深蓝+明亮活泼、暖纸+深色）与 avoid 侧（深蓝 + avoid 深色、暖纸 + avoid 浅色）都拦 |
+| 不误伤 | 同明暗组合照常采样：深蓝+深色、暖纸+明亮活泼、只写配色、只写气质 |
+
+### 同时修掉的其它 10 个真 bug（全部有复现或反证）
+
+| # | 位置 | 症状（改前） | 修法 |
+|---|---|---|---|
+| 1 | `render.py` GateLedger / `_sources()` | 传的是 `--scenes` 原始值（缺省空串）而不是解析后的路径，默认用法下 `inputs.scenes` 恒为 `missing`：**改了场景代码，旧签核照样有效**、stagewatch 也不报 stale | 改用 `script["_scenes"]`（解析后的绝对路径）；自检 94 用"改一行内容指纹必须变"钉住 |
+| 2 | `render.py` G7 | `sub.srt` 存在但为空（字幕全丢）时记 **skipped**，detail 还写"没找到 sub.srt"——文件明明在 | 拆三态：不存在=skipped / 空=fail / 条数不符=fail；自检 95 |
+| 3 | `render.py` G8 + `filmkit.qa_report` | 靠 warnings 里有没有"黑帧"两个字判断，于是"检测未执行"和"检测到 2 段"被同一分支记 skipped：**真发现长黑帧也 fail 不了** | `qa_report` 返回结构化 `black_segments`，G8 按 None/0/>0 三态判；自检 96 |
+| 4 | `render.py` `_finish_gates` | `gates.json` / `QC-REPORT.md` 写失败只打 WARN，**退出码仍 0**：交付凭据没生成却算通过 | 写失败记 `deliver` fail 并进 errs，退出码非零 |
+| 5 | `intake.py` `--check` | 契约是"只校验"，实现把 `save()` 写在 check 之前：**只读检查会创建/改写 intake.json**，连 mode/status 一起覆盖 | 只有显式 `--set/--defaults` 才落盘；自检 97 |
+| 6 | `compose.py` 退出码 | docstring 承诺"2 = 契约错误"，`main` 里一律 `return 1`，调用方按退出码分流永远失败 | 契约错误 `SystemExit(2)` 且保留消息；`main` 透传整数 code（实测坏 overlay.json -> 2） |
+| 7 | `render.py` `--batch` | 与 `--preview/--stage/--gate/--run-id/--vmaf/--no-preflight` 无互斥：`--batch x.json --preview 15` 会**真跑全量成片**而开关全部静默丢弃；`--layout portrait` 父进程竖屏、子进程横屏 | 开跑前拒绝冲突开关；`--layout` 透传子进程 |
+| 8 | `SKILL.md` frontmatter | description 里有 ASCII `": "`，**不是合法 YAML**：官方 dsh-skill-filesystem 会判 invalid 并静默跳过该技能，而本插件自带解析器与 ci_check 正则都读得懂——仓库全绿、换 provider 就挂不上 | 改成破折号；ci_check `t_manifest` 加"未加引号标量不许含 `: `"的守卫（PyYAML 已验证 OK） |
+| 9 | `assets/web` + `webengine.py` | 文字质检的空窗口（`t0 == t1`）被放行：只采 1 点、返回 frames:1，看起来"零缺陷"；`index.html` 的 `window.FK.boot()` 没判空，engine.js 加载失败时 `__BOOT_ERROR__` 永远写不进去 | `end <= start` / `b <= a` 双双抛错；boot 前判空并把"engine.js 未加载"写进 `__BOOT_ERROR__` |
+
+| 10 | `compose.py` 叠层 | `overlay.json` 里写错 png 路径的那一层被**静默丢弃**：不报错、不进 `overlay_audit.json`，成片少一个元素没人知道 | 缺图记契约错误并 `exit 2`（与 docstring 承诺的"2 = 契约错误"一致），逐层打印缺失路径 |
+
+### 文档与契约一致性（12 处）
+
+- `SKILL.md §1` 五步上手补问诊（旧示例直接 `propose.py --brief ...`，照抄会被问诊闸拒），说明"不传 `--brief` 时读 `work/intake.brief.txt`"与 `--no-intake` 留痕；`README.md` 最短路径同步。
+- 断言数 92 -> **97**：`SKILL.md` / `README.md` / `marketplace-entry.json` / `ci.yml` / `script-index.md` 全部对齐（ci_check 第 14 项守着）。
+- 叠加预算四处口径（15% / 18% / 20% / 30%）统一成：**设计目标 ≤15%、机器审计 warn 20% / fail 30%**（以 `compose.OVL_AREA_WARN/FAIL` 为准），`SKILL.md` / `intake.py` / `hybrid-overlay.md` 同步。
+- `README.md` 两处把 G13 说成"每个候选必经门禁"——实际是仓库离线工具（`tools/silhouette_qa.py`，selfcheck 第 55 条守判据），改为如实描述。
+- `README.md` 用 `python` 跑 `.mjs` -> `node`；`ci.yml` 注释"14 项汇总" -> 15 项。
+- `ci_check` 编号：`SKILL.md` 把"第 12 项 film.json 契约"和"第 13 项 footage.json 契约"并成一项，已拆开。
+- `gates.py` 模块 docstring 的签核路径 `out/signoff.json` -> `work/signoff.json`（实现与其它文档都是 work/）。
+- `footage.md` 标题"八个阶段" -> 十个（`--stage all` 跑 9 个，`locate` 是准备阶段）；`pitfalls.md` / `SKILL.md` 的"4 个 bug 复盘" -> 5 个。
+- `SKILL.md §9` 参考资料漏列 `hybrid-overlay.md`（正文 3 处引用它，且它是默认形态的细则文档）——补上。
+- `schemas/footage.schema.json` 的 `audio` 块是 `additionalProperties:false` 但漏写 `trim_silence`，而 `footage.py` 真的读它（默认 true）——代码支持、契约判非法，已补声明。
+- `film.json` 的 `bar` 是保留字段（`render.py` 的 `build_timeline` 不传），却曾被用来豁免 timeline 漂移对账：写上 `bar` 就**关掉对账**。已删豁免并标 inert（写了会 WARN"当前不生效"）；夹具里的 `"bar": 0` 一起清掉，夹具重新是 0 error / 0 warning。
+- `filmcheck` 降级分支文案说"只做了 fps 枚举校验"但实际什么都没查：现在**真的**用白名单校验 fps（`fps=45` 立刻 bad_video）；`qa.vmaf.pass/warn` 补 `max 100`；`voice` 从整块 open 改为字段表（`jitterr` 这类拼写错误会报 unknown_key）。
+
+### 回归（新增自检）
+
+- `SKILL.md §1` 的五步上手补上问诊这一步（旧示例直接 `propose.py --brief ...`，在问诊闸上线后
+  照抄会被拒），并说明「不传 `--brief` 时 propose 读 `work/intake.brief.txt`」「`--no-intake` 可跳过并留痕」。
+- `README.md` 最短路径的 proposal 命令改成读问诊 brief；旗舰示例里那句与默认气质冲突的「深蓝」去掉。
+- 自检 92 -> **97** 条：第 93 条「配色锚点与气质互斥（采样前点名，不靠重试）」、
+  断言报错包含两个冲突词与"暗底/浅底"、三种互斥都被拦、同明暗组合不受影响，
+  并用"把 `_make_design` 换成会炸的探针"证明检测确实发生在采样之前；94 场景代码进内容指纹、
+  95 G7 字幕三态、96 G8 黑帧结构化、97 intake --check 只读。
+- `references/script-index.md` 的断言清单补 91–97。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `python skills/video-studio/scripts/selfcheck.py` | `PASS 97 / FAIL 0 / SKIP 0` |
+| `python tools/ci_check.py -v` | `PASS 15 / FAIL 0 / SKIP 0`（含「断言条数一致」与 npm pack 卫生） |
+| `python -m ruff check .` | 全绿 |
+| `node tools/plugin_entry_check.mjs` | PASS（provider 注册 + list/get） |
+| `python skills/video-studio/scripts/webengine.py --selftest` | `36 项 PASS`（含改后的 boot 守卫与空窗口拒绝） |
+| `python tools/footage_selftest.py` | `PASS 7 / FAIL 0` |
+| `python tools/golden_frames.py --check` / `--compose --check` | 横竖屏金帧与 10 类构图基线全部 OK |
+| 互斥用例 | 深蓝+明亮活泼 / 暖纸+深色 / 深蓝+avoid 深色 / 暖纸+avoid 浅色 均在采样前报错；深蓝+深色、暖纸+明亮活泼、单独深蓝、单独明亮活泼 照常出 3 个候选 |
+| 「深蓝」10 连跑 | 10/10 成功（只写配色时不受影响，README 的 10/10 说法仍成立） |
+
+---
+
 ## 2.7.0 — hybrid 默认形态改为「素材打底 + 小面积叠加」，并加素材预算 / F8 门禁（2026-11-20）
 
 > 起因是一次真实事故：6 分 25 秒的片子在问诊里答了 hybrid，产线路由却仍指向「素材段 + 图文段按段拼接」，

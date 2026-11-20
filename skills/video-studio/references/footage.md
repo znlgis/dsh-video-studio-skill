@@ -83,7 +83,7 @@
    --stage probe 会打印建议值，直接粘进 sources[]。
 4. **license_note 与 credit.text 是交付条件**（F5），缺了直接 fail。
 
-## 2. 八个阶段
+## 2. 十个阶段（`--stage all` 实际跑 9 个：`locate` 是准备阶段，要单跑）
 
 ```bash
 python <SKILL_DIR>/scripts/footage.py --footage footage.json --work work --out out/film.mp4 --stage all

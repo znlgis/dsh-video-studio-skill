@@ -485,8 +485,17 @@ def transcribe(media, work, *, model="small", lang="zh", force=False,
     out = Path(work) / "transcripts" / (key + ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists() and not force:
-        log("  [skip] 复用转写 %s" % out.name)
-        return json.loads(out.read_text(encoding="utf-8"))
+        # 只在"真的转写过"时复用。以前 enabled:false 的跳过记录也走同一路径缓存，
+        # 于是第一次用 --allow-missing-asr 跳过之后，装了 faster-whisper 也不会重转——
+        # 用户以为转写在跑，其实一直在复用一条"没转"的记录。
+        try:
+            cached = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if isinstance(cached, dict) and cached.get("enabled") is not False:
+            log("  [skip] 复用转写 %s" % out.name)
+            return cached
+        log("  [asr] 旧缓存是跳过记录（enabled=false），本次重新转写")
     try:
         import faster_whisper  # noqa: F401
         has_fw = True

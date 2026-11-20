@@ -112,7 +112,7 @@ QUESTIONS = (
         ],
         "hint": "自己画 = 零素材线（design.json 定外观，可提案）；网上素材剪辑 = footage 线"
                 "（契约是 footage.json，提案层不适用）；两者结合有三种形态：素材打底 + 小面积叠加"
-                "（compose.py，默认推荐，自绘 <=15%）、按段拼接（素材段 + 图文段）、整屏卡片覆盖"
+                "（compose.py，默认推荐，自绘目标 <=15%，机器审计 warn 20% / fail 30%）、按段拼接（素材段 + 图文段）、整屏卡片覆盖"
                 "（基本不该用，素材会被遮掉）。别默认按段拼——实测整屏卡片会被判割裂。"
                 "题材写好后加 --topic 或跑 --recommend，会给出推荐值与理由。",
     },
@@ -250,7 +250,7 @@ MODE_ROUTES = {
 # 本身就独立成篇"的题材。
     MODE_HYBRID: ("素材打底 + 小面积叠加（形态 3，默认）",
                   "footage.py --stage all 出底片与混音 -> 写 overlay.json（只在必要处叠小面积信息）"
-                  " -> compose.py --stage all 叠层 + 字幕 + 响度归一（自绘面积默认 <=18%，超限会拦）"),
+                  " -> compose.py --stage all 叠层 + 字幕 + 响度归一（自绘面积目标 <=15%；机器审计 warn 20% / fail 30%，超限会拦）"),
 }
 
 # 题材 -> 制作方式的**推荐**词表。只影响推荐，不限制选择。
@@ -387,7 +387,7 @@ def _next_steps(mode, brief, work, form=3):
                     "拼之前跑 matchstyle.py 把图文段配色/画幅锚到素材上；再 ffmpeg concat"
                     "（两段拼接必然有风格断层，先看 references/hybrid-overlay.md §0 的取舍）"]
         return [footage,
-                "然后写 overlay.json（素材打底 + 只在必要处叠小面积信息，自绘面积 <=18%），再跑：" + overlay,
+                "然后写 overlay.json（素材打底 + 只在必要处叠小面积信息，自绘面积目标 <=15%，机器审计 warn 20% / fail 30%），再跑：" + overlay,
                 "默认走形态 3：素材就是画面，不需要 propose / matchstyle。\n"
                 "  若内容需要整段独立成篇的图文（数据/流程），重跑 intake.py --finalize --hybrid-form 1"]
     return [propose]
@@ -697,7 +697,11 @@ def main(argv=None):
         data["brief"] = brief_text(data)
         data["mode"] = mode_decision(data)
         data["status"] = "complete" if (not miss and str(data.get("answers", {}).get("topic") or "").strip()) else "draft"
-        save(a.work, data)
+        # --check 的契约是"只校验"（docstring / SKILL 都这么写）：以前这里无条件 save，
+        # 于是"只读检查"会创建并改写 intake.json，连 mode/status 一起覆盖。
+        # 只有用户显式带了 --set / --defaults（本次确实要写盘）才落盘；否则 check 模式零写入。
+        if not a.check or a.set or a.defaults:
+            save(a.work, data)
 
         if a.check:
             if data["status"] != "complete":

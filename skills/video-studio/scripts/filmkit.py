@@ -3009,6 +3009,7 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
             _pix_th = max(0.012, min(0.10, _luma * 0.45))
     except Exception:                                       # noqa: BLE001
         _pix_th = 0.10
+    nb = None
     nb = detect_black(path, pix_th=_pix_th)
     if nb is None:
         warns.append("长黑帧检测未执行（ffmpeg blackdetect 失败），本项不能当作通过")
@@ -3057,4 +3058,7 @@ def qa_report(path, expect_frames=None, ref_png=None, ref_sec=None, ref_img=None
             warns.append("没有找到 sub.srt（或它是空的），字幕条数门禁本次未执行")
         elif got != int(expected_subtitles):
             errors.append("字幕条数 %d != 剧本句数 %d（有字幕被静默丢弃）" % (got, expected_subtitles))
-    return dict(errors=errors, warnings=warns, probe=pr, loudness=lo, quality=quality)
+    # black_segments 是结构化字段（None=检测没执行 / int=首尾之外的长黑帧段数）。
+    # 门禁 G8 必须读它：靠 warnings 里的中文措辞判断会把"没查"和"查出黑帧"混成一档。
+    return dict(errors=errors, warnings=warns, probe=pr, loudness=lo, quality=quality,
+                black_segments=nb)

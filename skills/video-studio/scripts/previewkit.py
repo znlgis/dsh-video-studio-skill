@@ -110,7 +110,7 @@ AUDIO_SR = 48000
 # 会把每一帧都判成"尺寸不符"，竖屏提案根本出不来（实测 career 一次：propose.py
 # 不接受 --layout 就算绕过去了，出来的静帧仍是横屏——设计评审看的是错的东西）。
 try:
-    import layoutkit as _LK                        # noqa: PLC0415（导入期定死）
+    import layoutkit as _LK                        # noqa: PLC0415  # 导入期定死（延迟到模块半途会拿不到 profile）
     CANVAS = (int(_LK.W), int(_LK.H))
 except Exception:                                  # noqa: BLE001 —— 只读旁路
     CANVAS = (1920, 1080)

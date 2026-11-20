@@ -1269,7 +1269,7 @@ def _check_qa_window(t0, t1, step):
             "时每段文字最多被采到 1 个点，该判据永远不可能触发（等于没检查）。"
             "整片扫描请用 step<=0.5；长片可分段多次调用。"
             % (s, QA_BRIEF_S, QA_BRIEF_S, QA_BRIEF_S))
-    if b is not None and b < a:
+    if b is not None and b <= a:
         raise ValueError(
             "文字质检区间非法：t1=%.3f < t0=%.3f。以前这种空扫描会返回全 0 并让 CLI exit 0，"
             "看起来像「没有任何文字缺陷」。" % (b, a))

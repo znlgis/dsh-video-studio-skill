@@ -120,10 +120,12 @@ def load_overlay(path):
     """读并校验 overlay.json。字段不合法直接 SystemExit（退出码 2 语义）。"""
     spec = _load_json(path)
     if not isinstance(spec, dict):
-        raise SystemExit("[compose] overlay.json 读不到或不是对象：%s" % path)
+        log("[compose] overlay.json 读不到或不是对象：%s" % path)
+        raise SystemExit(2)
     layers = spec.get("layers") or []
     if not isinstance(layers, list):
-        raise SystemExit("[compose] overlay.layers 必须是数组")
+        log("[compose] overlay.layers 必须是数组")
+        raise SystemExit(2)
     bad = []
     for i, ly in enumerate(layers):
         if not isinstance(ly, dict):
@@ -138,7 +140,8 @@ def load_overlay(path):
     if bad:
         for b in bad:
             log("  [契约错误] " + b)
-        raise SystemExit("[compose] overlay.json 不合法（见上）")
+        log("[compose] overlay.json 不合法（见上）")
+        raise SystemExit(2)
     spec["layers"] = layers
     return spec
 
@@ -394,7 +397,16 @@ def st_compose(footage, work, out, spec, args):
         if not p.exists():
             raise SystemExit("[compose] 缺 %s（先跑 --stage silent/audio）" % p)
     tl = _load_json(work / "timeline.json") or {}
-    layers = [ly for ly in resolve_windows(spec, tl) if _layer_png(ly, args.root).exists()]
+    # 缺图层的 png 不能静默丢弃：那样"写错路径的那一层"既不报错、也不进审计、成片里少了东西
+    # 没人知道。契约错误统一 exit 2（与 docstring 承诺一致），用户改路径就行。
+    resolved = resolve_windows(spec, tl)
+    missing = [(ly.get("id"), _layer_png(ly, args.root)) for ly in resolved
+               if not _layer_png(ly, args.root).exists()]
+    if missing:
+        for _mid, _p in missing:
+            log("  [契约错误] 图层 %s 的 png 不存在：%s" % (_mid, _p))
+        raise SystemExit(2)
+    layers = resolved
     # 叠之前先算预算：叠多了就是"整屏卡片"，合成阶段是最后一道能拦住它的地方
     _vw = int((footage.get("video") or {}).get("width") or 1920)
     _vh = int((footage.get("video") or {}).get("height") or 1080)
@@ -541,8 +553,12 @@ def main(argv=None):
                 log("[compose] 质检未过（见上）")
                 return rc
     except SystemExit as e:
-        log(str(e))
-        return 1
+        # 保留契约错误的退出码 2（见 docstring：0 成功 / 1 失败 / 2 契约错误）。
+        # 以前一律 return 1，调用方按退出码区分"参数写错"与"跑挂了"永远失败。
+        code = e.code if isinstance(e.code, int) else 1
+        if not isinstance(e.code, int) and e.code is not None:
+            log(str(e.code))
+        return code
     log("完成：%s" % args.out)
     return 0
 

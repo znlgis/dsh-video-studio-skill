@@ -84,8 +84,11 @@ async function main() {
   check(provider && typeof provider.get === "function", "provider 必须实现 get(candidate, options)");
 
   const candidates = await provider.list({});
-  check(Array.isArray(candidates) && candidates.length === 1, "list() 必须返回 1 个候选（skills/ 下只有 video-studio）");
-  const candidate = candidates[0];
+  check(Array.isArray(candidates) && candidates.length >= 1, "list() 必须返回至少 1 个候选（skills/ 下的技能目录）");
+  // 断言"包含 video-studio"，而不是"恰好 1 个"：入口是枚举 skills/ 的通用 provider，
+  // 将来加第二个技能/包里多一个合法目录时插件正常，这条冒烟不该红（失败信息会误导成入口坏了）。
+  const candidate = (candidates || []).find((c) => c && c.name === SKILL_NAME);
+  check(Boolean(candidate), "list() 里必须包含 " + SKILL_NAME + "（实际：" + (candidates || []).map((c) => c && c.name).join(" / ") + "）");
   check(candidate.name === SKILL_NAME, "候选 name 必须是 " + SKILL_NAME + "（收到 " + candidate.name + "）");
   check(typeof candidate.description === "string" && candidate.description.length > 0, "候选必须带非空 description");
   check(candidate.rank === BUNDLED_SKILL_RANK, "候选 rank 必须是 " + BUNDLED_SKILL_RANK + "（打包技能根的标准优先级）");

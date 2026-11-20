@@ -212,6 +212,10 @@
     },
     "music": {
      "type": "object"
+    },
+    "trim_silence": {
+     "type": "boolean",
+     "description": "逐句 TTS 后裁掉尾部静音（footage.py st_tts 真实读取；默认 true）"
     }
    }
   },

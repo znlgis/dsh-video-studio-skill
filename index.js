@@ -169,8 +169,6 @@ function createBundledProvider(ctx) {
   };
 }
 
-/** 双引号标量里的转义序列（\uXXXX 等）。 */
-const ESCAPED_UNICODE = /\\u([0-9A-Fa-f]{4})|\\x([0-9A-Fa-f]{2})/g;
 /** 双引号标量里的单字符转义。 */
 const SIMPLE_ESCAPES = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "0": "\0", '"': '"', "\\": "\\", "/": "/" };
 
@@ -181,11 +179,35 @@ const SIMPLE_ESCAPES = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "
  * @returns 还原后的字符串。
  */
 function unescapeDoubleQuoted(text) {
-  const unicode = text.replace(ESCAPED_UNICODE, (whole, hex4, hex2) => {
-    const code = parseInt(hex4 || hex2, 16);
-    return Number.isFinite(code) ? String.fromCharCode(code) : whole;
-  });
-  return unicode.replace(/\\(.)/g, (whole, ch) => (Object.hasOwn(SIMPLE_ESCAPES, ch) ? SIMPLE_ESCAPES[ch] : whole));
+  // 必须**单趟从左到右**扫：先做 \\uXXXX 替换再处理反斜杠的写法有个真 bug——
+  // YAML 里的 "\\\\u0041"（字面量 \\u0041）会先被 \\u 规则命中变成 \\A，再被单字符规则吃掉，
+  // 结果既不是字面量也不是 \u0041。逐字符消费就天然正确：遇到 \\\\ 先吃掉转义反斜杠，
+  // 后面的 u0041 就是普通文本，不会再被当成一次转义。
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const next = text[i + 1];
+    if (next === "u" || next === "x") {
+      const hexLen = next === "u" ? 4 : 2;
+      const hex = text.slice(i + 2, i + 2 + hexLen);
+      if (hex.length === hexLen && /^[0-9A-Fa-f]+$/.test(hex)) {
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 1 + hexLen;
+        continue;
+      }
+    }
+    if (next !== undefined && Object.hasOwn(SIMPLE_ESCAPES, next)) {
+      out += SIMPLE_ESCAPES[next];
+      i += 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /**
@@ -248,7 +270,9 @@ function parseFrontmatterScalars(yaml) {
  * @returns 解析结果；不合规时返回 undefined。
  */
 export function parseSkillFile(raw) {
-  const text = String(raw ?? "");
+  // 先剥 UTF-8 BOM：Windows 编辑器（记事本"UTF-8 带 BOM"）保存过的 SKILL.md 会以 \uFEFF 开头，
+  // 不剥的话 startsWith("---") 判负，整个技能被判"缺 frontmatter"并静默跳过。
+  const text = String(raw ?? "").replace(/^\uFEFF/, "");
   if (!text.startsWith("---")) return undefined;
   const lines = text.split("\n");
   if (lines[0].replace(/\r$/, "") !== "---") return undefined;

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.7.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.7.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
@@ -28,7 +28,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 | `holds` 写成拼写错误却静默失效 | `filmcheck.py` 执行 film.json 契约（接进 `ci_check` 第 12 项）；`schemas/film.schema.json` 供人和编辑器读字段（不做校验，只有两个测试读它核对枚举） |
 | 机器替你选风格、你从头到尾没参与 | **提案优先**：`propose.py` 先出 N 个候选（各带静帧联系表 + 设计距离），人 `--confirm` 后才冻结 `design.json` |
 | 每个视频都差不多 | 设计 DSL 现场采样（每次新 nonce）+ 候选两两 ≥2 维不同 + 底色色相分叉 + **片间去重台账** |
-| 外观只能从几套模板里挑 | 没有内置风格表：配色是连续色相空间、母题/转场/缓动/版式/字幕全字段开放，且必须过 `theme_lint` 与 G13 剪影门禁 |
+| 外观只能从几套模板里挑 | 没有内置风格表：配色是连续色相空间、母题/转场/缓动/版式/字幕全字段开放，且候选要过 `theme_lint` 对比度体检（G13 剪影可区分是仓库离线门禁，CI 与 selfcheck 第 55 条守着判据） |
 
 ## 效果：同一个 brief，两次就是两部不同的片（可复现）
 
@@ -60,7 +60,7 @@ python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科
 
 **画面长什么样，由设计决定而不是由"第几套模板"决定**：10 类构图（hero / statement / list / stat /
 compare / process / quote / chapter / chart / outro）× 9 种装饰母题（默认素净、不带细线）× 6 种转场 × 连续色相配色 ×
-字幕样式 × 按章节轮换的版式——而且每个候选都要过 `theme_lint` 对比度体检和 G13 剪影可区分门禁。
+字幕样式 × 按章节轮换的版式——而且每个候选都要过 `theme_lint` 对比度体检；G13 剪影可区分是仓库离线门禁（`tools/silhouette_qa.py`，selfcheck 第 55 条守着判据）。
 
 > 证据是**命令 + 你机器上的实测输出**，不是截图：这份仓库里没有"参考成片"，
 > 因为每次采样的外观都不一样，任何一张图都只代表某一次跑的结果。
@@ -102,7 +102,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，92 条断言，不联网）
+# 2) 环境自检（可选，97 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -113,8 +113,8 @@ python <SKILL_DIR>/scripts/intake.py --work work --set "topic:AI 大模型的三
        --set duration:30s --set tone:bright-lively --set voice:female-bright --set music:upbeat
 python <SKILL_DIR>/scripts/intake.py --work work --finalize     # -> work/intake.brief.txt + 下一步命令
 
-# 4) 再出方案：3 个候选，各带静帧联系表；2 秒级、全程离线（问诊没答完会被拒）
-python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科普" --script film.json --work work
+# 4) 再出方案：3 个候选，各带静帧联系表；2 秒级、全程离线（问诊没答完会被拒；不传 --brief 时读 intake.brief.txt）
+python <SKILL_DIR>/scripts/propose.py --script film.json --work work
 
 # 5) 确认候选，冻结设计 -> work/design.json（此后渲染只认这份设计）
 python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work
@@ -193,7 +193,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（92 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（97 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/matchstyle.py      hybrid 风格对齐（素材画像 -> 图文段配色/画幅；--apply 前过 theme_lint，失败零写入）
   scripts/layoutkit.py       画布/安全区单一真源（横竖屏 profile；scenes/filmkit/designkit 共用）
@@ -288,14 +288,14 @@ python tools/ci_check.py -v     # 15 项：py 语法（含 tools/，SyntaxWarnin
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**92 条**断言）。
+查的是"技能本身还能不能出片"（**97 条**断言）。
 
 三条产线级自检（都要 ffmpeg，在 `ci.yml` 的 skill job 里跑）：
 
 ```bash
 python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F8 全链路
 python tools/matchstyle_selftest.py   # hybrid：素材画像 -> 图文段配色，含"左右黑带"回归
-python tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
+node tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
 ```
 
 `plugin_entry_check.mjs` 是**DSH 兼容性的哨兵**：DSH 换技能注册接口时，插件会静默降级成"一行空插件"，

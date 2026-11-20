@@ -3644,6 +3644,194 @@ def t_source_budget_and_f8():
     assert "--allow-sparse-sources" in fp_src, "footage.py 缺 --allow-sparse-sources 逃生口"
     assert "source_budget" in fp_src, "footage.py 没在 EDL 阶段用素材预算"
 
+def t_palette_tone_conflict():
+    """93 配色锚点与气质互斥：必须在采样前点名，而不是重采样 50 次后报"气质不满足"。"""
+    import designkit as DK
+
+    def sample(words, avoid=()):
+        return DK.sample_designs({"topic": "自检", "must_have": list(words),
+                                  "avoid": list(avoid)}, n=3, seed=20260101)
+
+    def err_of(words, avoid=()):
+        try:
+            sample(words, avoid)
+        except ValueError as e:
+            return str(e)
+        raise AssertionError("互斥约束没被拦下：%r" % (list(words) + list(avoid),))
+
+    e = err_of(["深蓝", "明亮活泼"])
+    assert "约束互斥" in e, "报错要明说约束互斥：%s" % e
+    assert "深蓝" in e and "明亮活泼" in e, "必须点名是哪两个词打架：%s" % e
+    assert "暗底" in e and "浅底" in e, "必须说清冲突在明暗上：%s" % e
+    e2 = err_of(["暖纸", "深色"])
+    assert "暖纸" in e2 and "深色" in e2, "反方向的冲突也要拦：%s" % e2
+    e3 = err_of(["深蓝"], ["深色"])
+    assert "深蓝" in e3 and "深色" in e3, "avoid 侧的冲突也要拦：%s" % e3
+    assert len(sample(["深蓝", "深色"])) == 3, "深蓝+深色 同明暗，不该被拦"
+    assert len(sample(["暖纸", "明亮活泼"])) == 3, "暖纸+明亮活泼 同明暗，不该被拦"
+    assert len(sample(["深蓝"])) == 3, "只写配色不该被拦"
+    assert len(sample(["明亮活泼"])) == 3, "只写气质不该被拦"
+    _orig = DK._make_design
+
+    def _boom(*_a, **_k):
+        raise AssertionError("互斥检测发生在采样之后（_make_design 已被调用）")
+
+    DK._make_design = _boom
+    try:
+        err_of(["深蓝", "明亮活泼"])
+    finally:
+        DK._make_design = _orig
+    return "三类互斥都在采样前点名；同明暗组合不受影响"
+
+
+def _qa_probe_fixture():
+    """_qa_gates 用的最小合法 probe（G4 要分辨率/帧率/音轨/时长）。"""
+    return {"format": {"duration": "10.0"}, "streams": [
+        {"codec_type": "video", "width": 1920, "height": 1080,
+         "r_frame_rate": "30/1", "codec_name": "h264"},
+        {"codec_type": "audio", "codec_name": "aac"}]}
+
+
+def _gate_ledger_for_g7():
+    """造一个空 GateLedger + 只含 scenes 的 timeline；给 G7/G8 用例共用。"""
+    import gates as GT
+    import tempfile
+    work = tempfile.mkdtemp(prefix="sc_g7_")
+    lg = GT.GateLedger(work, {"title": "t"}, scenes_path="")
+    # _qa_gates 需要 frames/fps（G4 按它算期望时长）；这里给一段够长的干净视频规格。
+    tl = {"frames": 300, "fps": 30.0,
+          "scenes": [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]}
+    return work, lg, tl
+
+
+def _gates_by_id(lg):
+    return {str(i.get("id")): i for i in lg.items}
+
+
+def t_scenes_in_content_hash():
+    """94 场景代码进内容指纹：不传 --scenes 时也必须算进去（否则改画面旧签核不失效）。
+
+    真事故：render.py 把 `a.scenes`（原始 --scenes 值，缺省空串）传给 GateLedger，
+    而真正生效的路径由 _resolve_scenes 回退得出。于是默认用法下 inputs.scenes 恒为
+    "missing"、contentHash 不含场景代码——"改了画面代码旧签核自动失效"被静默绕过。
+    这条钉住：解析后的路径必须进指纹，且改一行内容指纹必须变。
+    """
+    import gates as GT
+    import tempfile
+    work = tempfile.mkdtemp(prefix="sc_hash_")
+    sp = os.path.join(work, "scenes.py")
+    with open(sp, "w", encoding="utf-8") as fh:
+        fh.write("def draw_frame(*a, **k):\n    return None\n")
+    script = {"title": "t", "lines": []}
+    lg1 = GT.GateLedger(work, script, scenes_path=sp, script_path="")
+    h1 = lg1.content_hash
+    assert lg1.input_fingerprints()["scenes"] not in ("missing", ""), \
+        "解析后的 scenes 路径没进指纹：%r" % (lg1.input_fingerprints(),)
+    with open(sp, "a", encoding="utf-8") as fh:
+        fh.write("# 改一行\n")
+    lg2 = GT.GateLedger(work, script, scenes_path=sp, script_path="")
+    assert lg2.content_hash != h1, "改了 scenes.py 内容，contentHash 没变（旧签核会继续有效）"
+    # 空路径仍记 missing（没有场景代码时别编一个指纹出来）
+    lg3 = GT.GateLedger(work, script, scenes_path="")
+    assert lg3.input_fingerprints()["scenes"] == "missing", "没有 scenes 时应记 missing"
+    return "scenes 内容进指纹且可失效；无 scenes 记 missing"
+
+
+def t_g7_subtitle_tristate():
+    """95 G7 字幕条数三态：文件不存在=skipped / 存在但空=fail / 正常=pass。
+
+    真事故：sub.srt 存在但为空（字幕全丢）时 got==0 落进 else，记成
+    skipped 且 detail 写"没找到 sub.srt"——文件明明在，结论在撒谎；
+    --strict-gates 之外没人能拦。现在三态拆开，空文件必须 fail。
+    """
+    import render as R
+    work, lg, tl = _gate_ledger_for_g7()
+    _probe = _qa_probe_fixture()
+    # 1) 文件不存在 -> skipped
+    R._qa_gates(lg, {"warnings": [], "probe": _probe}, None, tl, work)
+    assert _gates_by_id(lg)["G7"]["status"] == "skipped", \
+        "没有 sub.srt 应记 skipped：%r" % (_gates_by_id(lg).get("G7"),)
+    # 2) 存在但为空 -> fail
+    open(os.path.join(work, "sub.srt"), "w", encoding="utf-8").close()
+    work2, lg2, tl2 = _gate_ledger_for_g7()
+    open(os.path.join(work2, "sub.srt"), "w", encoding="utf-8").close()
+    R._qa_gates(lg2, {"warnings": [], "probe": _probe}, None, tl2, work2)
+    g7 = _gates_by_id(lg2)["G7"]
+    assert g7["status"] == "fail", "空 sub.srt（字幕全丢）必须 fail，实际 %r" % (g7["status"],)
+    assert "为空" in str(g7.get("detail")), "detail 要说清是空文件而不是没找到：%r" % g7.get("detail")
+    # 3) 条数与句数相等 -> pass
+    work3, lg3, tl3 = _gate_ledger_for_g7()
+    with open(os.path.join(work3, "sub.srt"), "w", encoding="utf-8") as fh:
+        fh.write("1\na\n\n2\nb\n\n3\nc\n\n")
+    R._qa_gates(lg3, {"warnings": [], "probe": _probe}, None, tl3, work3)
+    assert _gates_by_id(lg3)["G7"]["status"] == "pass", \
+        "3/3 条字幕应 pass：%r" % (_gates_by_id(lg3).get("G7"),)
+    return "不存在=skipped / 空=fail / 齐=pass"
+
+
+def t_g8_black_frames_structured():
+    """96 G8 黑帧读结构化字段：没执行=skipped / 真检测到=fail / 0 段=pass。
+
+    真事故：_qa_gates 靠 warnings 里有没有"黑帧"两个字判断，于是
+    "检测未执行"和"检测到 2 段"被同一个分支记成 skipped——真发现长黑帧也写不进
+    fail，这道门禁等于不存在。现在 qa_report 返回 black_segments，三态分开。
+    """
+    import render as R
+    work, lg, tl = _gate_ledger_for_g7()
+    _probe = _qa_probe_fixture()
+    # 1) 字段缺失 = 老格式/没执行 -> skipped
+    R._qa_gates(lg, {"warnings": [], "probe": _probe}, None, tl, work)
+    assert _gates_by_id(lg)["G8"]["status"] == "skipped", \
+        "没有 black_segments 应记 skipped：%r" % (_gates_by_id(lg).get("G8"),)
+    # 2) 检测到黑帧 -> fail
+    work2, lg2, tl2 = _gate_ledger_for_g7()
+    R._qa_gates(lg2, {"warnings": ["首尾之外检测到 2 段长黑帧"], "probe": _probe,
+                      "black_segments": 2}, None, tl2, work2)
+    assert _gates_by_id(lg2)["G8"]["status"] == "fail", \
+        "检测到黑帧必须 fail：%r" % (_gates_by_id(lg2).get("G8"),)
+    # 3) 0 段 -> pass
+    work3, lg3, tl3 = _gate_ledger_for_g7()
+    R._qa_gates(lg3, {"warnings": [], "probe": _probe, "black_segments": 0}, None, tl3, work3)
+    assert _gates_by_id(lg3)["G8"]["status"] == "pass", \
+        "0 段长黑帧应 pass：%r" % (_gates_by_id(lg3)["G8"],)
+    # 4) qa_report 必须真的返回这个字段（否则门禁永远读不到）
+    import inspect
+    import filmkit as K
+    assert "black_segments" in inspect.getsource(K.qa_report), \
+        "qa_report 没返回 black_segments，G8 永远只能 skipped"
+    return "没执行=skipped / 2 段=fail / 0 段=pass"
+
+
+def t_intake_check_readonly():
+    """97 intake --check 只读：不创建/不改写 intake.json，退出码 2 = 还有没答的。
+
+    真事故：--check 分支写在 save() 之后，于是"只校验"会创建/改写 intake.json，
+    连 mode/status 一起覆盖。只读语义被打穿（CI 里跑一次就改盘）。
+    """
+    import subprocess
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory() as d:
+        work = os.path.join(d, "work")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        p = subprocess.run([sys.executable, os.path.join(here, "intake.py"),
+                            "--work", work, "--check"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, cwd=d)
+        assert p.returncode == 2, "没答完时 --check 必须退 2，实际 %r" % (p.returncode,)
+        assert not os.path.exists(os.path.join(work, "intake.json")), \
+            "--check 不该创建 intake.json（只读语义被打穿）"
+        # 显式 --set 是"要写盘"的意思，check 模式下照样落盘
+        p2 = subprocess.run([sys.executable, os.path.join(here, "intake.py"),
+                             "--work", work, "--check", "--set", "topic:自检"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", env=env, cwd=d)
+        assert p2.returncode == 2, "只答一题仍应退 2"
+        assert os.path.exists(os.path.join(work, "intake.json")), \
+            "--check 带 --set 时应落盘（显式写入）"
+    return "只读 check 零写入；带 --set 才落盘"
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3737,6 +3925,11 @@ CASES = [
     ("90 包装模板帧纯度（留原件 + 返回副本）", t_scenes_hybrid_template_purity),
     ("91 hybrid 默认形态 = 素材打底 + 小面积叠加（不退回图文卡片）", t_hybrid_default_form3),
     ("92 素材预算与 F8（2 源撑 6 分钟必须 fail）", t_source_budget_and_f8),
+    ("93 配色锚点与气质互斥（采样前点名，不靠重试）", t_palette_tone_conflict),
+    ("94 场景代码进内容指纹（改画面旧签核必须失效）", t_scenes_in_content_hash),
+    ("95 G7 字幕三态（空 sub.srt 必须 fail 而不是 skipped）", t_g7_subtitle_tristate),
+    ("96 G8 黑帧结构化（检测到就必须 fail，不许记 skipped）", t_g8_black_frames_structured),
+    ("97 intake --check 只读（不写 intake.json）", t_intake_check_readonly),
 ]
 
 
