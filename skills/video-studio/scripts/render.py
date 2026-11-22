@@ -1926,6 +1926,51 @@ def _word_gate(lg, tl, work):
 # 真实标定（qavmaf 作者实测，参考帧含字幕与片头片尾淡入淡出）：
 #   模板片 crf17 VMAF 97.24(pass) / crf30 95.74(pass+warning) / 二次编码坏片 29.45(fail)
 # 想按片收紧或放宽就写 film.json 的 qa.vmaf.pass / qa.vmaf.warn，会透传给 qavmaf。
+def _qa_text_layout_gate(lg, tl, scenes_mod, script):
+    """G13 版式文字冲突：任意两行字的落笔矩形是否相交 / 是否越出安全区。
+
+    为什么这是一个**独立**门禁而不是塞进 G9：G9 看的是成片帧上的亮度/位移异常，
+    "两行字叠在一起"在帧上只是"有一块更黑的字"，既不是闪烁也不是空窗——实测整片压字，
+    G4..G12 全绿。这条与 qa_text_safe（只看字幕）互补：那个量字幕，这个量版式。
+    """
+    qx = _try_module("qatext")
+    if qx is None:
+        lg.skip("G13", "版式文字冲突（压盖/越界）", "没有 qatext.py（拷一份进来才能查版式）")
+        return None
+    if scenes_mod is None:
+        lg.skip("G13", "版式文字冲突（压盖/越界）",
+                "web 引擎/缺 scenes.py：没有文字框可采集（页面层请用 webengine textqa）")
+        return None
+    if not hasattr(scenes_mod, "text_qa_start"):
+        lg.skip("G13", "版式文字冲突（压盖/越界）",
+                "scenes.py 是旧版（没有 text_qa_start 采集钩子），本片没查")
+        return None
+    rep = qx.scan(tl, scenes_mod, script, safe=K.SAFE, sub_band=K.SUB_BAND)
+    res = qx.gate_result(rep)
+    st, detail = res["status"], res["detail"]
+    if st == "fail":
+        lg.fail("G13", "版式文字冲突（压盖/越界）", detail)
+        for e in (res.get("values") or {}).get("errors") or []:
+            print("   [FAIL][G13]", e)
+    elif st == "skipped":
+        lg.skip("G13", "版式文字冲突（压盖/越界）", detail)
+        # skipped 在交付报告里和 pass 长得像，这里必须额外喊一声：本片**没查**版式。
+        print("   [WARN][G13] 版式冲突本次未检查（%s）——skipped != 通过" % detail)
+        print("             想查：--scenes 指向新版 scenes.py（含 text_qa_start 采集钩子）")
+    else:
+        lg.ok("G13", "版式文字冲突（压盖/越界）", detail)
+    for w in rep.get("warnings") or []:
+        print("   [WARN][G13]", w)
+    try:
+        os.makedirs(os.path.join(str(work), "qa"), exist_ok=True)
+        with open(os.path.join(str(work), "qa", "text_layout.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rep, fh, ensure_ascii=False, indent=1)
+    except Exception:                                       # noqa: BLE001
+        pass
+    return rep
+
+
 def _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=""):
     """全片 VMAF/SSIM 门禁：参考帧由场景函数实时渲染，与成片逐帧比较。
 
@@ -2174,6 +2219,8 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
     if lg is not None:
         _qa_gates(lg, rep, deep, tl, work)
         # 全片 VMAF/SSIM 放在最后跑：它最贵（约 1.2× 实时），前面有 fail 时可省下这十分钟。
+
+        _qa_text_layout_gate(lg, tl, scenes_mod, script)
         _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=vmaf_mode)
         # ASR 回读最便宜（模板片 6 s），放最后跑：前面已经 fail 的片没必要再花这 6 秒。
         _qa_asr_gate(lg, film, work, script, tl, cfg=((script or {}).get("qa") or {}))
@@ -2602,6 +2649,9 @@ def main():
     ap.add_argument("--script", default="film.json")
     ap.add_argument("--scenes", default="",
                     help="场景绘制模块（默认依次找：<剧本目录>/scenes.py、本技能内置的 scenes.py）")
+    ap.add_argument("--strict-scenes", action="store_true",
+                    help="场景模块必须来自 --scenes 或剧本同目录；悄悄回落到技能内置渲染器时报错"
+                         "（默认只打印来源与指纹，不阻断）")
     ap.add_argument("--out", default="out/film.mp4")
     ap.add_argument("--work", default="work")
     ap.add_argument("--stage", default="all", choices=STAGES)
@@ -2848,6 +2898,25 @@ def main():
                                  % (scenes_path, e)) from e
             print("   [WARN] 场景模块加载失败（%s），跳过场景函数参考帧: %s" % (scenes_path, e))
             return None
+        # P0-4：把**实际用到的**场景模块路径与内容指纹打出来。
+        # 实测事故：改了工程目录的 scenes.py 却没生效 —— 因为 film.json 在子目录里，
+        # 解析器回落到技能内置版，画面还是旧版式，而日志里一个字都没提。
+        _sp = os.path.abspath(scenes_path)
+        print("   [scenes] %s  sha1=%s%s" % (
+            _sp, _file_sha1(scenes_path)[:8],
+            "（技能内置）" if _sp == os.path.abspath(_builtin_scenes()) else ""))
+        if getattr(a, "strict_scenes", False) and _sp == os.path.abspath(_builtin_scenes()):
+            _cand = os.path.join(os.path.dirname(os.path.abspath(a.script)), "scenes.py")
+            if os.path.exists(_cand) and os.path.abspath(_cand) != _sp:
+                raise SystemExit(
+                    "[strict-scenes] 剧本目录有 scenes.py（%s），但实际加载的是技能内置渲染器。\n"
+                    "  为什么这是错误：内置版不含你刚改的版式，画面会和你以为的不一样。\n"
+                    "  怎么办：把 film.json 与 scenes.py 放在同一目录，或显式 --scenes %s"
+                    % (_cand, _cand))
+            raise SystemExit(
+                "[strict-scenes] 实际加载的是技能内置渲染器（%s）。\n"
+                "  本开关的语义就是轮不到内置版；请显式 --scenes，或在剧本同目录放 scenes.py。"
+                % _sp)
         if not hasattr(mod, "draw_frame"):
             if strict:
                 raise SystemExit("[场景模块错误] %s 没有 draw_frame(scene, t_local, dur, t_global, script, frame)"

@@ -3832,6 +3832,102 @@ def t_intake_check_readonly():
     return "只读 check 零写入；带 --set 才落盘"
 
 
+def t_g13_layout_conflict_pure():
+    """G13 纯函数：相交必报、分离不报、hud 豁免、越界必报。
+
+    这条守的是**判据本身**：如果判据写反了（比例算错、把 hud 也算进去），
+    门禁会变成"要么不报、要么全报"，两种都比没有更糟。
+    """
+    import qatext
+    e, _ = qatext.find_conflicts([("aaa", 0, 0, 100, 40, 20, "body"),
+                                  ("bbb", 10, 10, 90, 50, 20, "body")])
+    assert e, "两行字大面积重叠必须报错"
+    e2, _ = qatext.find_conflicts([("aaa", 0, 0, 100, 40, 20, "body"),
+                                   ("bbb", 0, 200, 100, 240, 20, "body")])
+    assert not e2, "上下分离的两行不该报"
+    e3, _ = qatext.find_conflicts([("aaa", 0, 0, 100, 40, 20, "hud"),
+                                   ("bbb", 10, 10, 90, 50, 20, "body")])
+    assert not e3, "hud 角色设计上允许与正文重叠（品牌名压正文），不该报"
+    e4, _ = qatext.find_conflicts([("aaa", 1800, 0, 2000, 40, 20, "body")],
+                                  safe=(96, 58, 1824, 974))
+    assert e4, "越出安全区必须报"
+    _e5, w5 = qatext.find_conflicts([("aaa", 0, 850, 200, 900, 20, "body")],
+                                    sub_band=(0, 872, 1920, 1030))
+    assert w5 and not _e5, "正文压进字幕带必须给 warning（而不是 error）"
+    return "相交/分离/hud 豁免/越界/字幕带 5 个判据都对"
+
+
+def t_scenes_text_capture():
+    """G13 采集端：scenes.py 必须提供 text_qa_start/take，且能采到真实落笔矩形。
+
+    为什么这条重要：采集钩子是门禁的**唯一数据来源**。删掉它，G13 会降级成
+    skipped（"旧版 scenes.py"）—— 而 skipped 在交付报告里看起来像"没查"，
+    用户很容易误读成没事。所以钩子本身要在自检里钉住。
+    """
+    import importlib.util as IU
+    import os as _os
+    sp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "assets", "scenes.py")
+    spec = IU.spec_from_file_location("sc_cap", sp)
+    m = IU.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    for fn in ("text_qa_start", "text_qa_take", "text_qa_role"):
+        assert hasattr(m, fn), "scenes.py 缺 %s（G13 采集钩子）" % fn
+    import designkit as DK
+    import json as _json
+    design = _json.load(open(_os.path.join(_os.path.dirname(sp), "design_fixture.json"),
+                             encoding="utf-8"))
+    plan = DK.design_to_plan(design)
+    script = {"title": "t", "lines": [], "_style": plan, "_total": 4.0}
+    scene = {"id": "cap", "scene_type": "chapter", "kicker": "模式一", "big": "模式一",
+             "start": 0.0, "dur": 4.0, "chapter": "01 · 模式一", "text": "模式一",
+             "scene_layout": "left-stack", "scene_variant": 0}
+    m.text_qa_start()
+    m.draw_frame(scene, 2.0, 4.0, 2.0, script, 60)
+    boxes = m.text_qa_take()
+    assert len(boxes) >= 1, "章节卡至少应采到章节名一个文字框，实际 %d" % len(boxes)
+    assert all(len(b) == 7 for b in boxes), "采集元组必须是 (text,x0,y0,x1,y1,size,role)"
+    roles = {b[6] for b in boxes}
+    assert "body" in roles, "正文字框必须记 body 角色（否则 G13 会把它当装饰放过）"
+    return "采集到 %d 个框，角色 %s" % (len(boxes), sorted(roles))
+
+
+def t_chapter_list_no_overlap():
+    """版式回归：章节卡与要点列表的 kicker 不许压到标题（本次实打实的返工根因）。
+
+    用 Q13 同款采集在固定设计下重渲两段，断言 0 处压盖。
+    为什么必须在自检里跑：这类"位置只差 50px"的缺陷，金帧只能告诉你像素变了，
+    说不出"变好还是变坏"。
+    """
+    import importlib.util as IU
+    import os as _os
+    import json as _json
+    import filmkit as K
+    import qatext
+    import designkit as DK
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    sp = _os.path.join(here, "..", "assets", "scenes.py")
+    spec = IU.spec_from_file_location("sc_ov", sp)
+    m = IU.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    design = _json.load(open(_os.path.join(_os.path.dirname(sp), "design_fixture.json"),
+                             encoding="utf-8"))
+    plan = DK.design_to_plan(design)
+    script = {"title": "t", "lines": [], "_style": plan, "_total": 9.0}
+    tl = {"fps": 30, "scenes": [
+        {"id": "c1", "scene_type": "chapter", "kicker": "模式一", "big": "模式一",
+         "start": 0.0, "dur": 4.0, "chapter": "01 · 模式一", "text": "模式一",
+         "scene_layout": "left-stack", "scene_variant": 0},
+        {"id": "l1", "scene_type": "list", "kicker": "三条产线", "big": "三条产线",
+         "items": [{"text": "a"}, {"text": "b"}, {"text": "c"}],
+         "start": 4.0, "dur": 5.0, "chapter": "02 · 正文", "text": "三条产线",
+         "scene_layout": "left-stack", "scene_variant": 0},
+    ]}
+    rep = qatext.scan(tl, m, script, safe=K.SAFE, sub_band=K.SUB_BAND)
+    assert rep["checked"] == 2, "两段都该被检查到，实际 %d" % rep["checked"]
+    assert not rep["errors"], "版式仍有压盖：%s" % "；".join(rep["errors"][:2])
+    return "章节卡/要点列表 0 处压盖（%d 个框）" % rep["boxes"]
+
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -3930,6 +4026,9 @@ CASES = [
     ("95 G7 字幕三态（空 sub.srt 必须 fail 而不是 skipped）", t_g7_subtitle_tristate),
     ("96 G8 黑帧结构化（检测到就必须 fail，不许记 skipped）", t_g8_black_frames_structured),
     ("97 intake --check 只读（不写 intake.json）", t_intake_check_readonly),
+    ("98 G13 版式冲突判据（相交/分离/hud 豁免/越界/字幕带）", t_g13_layout_conflict_pure),
+    ("99 scenes 文字框采集钩子（G13 的数据源）", t_scenes_text_capture),
+    ("100 章节卡/要点列表不再压字（版式回归）", t_chapter_list_no_overlap),
 ]
 
 

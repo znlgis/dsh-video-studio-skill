@@ -508,8 +508,97 @@ def f7_signoff(foot, work, out, tl, edl, ctx):
                 values={"fingerprint": fp})
 
 
+# ---------------------------------------------------------------- F9
+def f9_subtitle_fit(foot, work, out, tl, edl, ctx):
+    """字幕排版门禁：每行像素宽不超安全宽、总行数 <= 2、不越底边。
+
+    为什么要它：素材线的字幕走 ASS 烧录（libass），**不是** PIL 的 draw_subtitle，
+    所以 filmkit.qa_text_safe 管不到它；而 ASS 头是 WrapStyle:2（不自动折行），
+    一句长旁白会直接横穿画面。实测 DEMO 二/三 29 句里有一半超宽，撞上叠加层，
+    而当时 F1..F8 全部 pass —— 这就是"门禁不覆盖的渲染分支"。
+    """
+    import re
+    ass = (work / "sub.ass") if hasattr(work, "name") else None
+    try:
+        ass_path = Path(work) / "sub.ass"
+    except Exception:                                          # noqa: BLE001
+        ass_path = None
+    if ass_path is None or not ass_path.exists():
+        return dict(gate="F9", status="skipped",
+                    detail="没有 work/sub.ass（字幕还没烧或不是 ASS 路线），本片没查")
+    video = foot.get("video") or {}
+    w = int(video.get("width") or 1920)
+    h = int(video.get("height") or 1080)
+    subcfg = foot.get("subtitle") or {}
+    size = int(subcfg.get("size", 46))
+    ml = int(subcfg.get("margin_l", 110))
+    mr = int(subcfg.get("margin_r", 110))
+    mv = int(subcfg.get("margin_v", max(28, int(h * 0.035))))
+    max_w = w - ml - mr
+    try:
+        import filmkit as _K
+        tw = _K.text_w
+        _fam = (subcfg.get("family") or "sans")
+        # 字号必须从 **ASS 文件里的 Style 段**读，不能从 footage.json 的 subtitle.size 读。
+        # 写端为了放下长句会**降字号**（实测 Main 从 44 降到 40），Style 里写的是降后的字号；
+        # 若门禁按 44 量，就会把每一行都判成超宽（实测连报 18 行）。
+        _styles = {}
+        for _ln in ass_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if _ln.startswith("Style:") and "," in _ln:
+                _p = _ln.split(",")
+                try:
+                    _styles[_p[0].split()[1]] = int(_p[2])
+                except (IndexError, ValueError):
+                    pass
+        if not _styles:
+            _styles = {"Main": size, "Note": int(subcfg.get("note_size", max(24, int(size * 0.62))))}
+        fonts = {k: _K.font(v, "reg", _fam) for k, v in _styles.items()}
+        max_w = int(w) - ml - mr
+    except Exception:                                          # noqa: BLE001
+        return dict(gate="F9", status="skipped",
+                    detail="没有 filmkit（量不了像素宽），本片没查")
+    bad_w, bad_rows = [], []
+    rows = 0
+    for line in ass_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("Dialogue:"):
+            continue
+        parts = line.split(",", 9)
+        if len(parts) < 10:
+            continue
+        txt = parts[9].replace("\\N", "\n").replace("\\n", "\n")
+        rows += 1
+        segs = [x for x in txt.split("\n") if x.strip()]
+        if len(segs) > 2:
+            bad_rows.append((parts[1], len(segs), txt[:18]))
+        _style = (parts[3] or "Main").strip()
+        _font = fonts.get(_style) or fonts["Main"]
+        for seg in segs:
+            wpx = tw(seg, _font)
+            if wpx > max_w:
+                bad_w.append((parts[1], int(wpx), max_w, seg[:18]))
+    if not rows:
+        return dict(gate="F9", status="skipped", detail="sub.ass 里没有字幕行")
+    if bad_w or bad_rows:
+        det = []
+        if bad_w:
+            det.append("%d 行超宽（最宽 %dpx > %dpx）：%s"
+                       % (len(bad_w), max(b[1] for b in bad_w), max_w,
+                          "；".join("%s %r" % (b[0], b[3]) for b in bad_w[:3])))
+        if bad_rows:
+            det.append("%d 条超过 2 行：%s" % (len(bad_rows),
+                                              "；".join("%s=%d行" % (b[0], b[1]) for b in bad_rows[:3])))
+        return dict(gate="F9", status="fail", detail="；".join(det),
+                    values={"too_wide": len(bad_w), "too_many_rows": len(bad_rows),
+                            "max_w_px": max_w})
+    return dict(gate="F9", status="pass",
+                detail="%d 条字幕：每行 <= %dpx、行数 <= 2（ASS 已按 filmkit.fit_sub_lines 折行）"
+                       % (rows, max_w),
+                values={"rows": rows, "max_w_px": max_w})
+
+
 GATES = [f1_edl, f2_subtitle_bleed, f3_watermark, f4_av_equal,
-         f5_provenance, f6_voice_dominance, f7_signoff, f8_source_variety]
+         f5_provenance, f6_voice_dominance, f7_signoff, f8_source_variety,
+         f9_subtitle_fit]
 
 
 # ---------------------------------------------------------------- 联系表（F7 证据）

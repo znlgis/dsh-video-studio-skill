@@ -336,41 +336,124 @@ def _ts(sec):
 def write_ass(timeline, footage, path):
     """生成 ASS 字幕（逐句对齐旁白）+ 片尾出处卡。
 
-    为什么用 ASS 而不是 SRT 交 libass：SRT 会按 PlayResY=288 排版，
-    字号要乘 3.75 才对得上，而且没法把字幕放进遮幅带。直接写 PlayRes=输出尺寸的 ASS，
-    字号就是像素、位置就是像素。
+    三条硬约束（每一条都来自真实返工）：
+      1. 换行用单反斜杠 + N（ASS 规范），ASS 头是 WrapStyle:2，不显式断行就会横穿画面；
+      2. 每行像素宽必须 <= 安全宽——判据与门禁（F9）用同一把尺子（filmkit.text_w）；
+      3. 每条字幕最多两行；ASS 的 Style 只有一个字号，所以只能**全局选一个字号**，
+         用该字号把所有句子重新折行，直到全部满足 1/2/3（逐句降字号会让 Style 对不上）。
     """
     video = footage.get("video") or {}
     w = int(video.get("width") or 1920)
     h = int(video.get("height") or 1080)
     sub = footage.get("subtitle") or {}
     size = int(sub.get("size", 46))
+    note_size = int(sub.get("note_size", max(24, int(size * 0.62))))
     margin_v = int(sub.get("margin_v", max(28, int(h * 0.035))))
-    head = ASS_HEAD.format(
-        w=w, h=h, font=sub.get("font") or "Microsoft YaHei", size=size,
-        spacing=sub.get("spacing", 1.2), outline=sub.get("outline", 2.2),
-        shadow=sub.get("shadow", 1.4), ml=int(sub.get("margin_l", 110)),
-        mr=int(sub.get("margin_r", 110)), mv=margin_v,
-        note_size=int(sub.get("note_size", max(24, int(size * 0.62)))),
-        note_mv=max(10, margin_v - int(size * 0.7)))
-    ev = []
+    ml = int(sub.get("margin_l", 110))
+    mr = int(sub.get("margin_r", 110))
+    max_w = max(240, int(w) - ml - mr)
+    safe_w = int(max_w * 0.97)      # 折行留 3% 余量：标点会被整体补到行尾
+    family = (sub.get("family") or "sans")
+    NL = chr(92) + "N"
+    try:
+        import filmkit as _K
+        _wrap = _K.wrap_cn
+        _font = _K.font
+        _tw = _K.text_w
+    except Exception:                                        # noqa: BLE001
+        _K = None
+
+    def _lines_at(text, sz, max_lines=2):
+        """按给定字号折行；行数或宽度不满足就返回 None（由调用方降字号）。"""
+        if _K is None:
+            return [text]
+        f = _font(max(14, int(sz)), "reg", family)
+        lines = _wrap(text, f, safe_w)
+        if len(lines) > max_lines:
+            return None
+        if any(_tw(x, f) > max_w for x in lines):
+            return None
+        return lines
+
     halfwidth = bool(sub.get("halfwidth_commas", True))
+    items = []
     for r in timeline["lines"]:
         text = str(r.get("sub") or r["text"])
         if halfwidth:
             text = text.replace(",", "，")
-        ev.append("Dialogue: 0,%s,%s,Main,,0,0,0,,%s"
-                  % (_ts(r["start"]), _ts(r["end"] + 0.15), text))
+        items.append((r, text))
     credit = footage.get("credit") or {}
-    if credit.get("text"):
+    ct = str(credit.get("text") or "")
+
+    gsize = int(size)
+    main_lines = None
+    while gsize >= 14:
+        trial = []
+        ok = True
+        for _r, text in items:
+            ls = _lines_at(text, gsize, 2)
+            if ls is None:
+                ok = False
+                break
+            trial.append(ls)
+        if ok:
+            main_lines = trial
+            break
+        gsize = int(gsize * 0.94)
+    if main_lines is None:
+        # 极端兜底：按 14px 折行，再按宽度硬切（宁可三行，也不让字出画）
+        gsize = 14
+        f14 = _font(14, "reg", family) if _K else None
+        main_lines = []
+        for _r, text in items:
+            base = _wrap(text, f14, safe_w) if _K else [text]
+            out2 = []
+            for seg in base:
+                while _K and seg and _tw(seg, f14) > max_w:
+                    lo, hi = 1, len(seg)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if _tw(seg[:mid], f14) <= max_w:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    out2.append(seg[:max(1, lo)])
+                    seg = seg[max(1, lo):]
+                if seg:
+                    out2.append(seg)
+            main_lines.append(out2)
+
+    ev = []
+    for (r, _text), ls in zip(items, main_lines):
+        ev.append("Dialogue: 0,%s,%s,Main,,0,0,0,,%s"
+                  % (_ts(r["start"]), _ts(r["end"] + 0.15), NL.join(ls)))
+    if ct:
+        nsize = int(note_size)
+        clines = None
+        while nsize >= 14:
+            ls = _lines_at(ct, nsize, 3)
+            if ls is not None:
+                clines = ls
+                note_size = nsize
+                break
+            nsize = int(nsize * 0.94)
+        if clines is None:
+            clines = _wrap(ct, _font(14, "reg", family), safe_w) if _K else [ct]
+            note_size = 14
         c_start = float(credit.get("at") or max(0.0, timeline["total"] - 2.6))
         c_end = float(credit.get("end") or max(c_start + 1.2, timeline["total"] - 0.4))
         ev.append("Dialogue: 0,%s,%s,Note,,0,0,0,,%s"
-                  % (_ts(c_start), _ts(c_end), str(credit["text"])))
-    Path(path).write_text(head + "\n".join(ev) + "\n", encoding="utf-8")
-    log("  [subs] %s（%d 条）" % (Path(path).name, len(ev)))
-    return {"path": str(path), "lines": len(ev)}
+                  % (_ts(c_start), _ts(c_end), NL.join(clines)))
 
+    head = ASS_HEAD.format(
+        w=w, h=h, font=sub.get("font") or "Microsoft YaHei", size=gsize,
+        spacing=sub.get("spacing", 1.2), outline=sub.get("outline", 2.2),
+        shadow=sub.get("shadow", 1.4), ml=ml, mr=mr, mv=margin_v,
+        note_size=note_size,
+        note_mv=max(10, margin_v - int(gsize * 0.7)))
+    Path(path).write_text(head + "\n".join(ev) + "\n", encoding="utf-8")
+    log("  [subs] %s（%d 条，主字幕 %dpx）" % (Path(path).name, len(ev), gsize))
+    return {"path": str(path), "lines": len(ev)}
 
 def ass_filter(path):
     """ASS 滤镜参数：用相对文件名（配合 cwd）。

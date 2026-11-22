@@ -57,6 +57,7 @@ ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright",
                        "faster_whisper"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
+                 "qatext",
                  "stylekit", "voicekit", "scenes", "scenes_demo",
                  # 门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
                  "gates", "stagewatch", "filmcheck",
@@ -80,7 +81,7 @@ MAX_FILE_BYTES = 400 * 1024
 DESC_MAX_CHARS = 400
 # 本文件的检查项数（main() 里那张 checks 表的长度）。文档与分发页写的"仓库体检 N 项"
 # 要与它一致；改这里必须同批改 CHECKS 表，否则这项自检会先失败——这是故意的。
-CI_CHECK_COUNT = 15
+CI_CHECK_COUNT = 16
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
 # 缓存目录（.ruff_cache 等）以前会被算进来：它们随工具链生成、随时变化，既不是仓库内容
@@ -922,13 +923,28 @@ def t_budget_and_form_routing():
 
     qa = (scripts / "footageqa.py").read_text(encoding="utf-8")
     assert "f8_source_variety" in qa, "footageqa.py 没有 F8 门禁函数"
-    assert "GATES = [" in qa and "f8_source_variety]" in qa.replace(" ", ""), \
+    _gates = qa[qa.index("GATES = ["):qa.index("]", qa.index("GATES = ["))].replace(" ", "")
+    assert "GATES=[" in _gates or "GATES=[" in qa.replace(" ", ""), "找不到 GATES 注册表"
+    assert "f8_source_variety" in _gates, \
         "F8 没注册进 GATES（函数写了但没执行，等于没这门禁）"
+    # 门禁清单里"最后一项"最容易漏挂：新加 F9 时只改函数不改 GATES，注册就会静默失效。
+    for _need in ("f9_subtitle_fit",):
+        assert _need in qa, "footageqa.py 没有 %s 门禁函数" % _need
+        assert _need in qa[qa.index("GATES = ["):qa.index("]", qa.index("GATES = ["))], \
+            "%s 没注册进 GATES（函数写了但没执行，等于没这门禁）" % _need
 
     fp = (scripts / "footage.py").read_text(encoding="utf-8")
     for flag in ("--allow-sparse-sources", "--allow-missing-sources"):
         assert flag in fp, "footage.py 缺逃生口 %s（门禁没有显式旁路就等于一刀切）" % flag
     assert "source_budget" in fp, "footage.py 没在 EDL 阶段用素材预算"
+
+    rp = (scripts / "render.py").read_text(encoding="utf-8")
+    assert "def _qa_text_layout_gate(" in rp, "render.py 没有 G13 版式冲突门禁函数"
+    assert "_qa_text_layout_gate(lg" in rp, \
+        "G13 没被调用（函数写了但没执行，等于没这门禁）"
+    assert (scripts / "qatext.py").exists(), "缺 qatext.py（G13 的判据模块）"
+    assert "text_qa_start" in (scripts / "..").joinpath("assets", "scenes.py").read_text(encoding="utf-8"), \
+        "scenes.py 缺文字框采集钩子（G13 会降级成 skipped）"
 
     cp = (scripts / "compose.py").read_text(encoding="utf-8")
     for name in ("OVL_AREA_FAIL", "def audit_overlay(", "def layer_coverage("):
@@ -945,6 +961,33 @@ def t_budget_and_form_routing():
 
     md = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert "--hybrid-form 1" in md, "SKILL.md 没写「形态 1 需显式 --hybrid-form 1」"
+
+def t_layout_gate_registered():
+    """G13 版式冲突 / F9 字幕排版：门禁必须真的挂上，采集钩子必须在。
+
+    为什么单独一项：这一次的返工全部来自"门禁查不到的东西"——
+    整片字压字、字幕横穿画面，而 12 道门禁全绿。新增的门禁如果只写函数不注册、
+    或 scenes.py 没有采集钩子（门禁会静默降级成 skipped），等于没做。
+    静态检查能在不渲染的情况下把这两类"假修复"拦住。
+    """
+    scripts = SKILL / "scripts"
+    qa = (scripts / "footageqa.py").read_text(encoding="utf-8")
+    assert "def f9_subtitle_fit(" in qa, "footageqa.py 没有 F9 字幕排版门禁"
+    gates_src = qa[qa.index("GATES = ["):qa.index("]", qa.index("GATES = ["))]
+    assert "f9_subtitle_fit" in gates_src, "F9 没注册进 GATES（函数写了但没执行）"
+
+    rp = (scripts / "render.py").read_text(encoding="utf-8")
+    assert "def _qa_text_layout_gate(" in rp, "render.py 没有 G13 版式冲突门禁"
+    assert "_qa_text_layout_gate(lg" in rp, "G13 没被调用（函数写了但没执行）"
+
+    assert (scripts / "qatext.py").exists(), "缺 qatext.py（G13 判据模块）"
+    scenes = (SKILL / "assets" / "scenes.py").read_text(encoding="utf-8")
+    for hook in ("def text_qa_start(", "def text_qa_take(", "def text_qa_role("):
+        assert hook in scenes, "scenes.py 缺 %s（G13 没有数据来源）" % hook
+    assert "_TEXT_QA_BOXES.append" in scenes, "_draw_text 没有真的登记文字框"
+    assert "def _text_flow_kicker_y(" in scenes, "缺公共 kicker 定位（十种构图会各写一套）"
+    return "G13/F9 已注册；采集钩子与公共 kicker 定位都在；qatext.py 存在"
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="仓库级体检（不需要 ffmpeg / 字体 / 网络）")
@@ -973,6 +1016,7 @@ def main(argv=None) -> int:
         ("13 footage.json 契约", t_footage_contract),
         ("14 断言条数一致", t_case_count),
         ("15 素材预算与 hybrid 形态路由", t_budget_and_form_routing),
+        ("16 版式文字冲突门禁（G13/F9 注册与采集钩子）", t_layout_gate_registered),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)
