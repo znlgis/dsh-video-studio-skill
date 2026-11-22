@@ -1,7 +1,7 @@
 # 场景语法（Scene Grammar）：内容决定构图
 
 > 配套文件：`skills/video-studio/scripts/grammar.py`（纯标准库）、
-> `skills/video-studio/assets/scenes.py` 第三节（10 类绘制器）、`tools/silhouette_qa.py`（剪影门禁 G13）。
+> `skills/video-studio/assets/scenes.py` 第三节（10 类绘制器）、`tools/silhouette_qa.py`（剪影门禁 S13，离线检查）。
 > 一句话：**这一段内容该长成什么构图，由内容自己决定；风格只决定"长成什么样"。**
 
 ## 0. 为什么需要它
@@ -258,7 +258,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
    再跑一次剪影门禁（`--selftest` / `--designs N`）确认新类型在不同现场设计下也"看得出来"。这一步不做，等于新加的构图
    没有进入 G13 的覆盖范围。
 
-跑完的验证顺序：`python selfcheck.py`（**77 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影，第 71 条盯默认无细线（HUD 打开时也无线、遮幅不随 push 缩放），第 72 条盯前景不抖）
+跑完的验证顺序：`python selfcheck.py`（**105 条**，第 52–55 条专盯场景语法/视觉语言/单真值/剪影，第 71 条盯默认无细线（HUD 打开时也无线、遮幅不随 push 缩放），第 72 条盯前景不抖）
 → `python <REPO>/tools/ci_check.py`（语法/包内容/文档路径）→ `python <REPO>/tools/silhouette_qa.py`（不同设计两两仍可区分）。
 
 ## 9. 常见误用

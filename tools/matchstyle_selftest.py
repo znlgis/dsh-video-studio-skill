@@ -254,5 +254,17 @@ def main():
     return 0
 
 
+def _setup_stdio():
+    """重定向到管道/文件时切 UTF-8：Windows 默认代码页是 GBK，本文件输出里有
+    em dash（—）与中文，Agent 用 subprocess 抓输出时既会乱码，也可能
+    UnicodeEncodeError 直接崩。与 selfcheck.py / render.py 同一口径。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
 if __name__ == "__main__":
+    _setup_stdio()
     sys.exit(main())

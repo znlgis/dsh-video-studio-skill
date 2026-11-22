@@ -106,10 +106,22 @@ def make_edl(footage, timeline, sources_info=None):
         at = shot.get("at")
         if at is None:
             raise SystemExit("lines[%s].shot 缺 at（源文件内绝对秒数）" % lid)
-        length = float(shot["len"]) if shot.get("len") is not None else row["shot_len"]
+        # 手填的 at/len 是字符串（"175"）时 float() 可以接受，但写错字（"1分30"）会在
+        # 这里抛裸 ValueError：栈里看不出是哪一句，用户只能猜。统一转成可读的报错。
+        try:
+            at_v = float(at)
+        except (TypeError, ValueError):
+            raise SystemExit("lines[%s].shot.at 必须是秒数（收到 %r）" % (lid, at)) from None
+        if at_v < 0:
+            raise SystemExit("lines[%s].shot.at=%s 不能是负数" % (lid, at_v))
+        try:
+            length = float(shot["len"]) if shot.get("len") is not None else row["shot_len"]
+        except (TypeError, ValueError):
+            raise SystemExit("lines[%s].shot.len 必须是秒数（收到 %r）"
+                             % (lid, shot.get("len"))) from None
         if length <= 0.2:
             raise SystemExit("lines[%s] 的镜头长度 %.2fs 过短（至少 0.3s）" % (lid, length))
-        shots.append({"id": lid, "source": sid, "at": round(float(at), 3),
+        shots.append({"id": lid, "source": sid, "at": round(at_v, 3),
                       "len": round(length, 3), "why": shot.get("why") or "",
                       "text": str(ln["text"])[:60]})
     edl = {"schema": 1, "title": footage.get("title"), "total": timeline["total"],
@@ -182,10 +194,31 @@ def cut_shots(footage, edl, work, *, crf=16, preset="veryfast"):
     # （实测 24 镜差 0.469s，表现为后段字幕/叠加层落后画面，还可能被帧级质检误报成闪烁）。
     # 这里按**累计帧**分配每镜帧数，Σframes == round(total*fps)，与时间轴严格一一对应。
     fps = float((footage.get("video") or {}).get("fps") or 30)
+    audio_cache = {}
+
+    def _src_has_audio(path):
+        """源文件有没有音轨（每个源只探一次）。
+
+        没有音轨的源很常见：图片、--download-sections 只给视频流的分段下载。
+        这类源不抽音轨，cut.json 里记 audio=None（表示"本来就没有"，不是"丢了"）；
+        探测失败（streams 为空）时按有音轨处理，让下面的退出码检查去报错，
+        而不是把"没探到"当"没音轨"静默丢一条环境声。
+        """
+        key = str(path)
+        if key not in audio_cache:
+            raw = filmkit.probe(key) or {}
+            streams = raw.get("streams") or []
+            audio_cache[key] = (any(x.get("codec_type") == "audio" for x in streams)
+                                if streams else True)
+        return audio_cache[key]
+
     out = []
     cum = 0.0
     for i, s in enumerate(edl["shots"]):
         src = footagekit.source_path(footage, srcs[s["source"]])
+        if not src.exists():
+            raise SystemExit("[cut] 素材不存在：%s（source=%s，先跑 --stage fetch）"
+                             % (src, s["source"]))
         dst = segs / ("%02d_%s.mp4" % (i, s["id"]))
         wav = segs / ("%02d_%s.wav" % (i, s["id"]))
         f0 = int(round(cum * fps))
@@ -193,16 +226,49 @@ def cut_shots(footage, edl, work, *, crf=16, preset="veryfast"):
         f1 = int(round(cum * fps))
         n = max(1, f1 - f0)                      # 本镜帧数（累计差，不是单段四舍五入）
         span = n / fps                           # 与画面严格等长的秒数
+        still = src.suffix.lower() in footagekit.IMAGE_EXT
         log("  [cut] %02d %-8s %-24s at=%7.2f len=%.2f (%d 帧)" %
             (i, s["id"], src.name, s["at"], span, n))
-        _run([filmkit.FFMPEG, "-v", "error", "-y", "-ss", "%.3f" % s["at"],
-              "-i", str(src), "-frames:v", str(n), "-r", "%g" % fps, "-vf", vf, "-an",
-              "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
-              "-pix_fmt", "yuv420p", str(dst)])
-        _run([filmkit.FFMPEG, "-v", "error", "-y", "-ss", "%.3f" % s["at"],
-              "-t", "%.4f" % span, "-i", str(src), "-vn",
-              "-af", "aresample=%d" % SR, "-ac", "2", "-ar", str(SR), str(wav)])
-        out.append({"id": s["id"], "video": str(dst), "audio": str(wav),
+        # 图片源只有一帧：不加 -loop 1 时 -frames:v n 也只输出 1 帧（实测 0.033s），
+        # 成片会拼成一堆 1 帧碎片、assemble 的等长校验直接拒片。静帧按 -loop 1 铺满本镜。
+        lead = ["-loop", "1"] if still else []
+        p = _run([filmkit.FFMPEG, "-v", "error", "-y"] + lead + [
+            "-ss", "%.3f" % s["at"], "-i", str(src), "-frames:v", str(n),
+            "-r", "%g" % fps, "-vf", vf, "-an",
+            "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+            "-pix_fmt", "yuv420p", str(dst)])
+        if p.returncode != 0 or not dst.exists():
+            raise SystemExit("[cut] 第 %02d 镜（%s）切镜失败（ffmpeg exit=%d）：\n%s\n"
+                             "  常见原因：素材比镜头短（at=%.2fs + len=%.2fs 超出源可用画面）"
+                             % (i, s["id"], p.returncode,
+                                (p.stderr or b"").decode("utf-8", "replace").strip()[-600:],
+                                s["at"], span))
+        # 源素材比镜头短时 ffmpeg 会"成功"但只给几帧：必须自己量一遍，
+        # 否则音画从这一镜起累积错位，最后在 assemble 里被含糊地报成"音视频不一致"。
+        try:
+            seg_dur = filmkit.media_dur_checked(str(dst), "切出的镜头")
+        except RuntimeError as e:
+            raise SystemExit("[cut] 第 %02d 镜（%s）读不出时长（素材可能比镜头短）：%s"
+                             % (i, s["id"], e)) from None
+        if seg_dur < span - 1.5 / fps:
+            raise SystemExit("[cut] 第 %02d 镜（%s）只切到 %.3fs，应切 %.3fs："
+                             "素材比镜头短（at=%.2fs + len=%.2fs 超出源可用画面）。\n"
+                             "  改 EDL 的 at/len，或给这段旁白换更长的素材"
+                             % (i, s["id"], seg_dur, span, s["at"], span))
+        has_audio = (not still) and _src_has_audio(src)
+        if has_audio:
+            p = _run([filmkit.FFMPEG, "-v", "error", "-y", "-ss", "%.3f" % s["at"],
+                      "-t", "%.4f" % span, "-i", str(src), "-vn",
+                      "-af", "aresample=%d" % SR, "-ac", "2", "-ar", str(SR), str(wav)])
+            if p.returncode != 0 or not wav.exists():
+                raise SystemExit("[cut] 第 %02d 镜（%s）抽原声失败（ffmpeg exit=%d）：%s"
+                                 % (i, s["id"], p.returncode,
+                                    (p.stderr or b"").decode("utf-8", "replace").strip()[-600:]))
+        else:
+            log("  [cut] %02d %s 没有音轨（图片源 / 分段下载只给视频流）：本镜环境层跳过"
+                % (i, s["id"]))
+        out.append({"id": s["id"], "video": str(dst),
+                    "audio": str(wav) if has_audio else None,
                     "len": round(span, 4), "frames": n,
                     "at": s["at"], "source": s["source"]})
     return out
@@ -247,10 +313,20 @@ def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
     n = int(round(total * SR))
     bus = np.zeros((n + SR, 2), dtype=np.float32)
 
-    def add(path, at, gain, loop=False):
-        if not path or not Path(path).exists():
+    def add(path, at, gain, loop=False, *, required=True, label=""):
+        # 缺失的音轨必须炸：静默 return 等于"这条轨整条消失"，而 QC 只看音画等长
+        # （等长比的是总线长度，丢一条轨看不出来）。audio=None 表示"这个源本来就没有
+        # 音轨"（图片 / 分段下载只给视频流），由调用方显式传 None，不算缺失。
+        if path is None or str(path) == "":
             return
-        a = decode_audio(path) * float(gain)
+        p = Path(path)
+        if not p.is_file():
+            if not required:
+                log("  [mix] WARN 跳过缺失音轨 %s（%s）" % (p, label or "可选轨"))
+                return
+            raise SystemExit("[mix] 缺音轨 %s（%s）：不会静默丢轨，先补文件或重跑对应阶段"
+                             % (p, label or "必需轨"))
+        a = decode_audio(p) * float(gain)
         i0 = int(round(max(0.0, at) * SR))
         if loop and a.shape[0]:
             while i0 < bus.shape[0]:
@@ -265,16 +341,19 @@ def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
     rows = {r["id"]: r for r in timeline["lines"]}
     for r in tts_rows:
         add(work / "tts" / (str(r["id"]) + ".mp3"),
-            rows[str(r["id"])]["start"], float(audio.get("voice_gain", 1.0)))
+            rows[str(r["id"])]["start"], float(audio.get("voice_gain", 1.0)),
+            label="旁白 %s（先跑 --stage tts）" % r["id"])
     env_gain = float(audio.get("env_gain", 0.12))
     if env_gain > 0:
         for c in cut_rows:
-            add(c["audio"], rows[c["id"]]["shot_start"], env_gain)
+            add(c.get("audio"), rows[c["id"]]["shot_start"], env_gain,
+                label="镜头 %s 的原声（先跑 --stage cut）" % c["id"])
     music_gain = float(audio.get("music_gain", 0.10))
     if music_gain > 0:
         mf = audio.get("music_file")
         if mf:
-            add(mf, 0.0, music_gain, loop=True)
+            add(mf, 0.0, music_gain, loop=True,
+                label="audio.music_file（footage.json 指定的配乐）")
         else:
             mpath = work / "music.wav"
             if not mpath.exists():
@@ -326,11 +405,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _ts(sec):
-    sec = max(0.0, float(sec))
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = sec % 60
-    return "%d:%02d:%05.2f" % (h, m, s)
+    # 先化成"厘秒"整数再拆 h/m/s：直接 "%05.2f" 会把 59.996 打成 "60.00"，
+    # 得到 "0:00:60.00" 这种非法 ASS 时间戳（libass 解析结果不可靠，字幕会错位/丢行）。
+    cs = int(round(max(0.0, float(sec)) * 100))
+    h, rem = divmod(cs, 360000)
+    m, rem = divmod(rem, 6000)
+    s, cs = divmod(rem, 100)
+    return "%d:%02d:%02d.%02d" % (h, m, s, cs)
 
 
 def write_ass(timeline, footage, path):
@@ -468,17 +549,39 @@ def ass_filter(path):
 # 6. assemble：拼接 + 字幕 + loudnorm 成片
 # ============================================================================
 
+def _concat_escape(path):
+    r"""concat 列表里的单引号转义。
+
+    ffmpeg 的 concat demuxer 用 '...' 包路径，**不支持 \' 转义**，标准写法是把
+    单引号写成 '\''（先闭合、再转义引号、再重开）。不转义时 Windows 上
+    "Bob's work" 这类目录名会让列表在引号处提前结束，ffmpeg 报 No such file。
+    """
+    return str(path).replace("'", "'\\''")
+
+
 def concat_video(cut_rows, work):
     """按顺序拼接镜头（流拷贝，不二次编码）。"""
     work = Path(work)
+    if not cut_rows:
+        raise SystemExit("没有可拼接的镜头（cut.json 为空）：先跑 --stage cut")
     lst = work / "concat.txt"
-    lines = ["file '%s'" % Path(c["video"]).resolve().as_posix() for c in cut_rows]
+    lines = ["file '%s'" % _concat_escape(Path(c["video"]).resolve().as_posix())
+             for c in cut_rows]
     lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
     out = work / "silent.mp4"
-    _run([filmkit.FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
-          "-i", str(lst), "-c", "copy", str(out)])
-    dur = filmkit.media_dur(str(out))
-    log("  [concat] %d 镜 -> silent.mp4（%.2fs）" % (len(cut_rows), dur or 0.0))
+    p = _run([filmkit.FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
+              "-i", str(lst), "-c", "copy", str(out)])
+    # _run 不检查退出码：拼接失败时原来只会在日志里写 "0.00s" 并把不存在的文件
+    # 交给 assemble。这里必须自己判。
+    if p.returncode != 0 or not Path(out).exists():
+        raise SystemExit("concat 拼接失败（ffmpeg exit=%d）：\n%s"
+                         % (p.returncode,
+                            (p.stderr or b"").decode("utf-8", "replace").strip()[-800:]))
+    try:
+        dur = filmkit.media_dur_checked(str(out), "拼接后的无声视频")
+    except RuntimeError as e:
+        raise SystemExit("concat 产出的 silent.mp4 读不出时长：%s" % e) from None
+    log("  [concat] %d 镜 -> silent.mp4（%.2fs）" % (len(cut_rows), dur))
     return str(out)
 
 

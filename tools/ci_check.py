@@ -81,7 +81,7 @@ MAX_FILE_BYTES = 400 * 1024
 DESC_MAX_CHARS = 400
 # 本文件的检查项数（main() 里那张 checks 表的长度）。文档与分发页写的"仓库体检 N 项"
 # 要与它一致；改这里必须同批改 CHECKS 表，否则这项自检会先失败——这是故意的。
-CI_CHECK_COUNT = 16
+CI_CHECK_COUNT = 18
 # 体积检查忽略的目录后缀：.team 是本地调研/自测工作区（gitignore），不随包发布；
 # 媒体文件本来就该大（样例片/参考视频），不该拿"能不能塞进上下文"的尺子量。
 # 缓存目录（.ruff_cache 等）以前会被算进来：它们随工具链生成、随时变化，既不是仓库内容
@@ -801,6 +801,110 @@ def t_footage_contract():
             % len(footage_schema.read_text(encoding="utf-8")))
 
 # ---------------------------------------------------------------- 14 断言条数一致
+def t_cli_flags():
+    """文档里 `python xxx.py --flag` 的开关必须真在该脚本里存在。
+
+    为什么需要：文档就是 Agent 的行动依据。把 A 脚本的开关写到 B 脚本的命令行上、
+    参数改名后文档没跟、开关被删了文档还留着——这三类都会让"照文档抄"直接 argparse 报错，
+    而第 7 项只查路径存在、第 14 项只查条数，没有任何门禁会因此变红。
+
+    口径（宁漏不误伤）：按行切段——一行里每次出现 `python ... <name>.py` 之后、到下一个
+    命令之前的 `--flag` 归该脚本；只要求这个开关字符串在脚本源码里出现过（注册、help、
+    常量都算）。实测全仓 308 处引用 0 误报；正文里举例提到别的脚本开关不会误伤。
+    """
+    docs = [SKILL / "SKILL.md", ROOT / "README.md"] + sorted(REFS.glob("*.md"))
+    cmd_re = re.compile(r"python[0-9.]*\s+(?:<SKILL_DIR>/|<REPO>/)?(?:skills/video-studio/|scripts/)?([a-z_]+)\.py")
+    flag_re = re.compile(r"(?<!\w)(--[a-z][a-z0-9-]*)")
+    bad = []
+    checked = 0
+    for doc in docs:
+        if not doc.is_file():
+            continue
+        for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            hits = list(cmd_re.finditer(line))
+            for i, m in enumerate(hits):
+                name = m.group(1)
+                src = SCRIPTS / (name + ".py")
+                if not src.is_file():
+                    continue
+                seg = line[m.end():hits[i + 1].start() if i + 1 < len(hits) else len(line)]
+                src_text = src.read_text(encoding="utf-8")
+                for flag in sorted(set(flag_re.findall(seg))):
+                    checked += 1
+                    if ("\"%s\"" % flag) not in src_text and ("'%s'" % flag) not in src_text:
+                        bad.append("%s:%d 给 %s.py 用了 %s（该脚本里没有这个开关）"
+                                   % (doc.name, ln_no, name, flag))
+    assert not bad, "；".join(sorted(set(bad))[:6])
+    return "%d 处文档命令行开关都能在对应脚本里找到（按行切段归属，0 误报口径）" % checked
+
+
+def t_surface_complete():
+    """README 的文件结构块必须把仓库里的脚本/工具/契约/参考文档全部列出来。
+
+    为什么需要（v2.7.2 实测）：README 的 `## 文件结构` 是用户与 Agent 认识仓库的唯一地图，
+    而它当时漏了 7 个脚本（qatext/stylekit/compose/footage 四件套）、4 个工具、5 篇 references
+    和 4 项资产。第 7 项只能查"写出来的路径存不存在"，查不到"存在的文件有没有被写出来"——
+    地图缺块这件事没有任何东西会变红。这里补上：结构块里必须出现每个受管文件的名字。
+
+    口径：只在 README 的 ``` 代码块内找，按 `scripts/<name>`、`tools/<name>` 等前缀匹配；
+    允许只写目录（如 `assets/web/`）表示该目录下的非 Python 资产不逐个列。
+    """
+    readme = ROOT / "README.md"
+    assert readme.is_file(), "缺 README.md"
+    text = readme.read_text(encoding="utf-8")
+    block = ""
+    inside = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            block += line + "\n"
+    assert "scripts/" in block, "README 的代码块里找不到文件结构块（scripts/ 一处都没有）"
+    bad = []
+    groups = [
+        (SCRIPTS.glob("*.py"), "scripts/%s"),
+        ((ROOT / "tools").glob("*.py"), "tools/%s"),
+        ((ROOT / "tools").glob("*.mjs"), "tools/%s"),
+        ((ROOT / "schemas").glob("*.json"), "schemas/%s"),
+    ]
+    for files, pat in groups:
+        for f in sorted(files):
+            if (pat % f.name) not in block:
+                bad.append(pat % f.name)
+    # references 在结构块里是「一行连排」写法（proposal · scene-grammar · …），
+    # 不带 .md 后缀；先确认结构块提到了 references/ 这一节，再按文件名主干逐个核。
+    refs = sorted(REFS.glob("*.md"))
+    covered_refs = 0
+    if "references/" in block:
+        for f in refs:
+            stem = f.stem
+            if ("references/%s" % f.name) in block or ("references/%s" % stem) in block or stem in block:
+                covered_refs += 1
+            else:
+                bad.append("references/%s" % f.name)
+    else:
+        bad.append("references/（整节没提）")
+    assert not bad, ("README 文件结构块漏列 %d 项：%s"
+                     % (len(bad), "、".join(bad[:10])))
+    return "文件结构块覆盖 %d 个脚本 / %d 个工具 / %d 份契约 / %d 篇参考文档" % (
+        len(list(SCRIPTS.glob("*.py"))), len(list((ROOT / "tools").glob("*"))),
+        len(list((ROOT / "schemas").glob("*.json"))), covered_refs)
+
+
+_ORDINAL_RE = re.compile(r"第\s*\d+(?:\s*[、,，/]\s*\d+)*(?:\s*[–\-~至]\s*\d+)?\s*(?:条|项)")
+
+
+def _strip_ordinals(line):
+    """把「第 54 条」「第 52–55 条」「第 71、72 条」这类序数引用换成占位。
+
+    旧实现只在序数紧贴数字（「第54条」）时排除；文档普遍写成带空格的
+    「第 54 条」，而 references/ 与 studio.py 一旦纳入扫描，这些序数就会
+    被当成「总数写错」报假红。
+    """
+    return _ORDINAL_RE.sub("第N条", line)
+
+
 def t_case_count():
     """文档里写的"N 条断言"必须等于 selfcheck.CASES 的真实长度。
 
@@ -836,6 +940,11 @@ def t_case_count():
     docs = [SKILL / "SKILL.md", ROOT / "README.md", ROOT / ".github" / "workflows" / "ci.yml",
             ROOT / "marketplace-entry.json"]
     docs += sorted((ROOT / "locale").glob("*.json"))
+    # references/ 是 Agent 真正按需加载的说明书，studio.py 的 check 子命令描述也写死过条数：
+    # 两处都不在旧清单里，于是 v2.7.2 实测仍有 77 / 85 / 97 三个过时数字在流通。
+    # 扫描它们，过期数字才会被这条检查当场抓住，而不是靠人翻文档发现。
+    docs += sorted((SKILL / "references").glob("*.md"))
+    docs.append(SCRIPTS / "studio.py")
     # 只认**总数句式**："72 条全绿 / 72 条断言 / 自检 72 条"。
     # "selfcheck 第 35/36 条" 这种序数引用不能算总数——第一版正则就是这样误伤了 4 处。
     # 分发页文案（marketplace）写的是"自检 69 条"，所以带上这个句式。
@@ -856,6 +965,10 @@ def t_case_count():
     # 英文口径同样要核：marketplace-entry.json 的英文简介曾长期写着"69 self-check
     # assertions and 12 repo checks"，而中文简介已是 76/13——旧正则只看中文句式，
     # 于是同一份分发页里中英两半各说各话，检查却一路 PASS。
+    # 「仓库级体检（15 项」/「ci_check.py -v  # 15 项」/「CI_CHECK_COUNT（当前 15 项」
+    # 也是同一口径，旧正则只认「仓库体检 N 项」一种说法，于是 15→16 时这几处静默漂移。
+    # 序数（「第 12 项」）已在上面的 _strip_ordinals 里剥掉，不会再被当成总数。
+    ci_alt_re = re.compile(r"(?:仓库级?体检|ci_check)[^\n]{0,40}?(\d{1,2})\s*项")
     claim_en_re = re.compile("(\\d{2,3})\\s*self-check assertions?")
     claim_en1_re = re.compile("(?<![第\\d/])(\\d)\\s*self-check assertions?")
     ci_en_re = re.compile("(\\d{1,2})\\s*repo checks?")
@@ -865,6 +978,7 @@ def t_case_count():
         if not doc.is_file():
             continue
         for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            line = _strip_ordinals(line)
             claims = (list(claim_re.finditer(line)) + list(selfcheck_re.finditer(line))
                       + list(claim_en_re.finditer(line)) + list(claim1_re.finditer(line))
                       + list(selfcheck1_re.finditer(line)) + list(claim_en1_re.finditer(line)))
@@ -878,11 +992,28 @@ def t_case_count():
                 if n != cases:
                     bad.append("%s:%d 写 %d 条（CASES 实际 %d 条）"
                                % (doc.name, ln_no, n, cases))
-            for m in list(ci_re.finditer(line)) + list(ci_en_re.finditer(line)):
+            for m in (list(ci_re.finditer(line)) + list(ci_en_re.finditer(line))
+                      + list(ci_alt_re.finditer(line))):
                 n = int(m.group(1))
                 if n != CI_CHECK_COUNT:
                     bad.append("%s:%d 写仓库体检 %d 项（实际 %d 项）"
                                % (doc.name, ln_no, n, CI_CHECK_COUNT))
+    # 断言总数还有两种写法上面查不到：「全 PASS（77 条）」与「（当前 85 条）」。
+    # 这里用更宽但更难绕过的口径：一行只要在讲 selfcheck / 自检 / 回归，又出现 2~3 位数 + 条，
+    # 那个数就必须是 CASES 真值。序数已剥掉，不会误伤「第 71、72 条」这类引用。
+    ctx_re = re.compile(r"(?<![第\d/、,，])(\d{2,3})\s*条")
+    for doc in docs:
+        if not doc.is_file():
+            continue
+        for ln_no, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            line = _strip_ordinals(line)
+            if not any(k in line for k in ("selfcheck", "自检", "回归")):
+                continue
+            for m in ctx_re.finditer(line):
+                n = int(m.group(1))
+                if n != cases:
+                    bad.append("%s:%d 在 selfcheck 语境里写 %d 条（CASES 实际 %d 条）"
+                               % (doc.name, ln_no, n, cases))
     assert not bad, "；".join(sorted(set(bad))[:6])
     # "数字写错"能查，"根本不写"查不到：把条数整句删掉或写成"共八十五条"后正则一处都不
     # 命中，这项检查就在那份文档上静默失效。所以三篇必查文档每篇至少命中一次。
@@ -1017,6 +1148,8 @@ def main(argv=None) -> int:
         ("14 断言条数一致", t_case_count),
         ("15 素材预算与 hybrid 形态路由", t_budget_and_form_routing),
         ("16 版式文字冲突门禁（G13/F9 注册与采集钩子）", t_layout_gate_registered),
+        ("17 包面清单完整（README 文件结构不漏文件）", t_surface_complete),
+        ("18 文档命令行开关一致（--flag 真存在）", t_cli_flags),
     ]
     print("ci_check  %s" % ROOT)
     print("-" * 66)

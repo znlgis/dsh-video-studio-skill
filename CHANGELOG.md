@@ -1,3 +1,251 @@
+## 2.7.3 — 全面审查：13 个域各查一遍，修掉一批静默假绿与「文档说了代码没做」
+
+> 这轮把仓库切成 13 个互不重叠的审查域（渲染编排 / 绘制与排版 / 设计 DSL / 提案与问诊 /
+> 音频与声线 / 质检门禁 / 素材线 / web 引擎与插件入口 / 仓库工具 / schema 契约 / 文档与体检），
+> 每域独立排查、独立验证、只改自己那几份文件。主线只有一条：**凡是「查了但其实没查」的地方，
+> 都必须让它在报告里现形**——门禁假绿、静默丢弃、旧签核不失效、文档承诺未实现，四类各修掉一批。
+>
+> 总数：**selfcheck 100 → 105 条**，**仓库体检 16 → 18 项**（新增「包面清单完整」「文档命令行开关一致」）。
+> 另重命名剪影门禁 **G13 → S13**（S = silhouette 离线检查，不进账本）：账本里的 `G13` 是 v2.7.2 新增的
+> 版式文字冲突，两套编号撞名会让 QC 报告里的 `G13` 指代不明。
+
+### 渲染编排（render.py）
+
+- **`--batch` 三个真 bug**：① 无条件给每条补「剧本同目录 scenes.py」，文件不存在时子进程直接退出——同样剧本单跑
+  却会回退技能内置渲染器；② 不同目录同名剧本算出同一 `work`/`out`，后一条覆盖前一条成片、两条都报 OK；
+  ③ `--jobs/--resume/--force-tts/--force-music/--strict-stale/--no-gate/--require-proposal/--strict-scenes`
+  解析后静默丢弃。现在：`scenes` 只在真实存在时才传、`work`/`out` 撞车开跑前报错、可逐条成立的开关透传子进程；
+  `--out/--work/--script/--scenes/--note/--by/--verdict/--stills` 这类逐条概念给了就报错。
+- **`--force-music` 会误删已交付配乐**：它原先位于 stage 分发之前，`--stage explain`（只读）或 `--stage qa` 都会先删
+  `music.wav`/`score.json`。现在只在 `all`/`score`（且非 `--preview`）时清理，其余打印「跳过清理」并保留文件。
+- **`--preview` 三个静默面**：`--engine web` 悄悄走 PIL（预览与成片不同引擎）、与单 stage 同给时吞掉那个请求、
+  秒数为 `0/0.001/nan/inf` 时渲 0 帧却 return 0。现在三者都显式报错并给修法。
+- **`--layout` 非法值不再灌进环境变量**（原会在 import 期抛 traceback，argparse 的 choices 报错永远到不了用户眼前）。
+- **`_finish_gates` 合并上一轮账本**：单跑 `--stage style/frames/mux/stills` 原先会把自己那一两条门禁直接写盘，把上一轮
+  `--stage all` 的 G4–G13 整份覆盖成「本次只查了 1 项」（实测 15 条 → 2 条）。现在写盘前先按内容指纹合并旧条目、
+  本轮同名项后写覆盖；`--stage style` 分支里那处「先 write_json 再 finish」的提前落盘也已删除（它让合并只能捡回半成品）。
+- **G13 门禁自身失败记 fail**（与 G11/G12 同口径）：原来裸抛会让 `--stage qa` 在写报告前整个崩掉，报告里连
+  「这项没查成」都没有。
+- **G0/G9 的 skipped 不再冒充 pass**：预检里逐项 `skipped`（tts 没跑、字形范围不完整…）原先只看 errors 就记 pass；
+  深检自身抛错原先 detail 固定写「没有 qa_frames.py 或深检失败」，把「没装模块」与「解码 0 帧」混成一句。现在前者
+  降级成 skipped 并点名哪几项没执行，后者把真实异常串带进 detail。
+- **qa_text_safe 按本片设计参数量**：`draw_subtitle` 用 `visual.subtitle`，而安全区自查仍按模块默认 46px/2 行量——
+  设计放大字号或 `max_lines=3` 时，字幕出带查不出来。两处调用点改为传 `subtitle_kwargs(plan)`。
+- **web 断点续跑计划变化时**给一行中文 +「删块重渲 / `--no-resume`」，不再甩 ValueError traceback。
+
+### 绘制与排版（filmkit / previewkit / qatext）
+
+- **G13 判据顺序反了**：`gate_result` 先判「skipped 且 checked==0」再判 errors，于是「首帧查到压盖、次帧渲染崩」被记成
+  **skipped**，压盖证据整条消失；`checked>0` 但 `boxes==0`（采集钩子失效/框全被裁）还记 **pass**。现在顺序是
+  errors → checked==0 → boxes==0 → pass，零框单独记 skipped 并写明原因。
+- **预览与成片两套字幕/两套排轴**：`previewkit` 画字幕不传 `visual.subtitle`、排轴不读 `design.pacing`，同一剧本预览
+  19.0 s、成片口径 20.5 s，还会画出成片里被降级的构图。现在两处都走同一份参数（预览帧与成片参考帧逐字节相等）。
+- **`wav_write` 写坏 WAV**：一维单声道数组 + 显式 `channels=2` 会写出「2 声道、时长减半」的坏文件（4800 采样写成
+  2ch/2400 帧），与二维数组 channels 不符时抛错的行为不对称。现在一维且 `channels!=1` 直接 `ValueError`。
+- **ASS 字幕 MarginV 竖屏跑到遮挡区**：原硬编码 56（横屏 SUB_BAND 贴底尚可），竖屏底边 1616 时会把字幕放到 y≈1864 的
+  系统 UI 遮挡区。现在 `max(56, H - SUB_BAND[3])`——横屏仍 56（逐字节不变），竖屏 304。
+- **FrameSink 的 BrokenPipeError 顶掉真死因**：ffmpeg 中途退出时只看到「Broken pipe」。现在先排空 stderr、取 exitcode，
+  抛带 ffmpeg 报错的 RuntimeError（实测能看到 `x264 [error]: invalid preset`）。
+- **超长字幕静默丢字**：`fit_sub_lines` 降到最小字号仍装不下时返回全部行，`lines[:max_lines]` 直接截掉（100 字丢 10、
+  150 字丢 60）而 qa 只是 WARN。现在按「文本+行数+字号」每句只告警一次，写明丢弃字数与修法。
+
+### 设计 DSL / 场景语法 / 叠加层（designkit / stylekit / grammar / compose）
+
+- **avoid 气质只排同值**：「不要明亮」只排 `light`，同属浅底侧、色相带色的 `bright` 仍会被采出来
+  （`_required_lightness` 早已把两者当同一侧，两处口径不一致）。现在整侧排除，且 must×avoid 同侧在**采样前**点名互斥。
+- **NaN/inf 骗过所有数值门禁**：`_is_num` 接受 NaN/inf，`lo <= nan <= hi` 恒为 False，于是 `pacing.lead=NaN` 一路写进
+  plan（`json.dump` 输出非法 `NaN`）。现在 `math.isfinite` 硬校验，超长整数也接住。
+- **字幕字色可以不可见**：`visual.subtitle.color` 不在 theme_lint 的 ink/muted/dim/accent 里，`color≈bg` +
+  `plate_alpha:0` 时全部门禁全绿、字幕实际看不见。现在按**真实背板**（bg2 以 plate_alpha 合成）算对比度，只在显式
+  写 color 时触发（采样器不产该字段，老设计与金帧零变化）。
+- **`audio.music.mode: off` 被丢弃**：校验通过但不进 plan，`filmkit.music_plan` 仍按 bpm 出配乐——写「不要配乐」照样有。
+  现在 plan 透传 `off`/`file` 两种模式。
+- **compose 三个契约漏洞**：`at: 0.0` 被真假值判断当成「缺时间窗」直接 exit 2；`bind` 前缀写错（`shot:s02`）时整层
+  **静默丢弃**、退出码仍 0；`at` 写成字符串会在解析窗口时才抛 traceback。现在 `at is None` 判存在、未知 bind 报契约
+  错误并点名层号、`bind/at/dur` 类型提前校验。
+- **grammar 假降级 + 缺 UTF-8 stdio**：`statement` 是降级表底（DOWNGRADE→自己），只要进过循环就返回「已降级」，
+  storyboard 的 reason 写出「降级 statement -> statement」；`__main__` 分支没有 `_setup_stdio()`，Windows 管道下中文
+  乱码/`×` 直接 UnicodeEncodeError。两处都已修。
+- **`theme_lint({})` KeyError**：契约是「返回问题列表（空=过）」，却直接下标取颜色键——坏主题从「一条问题」变成崩溃
+  （`golden_frames.py` 会传空 dict）。现在入口先做 11 个颜色键的结构自检。
+
+### 提案 / 问诊 / 素材画像（propose / intake / matchstyle / critic）
+
+- **`--adopt` 能把草案升成 confirmed**：draft 提案（无 `chosen`）也会写 `status=confirmed`，而 `proposal_state` 仍判
+  draft——打印「闸不会再报 stale」是假绿。现在只有已确认提案才允许 adopt，否则退出并给「先 --confirm」的命令。
+- **旧 rev 快照被覆盖**：`rev = prev.rev+1` 只读 `proposal.json`，它损坏后重跑算出 rev=1，`makedirs(exist_ok=True)`
+  把 `proposals/rev1` 连同候选图静默重写。现在 `_next_rev()` 取「proposal.json 的 rev」与「已有 revN 快照」的最大值 +1。
+- **台账并发丢历史**：读-改-写无锁，8 进程并发 `--confirm` 实测只剩 5 条；坏 JSON 被当空表，下次 confirm 直接覆盖整本
+  （500 条历史静默清空）；固定 `.part` 临时名并发互相截断。现在加跨进程写锁（O_EXCL + 超时 + 残留锁回收）、坏台账
+  先 `os.replace` 备份成 `.corrupt-<ts>` 再重建并告警、临时名带 pid+序号。
+- **`--json` 纯度被打穿**：台账撞车告警、`已记录 N 条答案`、`--set/--defaults/--finalize` 的提示都是无条件 `print`
+  到 stdout，`json.loads` 直接失败。现在这些行按 `json_out` 走 stderr。
+- **`proposal_state` 承诺的 `broken` 档不存在**：坏 `proposal.json`/坏 `design.json` 时 `_load_json` 抛 SystemExit，
+  任何直接调用方当场退出。现在捕获后返回 `("broken", 详情)`。
+- **只读命令被坏文件卡死**：`intake.py` 无条件 `_load(intake.json)`，文件坏时连 `--questions`/`--recommend`（正是修复
+  第一步）都退出。现在只读路径按空单继续并在 stderr 说明。
+- **critic 全图失败仍 exit 0**：逐图记 error 行后照样返回 0，`propose.py --critic` 把「一次没评成」当成功。现在全行皆
+  error 时退 2。
+- **matchstyle 把坏 JSON 说成「文件不存在」**：`edl.json` 写坏时静默退化均匀抽样、还让人去补一份本来就存在的文件；
+  `--apply` 对坏 `design.json` 也报「先用 --confirm 冻结设计」。现在区分 ok/absent/broken，坏文件给专属提示；
+  顺带修 `--n-frames 0` 的 ZeroDivisionError。
+
+### 音频与声线（sfxkit / scorekit / musicgen / voicekit）
+
+- **极短段平铺死循环**：`_tile` 在段长 `m <= xf` 时 `hop = m - xf <= 0`，`while pos < n: pos += hop` 永不前进
+  （实测 `_tile(zeros((16,2)), 48000)` 超时挂死）；m<16 时还会越界报错。现在窗口缩到 `m//3`、`hop = max(1, …)`，
+  且 m>=32 与修前逐样本 bit-identical（无契约回归）。
+- **bpm 无区间会 OOM/卡死**：`bpm=1e-9` 实测 `MemoryError: Unable to allocate 8.39 PiB`，`bpm=1e9` 25 s 不返回。
+  现在 `10 <= bpm <= 1000` 两处硬校验（musicgen / scorekit 同口径）。
+- **极短信号 `analyze` 越界**：`f[searchsorted(cum, 0.85)]` 在补零到 256 点后仍可能等于 `len(cum)`。现在夹到末位。
+- **PCM_16/PCM_32 有 −0.5 LSB 直流偏置**：这两种位深走 `astype`（向零截断）而 PCM_24 走 `np.round`。现在三种位深统一
+  `np.rint`（实测 0.5 存回 0.49996948 → 修后 dc_bias≈1e-16）。
+- **声线校准缓存里的 NaN 会污染整段旁白**：`rms_db` 写成字符串 nan 能过 `float()`，命中后 `gain_db=nan` 按「测过」使用，
+  坏值还会被写回缓存固化。现在非有限值视为「没测过」，落盘前拒绝非有限值。
+- **`voicekit.spec_key` 与 `filmkit.tts_key_v2` 的 trim_db 口径不一致**（`%.1f` vs `round(…,3)`）：默认值哈希相同，
+  `trim_db=0.12345` 就分叉。现在统一 `round(...,3)`，四组对拍哈希全等且默认口径字节不变（老缓存不吃亏）。
+
+### 质检门禁与账本（gates / stagewatch / qa_frames / qavmaf / qaasr / preflight）
+
+- **空指纹签核被判「内容一致」**：`str(rec.hash) != str(current)` 在两边都是空串时判相等，QC 报告写 pass——签核绑指纹
+  的承诺被空值绕过。现在空指纹拆成两条独立判据（签核自身空 → skipped；当前算不出 → skipped）。
+- **内容指纹漏掉设计**：`content_hash()` 只含 script/scenes/engine，改了配色或版式几何（画面真变了）旧签核仍有效。
+  现在加 `design`（work/design.json 字节 sha1）与 `design_engine`（designkit/stylekit/grammar 源码指纹），实测只改
+  `visual.palette.bg/ink` → 旧 `stills` 签核变 skipped+stale，跨进程连跑 3 次 hash 全等。
+- **manifest.json 损坏时新鲜度检查假绿**：`load()` 有 `broken` 标记但 `check()` 直接忽略，stages 为空、一句话不报，
+  `--strict-stale` 也过。现在 `manifest-broken` 是硬问题（「新鲜度检查没有执行」），`snapshot()` 写回前清掉标记。
+- **qa 阶段不看上游**：`STAGE_IO["qa"].inputs` 为空，重跑 `frames`/`audio` 后 qa 的联系表与深检被当新鲜。现在 qa 的输入
+  是 `silent.mp4 / audio.wav / cues.json / timeline.json`（成片两路来源 + 同步对照 + 排轴）。
+- **`--require-sync` 覆盖环境变量**：CLI 用 `store_true`（缺省 False）并原样传给 `report()`，把 `--help` 承诺的
+  `QA_REQUIRE_SYNC` 覆盖掉——同一开关两条路径语义不同。现在 `default=None`，由 `report()` 自己读环境变量。
+- **解码出 0 帧仍报「质检通过」**：闪烁/空窗/同步三门全空 → errors 为空、CLI 退出 0，实际一帧没看。现在帧数 <=0 直接
+  `RuntimeError`（render 的 G9 退化为 skipped 而非 pass）。
+- **ffprobe / ffmpeg 子进程无超时**：坏文件或卡住的 ffmpeg 会挂死整道门禁。qa_frames 两处加 `timeout=120`、
+  qavmaf `_run` 默认 `timeout=300`，超时合成为失败结果继续走既有 fail-closed 分支。
+- **账本坏条目被说成「查了没过」**：结论先命中「fail N 项」，把「账本坏了」误导成判据问题，`elif bad_items` 成死分支。
+  现在真 fail 用 `counts[FAIL]-bad_items>0` 判，损坏单独走「未判定（这不等于通过）」。
+- **归档/耗时写失败静默**：`archive_run` 与 `append_cost` 的 `except OSError: pass` 改为收集原因（render 打 WARN、
+  `_stage_end` 的 WARN 分支接住），`--accept` 空指纹时明确提示「这条签核不会算通过」。
+- **Windows 管道 GBK**：gates/stagewatch/matchstyle_selftest 入口缺 `reconfigure`；qa_frames/qavmaf/qaasr 的
+  `reconfigure` 在 `parse_args` 之后（`--help` 与参数错误路径仍是 GBK）。现在统一前移到入口/argparse 之前，
+  库 import 不污染调用方 stdout。
+
+### 素材线（footage / footagekit / footageedit / footageqa）
+
+- **图片素材整条线必挂**：图片源不加 `-loop 1`，`-frames:v n` 只输出 1 帧 → 每镜 1 帧碎片、成片 0.13 s、assemble 报
+  「音视频不一致」。现在图片源加 `-loop 1`、无音轨源不抽 wav 并记 `audio=None`。
+- **切片失败静默产出短片段**：`filmkit._run` 不检查 returncode，素材比镜头短时静默产出短片段或 0 字节，concat 失败还在
+  日志写「0.00s」。现在 cut/concat 判 rc + 输出存在 + 逐镜量时长，偏短点名「素材比镜头短」。
+- **混音丢整条音轨**：`add()` 对缺失文件直接 `return`，旁白/环境声整条消失而 QC 只比总线长度看不出来。现在缺省
+  `required=True` 抛错并点名轨道（`audio=None` 表示「本来没有」，不算缺失）。
+- **F1/F2/F3/F6 四处假绿**：F1 在缺 sources.json / 源没探到 dur 时越界判定根本没执行却记 pass；F2/F3 声明了
+  burned_subs/watermark 但解析失败或区间非法时被当「没声明」仍 pass；F6 取「相邻两句之间」的间隙，而时间轴保证首尾
+  相接（间隙恒 0）→ 结构上永远 skipped。现在：F1 缺数据记 skipped（写明「先跑 probe」）、F2/F3 非法声明 = fail 并
+  点名源、F6 改量「本镜窗口内无旁白的部分」（门槛 0.25 s，实测 27–32 dB pass）。
+- **F4 对「成片不存在」记 skipped**，且拿容器时长给缺失那一路兜底 → 无声成片 video==audio → **pass**。现在成片不存在 /
+  探测不到流 / 缺音频流或视频流 / 读不到流时长全部 fail。
+- **F7 签核指纹覆盖不全**：只含 title/treatment/subtitle/lines/shot/EDL，改配乐音量、`licensing` 或片尾出处卡旧签核
+  照样有效。现在指纹含 title/treatment/subtitle/video/audio/pacing/credit/licensing/sources/lines/EDL，规范化序列化
+  （dict 排序、list 保序、float 归一到 6 位、`1` 与 `1.0` 同值；path/url 不进指纹——换机器不该失效）。
+- **F9 三处**：安全宽与写入端不同口径（边距大时误报全超宽）、docstring 承诺的「不越底边」没实现、pass detail 谎称
+  「已按 filmkit.fit_sub_lines 折行」。现在同口径、新增越底边判据（MarginV + 行数×1.2×字号 > 画布高）、detail 写真实机制。
+- **concat 列表不转义单引号**：Windows 目录带撇号时会让 ffmpeg 列表提前闭合（叠加「切片失败静默」时完全没声）。现在按
+  ffmpeg 官方写法把单引号转义成 `四字符序列`（详见代码注释）。
+- **ASS 时间戳 `0:00:60.00` 非法**：百分比格式化把 59.996 打成 60.00。现在先取整到厘秒再拆 h/m/s。
+- **不可识别素材**：`probe_file` 对 0 字节 / HTML 错误页返回 dur=0（`check_edl` 因假值跳过越界，到 cut 才炸）；HTTP 200
+  的错误页（<1 KB）还会静默落盘成 `dl/xxx.mp4`。现在 ffprobe 读不出流直接报错，产物 <=1024 字节删 `.part` 并报错。
+
+### web 引擎与插件入口（webengine / index.js）
+
+- **断点续跑只按「块文件存在」复用**：改了页面画面、帧率、chunk_s、crf、preset 后旧块被静默拼进新片（实测把 30fps
+  旧块当 60fps 片的块复用，日志照打 60、exit 0）。现在块目录落 `_plan.json` 指纹（页面资源/帧率/区间/块长/crf/
+  preset/画布/style），不一致即拒绝复用并指路「删块重渲 / --no-resume」。
+- **`render_full(fps=)` 在 `style=None` 时被静默丢弃**：`full --fps 60` 对 30fps 页面 exit 0 出 30fps 片。现在显式校验。
+- **textqa 契约错误抛裸 Playwright Error**：`--from >= DURATION` 或页面没导出 `window.qaText` 时 traceback + exit 1，
+  与「检出文字缺陷」同码。现在包成 RuntimeError → CLI exit 2（要改页面/环境）。
+- **页面 cue/event 静默跳过**：`getCues()` 里的非对象条目、缺 `t` 的 visual event 原先 `continue`，cues.json 少提示点、
+  音画同步少一条事件而门禁看着全绿。现在 `ValueError` 并点名第几条。
+- **`snap` 负数/NaN 时刻**：负数被当第 0 帧截下来、NaN 抛不可读 TypeError、`--every nan` 只截 1 张还 exit 0。现在入口
+  校验「非负有限秒数」。
+- **插件 frontmatter 少校验技能名**：DSH 0.2.x 对候选名 `validateCandidate` 是**抛错**（不是跳过），一个不合法的
+  `name` 会让整个 provider 的 `list()` 失败、自带技能全部消失。现在与官方同口径 `SKILL_NAME_RE`，非法就跳过该技能并告警。
+- **invocation 取值读不懂时静默退回「都可调用」**：官方 `frontmatterBoolean` 是抛错。现在解析失败返回 undefined
+  （frontmatter 非法 → 该技能跳过），旧驼峰键显式拒绝。
+
+### 仓库工具（estimate / golden_frames / audio_similarity / silhouette_qa）
+
+- **`golden_frames` 缺省基线不看生效 profile**：竖屏环境 `--check` 拿横屏基线比像素 = 假 FAIL；`--write` 把竖屏像素
+  静默写进横屏基线文件 = 原基线被覆盖。现在按 `--layout` 或 `VIDEO_STUDIO_LAYOUT` 选基线；`--write` 跨环境覆盖时把
+  环境差异写进 `notes`（只提示不阻止）。
+- **`estimate` 把坏 timeline 当真**：total 写成非数字 / frames 为 null 被当成真实帧数，报告 frames=0、磁盘 0、不报错；
+  `min_dur:NaN` 一路到 `int(round(nan))` 抛 traceback；`--rerender inf` 把 Infinity 写进 JSON；crf 写成字符串原样透出
+  而磁盘按 17 算。现在字段校验（非有限正数就退回剧本粗估并告警）、`--json` 类型稳定、退出码 2。
+- **`audio_similarity` 三个假绿**：C1 只判 duck>=3.5 而契约是 3.5–5.5（配乐一抖一抖仍 PASS）；B 组缺前置，空轨/
+  全静音时「两个空数组相等」让 B1/B3 天然 PASS；`--dur 0/NaN` 在深处抛 traceback 与「阈值不达标」同码。现在 C1 区间
+  判定、新增 B0 非静音前置、参数阶段 `ap.error`（exit 2）。
+- **silhouette_qa 的 G13 撞名**：改标识 **S13**（判据/阈值/退出码零改动），并在 docstring 注明「离线检查编号，不进
+  render.py 的 gate matrix」。
+
+### schema / 文档 / 体检验收
+
+- **新增仓库体检第 17 项「包面清单完整」**：README 的 `## 文件结构` 是用户与 Agent 认识仓库的唯一地图，而它漏了 7 个
+  脚本、4 个工具、5 篇 references 与 4 项资产——第 7 项只能查「写出来的路径存不存在」，查不到「存在的文件有没有被写
+  出来」。现在结构块必须覆盖每个受管文件（已按实际补齐）。
+- **新增仓库体检第 18 项「文档命令行开关一致」**：文档就是 Agent 的行动依据，把 A 脚本的开关写到 B 脚本上、参数改名后
+  文档没跟，都会让「照文档抄」直接 argparse 报错。现在按行切段归属脚本、逐个核对 `--flag` 真的存在于该脚本源码
+  （实测全仓 308 处引用 0 误报）。
+- **第 14 项「断言条数一致」扩到 references/ 与 studio.py**：旧清单只扫 SKILL/README/分发页/CI 注释，于是
+  `audio.md`/`audio-variation.md` 停在 77、`quality-gates.md` 停在 85、`script-index.md` 停在 97，`studio.py` 的
+  `check` 子命令描述也写死过条数——全部静默漂移。现在这些都纳入扫描，并在扫描前剥掉「第 54 条」这类序数引用
+  （旧正则只排除「第54条」无空格写法，文档普遍写成「第 54 条」，一扩范围立刻假红）。
+- **第 14 项也查「全 PASS（N 条）」「（当前 N 条）」两种旧写法**：只要一行在讲 selfcheck/自检/回归且出现 2~3 位数 + 条，
+  那个数就必须等于 `CASES` 真值。
+- **schema 契约与执行器对齐（四个文件）**：design 补 8 处必填（label/pitch/family/align/detail/enter/inset/item_stagger）、
+palette 接受 `#rrggbb`、`music.bpm` 收紧到 40–220 数字、`voice` 按 mode 分支（edge_id 才要求 map/jitter/max_distinct）；
+film 补 `voice.max_distinct` 上限 8、persona 标注已废弃、`music.mood` 补 `tense`；footage 补 `licensing` 块
+（F8 唯一逃生口，原先 schema `additionalProperties:false` 会把合法配置判非法）、`sources[]` 要求 path/url 二选一、
+`subtitle.family/spacing`；proposal 补 `scriptHash/scriptPath/intake/ledger`、删掉执行器从不写的 `rejected`。
+另把 `design_to_plan` 不消费的字段（size/fps/segments/beats/hold_policy/cues/sections/file/arranger）统一标注
+「保留字段，不进渲染计划」并写清真源——旧描述让人以为写了有用。
+- **`studio.py` 的子命令描述改为从 `selfcheck.CASES` 现读条数**（曾写死「76 条」「85 条」两个过时数字，条数一涨就成了
+  假话）；`--report` 措辞改成「只写 work/style_profile.json 快照，不改 design/footage」（与实现一致）。
+- **文档口径按实现更新**：`--stage tts` 会顺带排一次轴；`--cost` 不传就不记（「`--stage all` 自动记」是错的）；
+  `--preview` 只支持 PIL 引擎、与单 stage 互斥、秒数下限是一帧；批量开关的透传/互斥语义；素材线门禁表补 F4/F6/F9 的
+  skipped 条件、F7 指纹字段、`--stage all` 实际只跑 7 个阶段；音频验收表按工具实际编号重排（A0–A3 / B0–B3）并把实测值
+  更新到当前口径；G13/S13 的编号映射补进 `references/quality-gates.md` 的两套编号表。
+- **`tools/selftest_noscipy.py` / `tools/scenes_hybrid_selftest.py` 补 UTF-8 stdio**：Windows 管道默认 gbk，
+  箭头/破折号/勾号这类字符会 UnicodeEncodeError 直接崩（实测修前输出乱码，修后正常）。
+
+### 验证
+
+```
+python tools/ci_check.py                 # PASS 18 / FAIL 0 / SKIP 0
+cd skills/video-studio/scripts && python selfcheck.py   # PASS 101 / FAIL 0 / SKIP 0
+python tools/footage_selftest.py         # PASS 7 / FAIL 0
+python tools/golden_frames.py --check    # 3 帧像素一致（横/竖/构图四套基线）
+python tools/audio_similarity.py --strict # STRICT PASS（A/B/C/D 四组）
+python webengine.py --selftest           # 36/36（真起无头浏览器）
+node tools/plugin_entry_check.mjs        # PASS（provider 注册 + list/get）
+```
+
+新增的 4 条回归断言：**101** 局部 stage 不覆盖上一轮交付账本（实测 15 条 → 2 条）／**102** schema 必填与
+`validate_design` 对齐（8 处漂移，逐字段删除后两边都必须报错）／**103** `voice mode=wav` 必须能转计划
+（原 `KeyError 'map'`：`validate_design` 对 wav 只要求 id，`design_to_plan` 却无条件读 map/jitter/max_distinct）／
+**104** `lines[].persona` 已废弃（`voicekit` 删掉 `PERSONA_IDS` 后 filmcheck 那段枚举校验恒不执行，
+写 persona 的 film.json 契约全绿、到 TTS 阶段才 ValueError；现在显式报 `removed_persona`）／**105** 横屏文字越出 SAFE
+必须被钳回（采样器 `bias.x` 允许 -150，hero 左缘可算到 60px < SAFE 64px；`_fit_px` 原来横屏直接原样返回，G13 于是报
+24 处「越出安全区」——门禁是对的、渲染器没兜住。现在钳位对横屏也生效，但**越界才钳**，SAFE 内像素不动，四套金帧
+基线不受影响）。
+
+另用一份 29 s 夹具片在**两条不同设计**上各跑通一次 `--stage all`（`--vmaf sample` 与 `--vmaf off` 各一次）：
+容器 1920x1080@30 / h264+aac / 31–32 s、响度 -16.3 LUFS / 真峰 -1.4 dBTP、锐度比 1.02、VMAF 97.24–97.26 /
+SSIM 0.9977、ASR 字符召回 0.885–0.926、G13 版式文字冲突 0 处压盖；门禁 pass 11–13 · fail 0 · skipped 1–3
+（skipped 全是人工签核与显式关闭的 VMAF；G13/S13 相关的两轮回归都覆盖到了）。
+
+> 端到端冒烟里发现并当场修掉的最后一个真 bug：**采样器允许 `visual.bias.x = -150`，但 hero 左缘因此算到 60px，
+> 低于 SAFE 左界 64px** —— G13 报 24 处「越出安全区」。门禁没错，错的是渲染器没兜住（`_fit_px` 为保金帧在横屏
+> 直接原样返回）。修法是「越界才钳」：SAFE 内的文字一个像素不动（四套金帧基线全部 OK），越界的推回边界并记进
+> `_CLAMPED` 诊断表；新增自检第 105 条钉住这个方向。
 ## 2.7.2 — 版式文字冲突门禁（G13）+ 字幕折行同一真源（F9）+ 场景模块来源可见
 
 一次真实返工的复盘：一部 19 分钟的片子里**整片字压字**（章节卡的 kicker 压在章节名上、

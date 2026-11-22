@@ -39,6 +39,8 @@ const bundledSkillDir = fileURLToPath(new URL("./skills/", import.meta.url));
 const LEGACY_PROVIDER_PKG = "@deepseek-ai/dsh-skill-filesystem";
 /** 打包技能根的 rank（与 dsh-skill 的 BUNDLED_SKILL_RANK 同值）。 */
 const BUNDLED_SKILL_RANK = 600;
+/** 技能名语法（与 @deepseek-ai/dsh-skill 的 SKILL_NAME 同口径；注册表按它校验候选）。 */
+const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** 本 provider 在 ctx.skills 里的名字（"runtime" 是注册表保留名，不能用）。 */
 const PROVIDER_NAME = "video-studio";
 
@@ -110,7 +112,8 @@ function createBundledProvider(ctx) {
           continue;
         }
         if (parsed === undefined) {
-          warn(ctx, "跳过技能 " + entry.name + "：SKILL.md 缺少合法 frontmatter（需要 name 与 description）");
+          warn(ctx, "跳过技能 " + entry.name + "：SKILL.md 缺少合法 frontmatter"
+            + "（需要合法 name（小写 kebab-case）与 description；invocation 策略的取值也要合法）");
           continue;
         }
         if (parsed.name !== entry.name) {
@@ -148,7 +151,8 @@ function createBundledProvider(ctx) {
       }
       const parsed = parseSkillFile(raw);
       if (parsed === undefined) {
-        throw new Error("video-studio: " + file + " 的 frontmatter 已失效（需要 name 与 description）");
+        throw new Error("video-studio: " + file + " 的 frontmatter 已失效"
+          + "（需要合法 name（小写 kebab-case）与 description；invocation 策略的取值也要合法）");
       }
       if (parsed.name !== candidate.name) {
         throw new Error(
@@ -264,7 +268,11 @@ function parseFrontmatterScalars(yaml) {
  * 解析 SKILL.md：YAML frontmatter -> { name, description, invocation, content }。
  *
  * 与官方 dsh-skill-filesystem 的 parseSkillFile 同口径：frontmatter 必须以 --- 开头、
- * 以单独一行的 --- 结束；缺 name 或 description 视为非法（返回 undefined）。
+ * 以单独一行的 --- 结束；缺 name / description、name 不是小写 kebab-case、或
+ * invocation 取值读不懂，一律视为非法（返回 undefined）。
+ *
+ * 为什么 name 语法也要在这里拦：注册表对非法 name 是 **抛错**（validateCandidate），
+ * 不是跳过该技能——一个不合法的名字会让整个 provider 的 list() 失败，全部自带技能消失。
  *
  * @param raw - SKILL.md 全文。
  * @returns 解析结果；不合规时返回 undefined。
@@ -288,11 +296,13 @@ export function parseSkillFile(raw) {
   if (data === undefined) return undefined;
   const name = typeof data.name === "string" ? data.name.trim() : "";
   const description = typeof data.description === "string" ? data.description.trim() : "";
-  if (name === "" || description === "") return undefined;
+  if (name === "" || description === "" || !SKILL_NAME_RE.test(name)) return undefined;
+  const invocation = parseInvocation(data);
+  if (invocation === undefined) return undefined;
   return {
     name,
     description,
-    invocation: parseInvocation(data),
+    invocation,
     content: lines.slice(closeIndex + 1).join("\n").trim(),
   };
 }
@@ -300,23 +310,39 @@ export function parseSkillFile(raw) {
 /**
  * 读 invocation 策略。
  *
- * 与官方语义一致：只认标准键 disable-model-invocation / user-invocable，
- * 缺省 = 模型与用户都可调用。本技能的 SKILL.md 没写这两项，所以恒为默认档。
+ * 与官方 dsh-skill-filesystem 的 parseInvocationPolicy 同口径：只认标准键
+ * disable-model-invocation / user-invocable，缺省 = 模型与用户都可调用。
+ * 但值读不懂（例如 true/false/yes/no/on/off/1/0 之外的字符串）或用了旧版驼峰键时，
+ * 返回 undefined（= frontmatter 非法、跳过该技能并告警），**不能**静默退回「都可调用」：
+ * 那会把一条写错的 disable-model-invocation 悄悄变成放行。
  *
  * @param data - 顶层标量映射。
- * @returns 调用策略对象。
+ * @returns 调用策略对象；取值非法时返回 undefined。
  */
 function parseInvocation(data) {
+  // 旧版驼峰键在官方 provider 里是显式拒绝的（rejectLegacyInvocationKey）；这里同样不当默认值忽略。
+  for (const legacy of ["disableModelInvocation", "modelInvocable", "userInvocable"]) {
+    if (Object.hasOwn(data, legacy)) return undefined;
+  }
   const asBoolean = (value) => {
-    if (value === undefined) return undefined;
     const text = String(value).trim().toLowerCase();
     if (text === "true" || text === "yes" || text === "on" || text === "1") return true;
     if (text === "false" || text === "no" || text === "off" || text === "0") return false;
     return undefined;
   };
+  const disableModelInvocation = Object.hasOwn(data, "disable-model-invocation")
+    ? asBoolean(data["disable-model-invocation"])
+    : undefined;
+  const userInvocable = Object.hasOwn(data, "user-invocable")
+    ? asBoolean(data["user-invocable"])
+    : undefined;
+  if ((Object.hasOwn(data, "disable-model-invocation") && disableModelInvocation === undefined)
+      || (Object.hasOwn(data, "user-invocable") && userInvocable === undefined)) {
+    return undefined;
+  }
   return {
-    modelInvocable: asBoolean(data["disable-model-invocation"]) !== true,
-    userInvocable: asBoolean(data["user-invocable"]) !== false,
+    modelInvocable: disableModelInvocation !== true,
+    userInvocable: userInvocable !== false,
   };
 }
 

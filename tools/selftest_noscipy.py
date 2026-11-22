@@ -43,7 +43,20 @@ raise SystemExit(mod.selftest())
 """
 
 
+def _setup_stdio():
+    """Windows 管道默认 gbk：→/—/✓ 这类字符会直接 UnicodeEncodeError。
+
+    子进程（sfxkit/scorekit）自己 reconfigure 了，本脚本的中文摘要没有；
+    Agent 用 subprocess 抓输出时就会撞上乱码或直接崩。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv=None) -> int:
+    _setup_stdio()
     args = list(argv if argv is not None else sys.argv[1:])
     modules = args or ["sfxkit", "scorekit"]
     bad = []

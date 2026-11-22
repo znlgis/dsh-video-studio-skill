@@ -140,16 +140,35 @@ def scan(tl, scenes_mod, script, safe=None, sub_band=None, max_scenes=None):
 
 
 def gate_result(rep, name="G13"):
-    """把 scan() 的结果转成账本行（与 render.py 的 GateLedger 对齐）。"""
-    if rep.get("skipped") and rep.get("checked", 0) == 0:
-        return dict(gate=name, status="skipped",
-                    detail="；".join(rep["skipped"][:2]) or "没有可检查的场景")
+    """把 scan() 的结果转成账本行（与 render.py 的 GateLedger 对齐）。
+
+    三档语义必须严格（顺序也有讲究）：
+      * 有 error 就是 fail——**哪怕同时有段没查完**：错就是错，不能被 skipped 吞掉
+        （旧实现先判"checked==0 且全跳过"，于是"首帧查到压盖、次帧渲染崩"会被记成
+        skipped，压盖证据直接消失）；
+      * 一段都没真正检查（checked==0）记 skipped，不能因为"没报错"就写成 pass；
+      * 有文字的场景**一个文字框都没采到**（boxes==0）说明采集钩子失效/全被裁掉，
+        这不是"0 处压盖"，只能记 skipped。
+    """
+    checked = int(rep.get("checked") or 0)
+    boxes = int(rep.get("boxes") or 0)
+    why = [str(x) for x in (rep.get("skipped") or [])]
     if rep.get("errors"):
         return dict(gate=name, status="fail",
                     detail="%d 处版式冲突：%s" % (len(rep["errors"]),
                                                  "；".join(rep["errors"][:3])),
                     values={"errors": rep["errors"][:20],
-                            "scenes": rep["checked"], "boxes": rep["boxes"]})
+                            "scenes": checked, "boxes": boxes})
+    if checked == 0:
+        return dict(gate=name, status="skipped",
+                    detail="没有可检查的场景（%s）"
+                           % ("；".join(why[:2]) or "时间轴里没有段"))
+    if boxes == 0:
+        return dict(gate=name, status="skipped",
+                    detail="%d 段有文字但一个文字框都没采到（采集钩子失效或框全被裁掉，"
+                           "不能当作 0 处压盖）：%s"
+                           % (checked, "；".join(why[:2]) or "采集端没记录任何落笔矩形"),
+                    values={"scenes": checked, "boxes": 0})
     if rep.get("skipped"):
         return dict(gate=name, status="pass",
                     detail="%d 段 / %d 个文字框，0 处压盖（%d 段跳过：%s）"

@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -65,7 +66,10 @@ def _early_layout(argv=None):
         if tok.startswith("--layout="):
             want = tok.split("=", 1)[1]
             break
-    if want:
+    # 只认 argparse 允许的两个值：非法值（--layout bogus / --layout --stage）若先灌进
+    # 环境变量，filmkit 会在 import 期抛 RuntimeError traceback，argparse 的 choices
+    # 报错永远到不了用户眼前。
+    if want in ("landscape", "portrait"):
         os.environ["VIDEO_STUDIO_LAYOUT"] = want
 
 
@@ -705,7 +709,9 @@ def st_layout(script, work, lines=None):
     print("   总时长 %.2fs / %d 帧 / %d 段 / srt %d 条 / ass %d 条"
           % (tl["total"], tl["frames"], len(tl["scenes"]), n_srt, n_ass))
     # 安全区自查：字幕一旦越界，mux 前就能发现
-    safe_errs = K.qa_text_safe(tl["scenes"])
+    # 按**本片设计**的字幕参数量（draw_subtitle 用同一套）：只按模块默认 46px/2 行量，
+    # 设计放大字号或把 max_lines 提到 3 时越界会被漏掉。
+    safe_errs = K.qa_text_safe(tl["scenes"], **K.subtitle_kwargs(plan))
     if safe_errs:
         print("   [WARN] 字幕安全区:", safe_errs[:3])
     # 字形自查：缺字符会被画成方块
@@ -1349,6 +1355,11 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
     errs = res.get("errors") or []
     st = (res.get("checks") or {})
     detail = " ".join("%s=%s" % (k, v.get("status")) for k, v in st.items()) or "-"
+    # 预检自己也可能"没查"（tts 还没跑、字形范围不完整…）。只看 errors 会把它记成
+    # pass——「没执行」被当成通过，--strict-gates 也抓不到。这里把 skipped 明说，
+    # 并在账本里降级成 skipped（带原因），让报告如实反映"这一项没真查"。
+    skip_items = [k for k, v in st.items()
+                  if isinstance(v, dict) and str(v.get("status") or "") == "skipped"]
     if errs:
         if lg is not None:
             lg.fail("G0", "渲染前资源预检", "%d 处问题：%s" % (
@@ -1360,6 +1371,12 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
             where = (e.get("where") if isinstance(e, dict) else "") or ""
             print("     - %s%s" % ((where + "：") if where else "", msg))
         return False
+    if skip_items:
+        why = "%s 未执行（%s）" % ("、".join(skip_items[:4]), detail)
+        if lg is not None:
+            lg.skip("G0", "渲染前资源预检", why)
+        print("   [WARN][preflight] %s —— skipped != 通过" % why)
+        return True
     if lg is not None:
         lg.ok("G0", "渲染前资源预检", detail)
     print("   [preflight] %s" % detail)
@@ -1690,14 +1707,25 @@ def _st_frames_web(tl, work, script, jobs=1, resume=True):
             % (float(page_dur), float(tl["total"]), abs(float(page_dur) - float(tl["total"])),
                float(tl["total"]), _web_where(entry)))
 
-    out = we.render_full(entry, silent, float(tl["total"]),
-                         workers=max(1, int(jobs)),
-                         chunk_s=float(web.get("chunk_s", 30.0)),
-                         resume=bool(resume),
-                         crf=int(script.get("crf", 17)),
-                         preset=str(script.get("preset", "slow")),
-                         style=style, width=canvas_w, height=canvas_h,
-                         fps=int(tl["fps"]))
+    try:
+        out = we.render_full(entry, silent, float(tl["total"]),
+                             workers=max(1, int(jobs)),
+                             chunk_s=float(web.get("chunk_s", 30.0)),
+                             resume=bool(resume),
+                             crf=int(script.get("crf", 17)),
+                             preset=str(script.get("preset", "slow")),
+                             style=style, width=canvas_w, height=canvas_h,
+                             fps=int(tl["fps"]))
+    except ValueError as e:
+        # webengine 的断点续跑会比对块目录里的 _plan.json 指纹（页面/帧率/块长/crf/preset/画布），
+        # 不一致就拒绝复用旧块。这里转成一行中文 + 可执行修法，别把 ValueError 的 traceback
+        # 甩给用户（PIL 路线同类提示是 [断点续跑] …）。
+        raise SystemExit(
+            "[断点续跑] 浏览器渲染的分块计划已变化：%s\n"
+            "  旧块是按上一版页面/参数渲的，直接复用会拼出错片。两种修法：\n"
+            "    1) 删掉块目录后重渲：%s\n"
+            "    2) 或加 --no-resume 重跑本阶段"
+            % (e, os.path.join(str(work), "chunks"))) from e
     got = K.media_dur(str(out) if out else silent)
     want = float(tl["frames"]) / float(tl["fps"])
     if abs(got - want) > 0.5:
@@ -1828,7 +1856,10 @@ def _qa_gates(lg, rep, deep, tl, work):
 
     # ---- G9 帧级深检（闪烁 / 空窗 / 音画同步）----
     if deep is None:
-        lg.skip("G9", "帧级深检（闪烁/空窗/同步）", "没有 qa_frames.py 或深检失败")
+        lg.skip("G9", "帧级深检（闪烁/空窗/同步）", "没有 qa_frames.py，深检没执行")
+    elif deep.get("_failed"):
+        # 深检自身报错 = 没查成（不是通过）：如实记 skipped 并带上真实原因。
+        lg.skip("G9", "帧级深检（闪烁/空窗/同步）", "深检没有执行：%s" % deep["_failed"])
     else:
         nf = len(deep.get("flicker") or [])
         nb = len(deep.get("black_windows") or [])
@@ -1945,8 +1976,15 @@ def _qa_text_layout_gate(lg, tl, work, scenes_mod, script):
         lg.skip("G13", "版式文字冲突（压盖/越界）",
                 "scenes.py 是旧版（没有 text_qa_start 采集钩子），本片没查")
         return None
-    rep = qx.scan(tl, scenes_mod, script, safe=K.SAFE, sub_band=K.SUB_BAND)
-    res = qx.gate_result(rep)
+    # 门禁自身出错必须记 fail（G11/G12 都是这个口径）：裸抛会让 --stage qa 在写报告
+    # 之前整个崩掉，报告里连"这项没查成"都没有。
+    try:
+        rep = qx.scan(tl, scenes_mod, script, safe=K.SAFE, sub_band=K.SUB_BAND)
+        res = qx.gate_result(rep)
+    except Exception as e:                                  # noqa: BLE001
+        lg.fail("G13", "版式文字冲突（压盖/越界）", "门禁自身失败：%s" % e)
+        print("   [FAIL][G13]", e)
+        return None
     st, detail = res["status"], res["detail"]
     if st == "fail":
         lg.fail("G13", "版式文字冲突（压盖/越界）", detail)
@@ -2182,7 +2220,10 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
         print("   锐度比 %.2f（参考帧=场景函数重渲染，不是成片抽帧）" % q["ratio"])
     elif ref_img is None and scenes_mod is None:
         print("   [WARN] 锐度比门禁未执行（没有参考帧）")
-    safe = K.qa_text_safe(tl["scenes"])
+    # st_qa 是独立函数（也可被 --stage qa 单独调用），plan 从 script["_style"] 取；
+    # 没挂上时按空 dict（= 模块默认字幕参数，与旧行为逐像素一致）。
+    _plan = script.get("_style") if isinstance(script, dict) and isinstance(script.get("_style"), dict) else {}
+    safe = K.qa_text_safe(tl["scenes"], **K.subtitle_kwargs(_plan))
     print("   字幕安全区:", "OK" if not safe else safe[:2])
     # 字幕安全区 / 缺字形若只 print、不进 qa_report 的 warnings，
     # CI、前端、任何只读 JSON 的人都**看不到**这两条（"门禁可以保守，但不能静默"）。
@@ -2242,8 +2283,10 @@ def _qa_deep(film, work, tl, script):
                          out_json=os.path.join(qa_dir, "deep.json"),
                          out_png=os.path.join(qa_dir, "deep.png"))
     except Exception as e:                                  # noqa: BLE001
+        # 不能只打印就 return None：G9 的 skipped 文案会把"qa_frames 缺失"与"深检自己炸了"
+        # 混成同一句，报告里看不出真实的失败原因（例如 0 帧解码、坏文件）。
         print("   [WARN][deep] 帧级深检失败（不影响成片）:", e)
-        return None
+        return {"_failed": "%s: %s" % (type(e).__name__, e)}
     print("   [deep] 闪烁 %d / 空窗 %d / 同步超差 %d  -> %s"
           % (len(deep.get("flicker") or []), len(deep.get("black_windows") or []),
              len(deep.get("sync") or []), os.path.join(qa_dir, "deep.json")))
@@ -2366,6 +2409,30 @@ def _finish_gates(a, persist=True):
     lg = _LEDGER
     if lg is None:
         return 0
+    # 独立 stage（--stage style/frames/mux/stills）只带自己那几条门禁，直接落盘会把
+    # 上一轮 --stage qa/all 的交付结论（G4–G13）整份覆盖成「本次只查了 1 项」——
+    # 报告还在，但内容变成半成品，交付凭据被打穿。写盘前先把磁盘上**内容指纹一致**
+    # 的旧条目搬回来，本阶段同名条目照旧后写覆盖（GateLedger.add 的语义）。
+    # accept 分支自己调过 _reload_ledger_from_disk，all/qa 一轮里 lg 已含本轮全部条目，
+    # 重复调用是幂等的（同名同内容再 add 一次）。
+    if persist:
+        # 合并方向必须是「旧账本打底、本轮条目最后写」：_reload 走的是 add()，
+        # 同名后写覆盖。若先 reload 再不动，本轮刚记的 style 结论会被上一轮的旧
+        # style 条目盖掉（实测：报告里的 style 又变回上一轮的 detail）。
+        mine = [dict(it) for it in lg.items]
+        mine_bypassed = [dict(b) for b in lg.bypassed]
+        try:
+            _rel = _reload_ledger_from_disk(a.work, lg)
+        except Exception as e:                              # noqa: BLE001
+            _rel = 0
+            print("   [WARN] 旧门禁账本没能合并（%s）：本次报告只含本轮条目" % e)
+        for it in mine:
+            lg.add(it["id"], it.get("title"), it.get("status"), it.get("detail"),
+                   at=it.get("at"))
+        if mine_bypassed:
+            lg.bypassed = mine_bypassed + [b for b in lg.bypassed if b not in mine_bypassed]
+        if _rel:
+            print("   [ledger] 已合并上一轮 %d 条同指纹门禁结论（本轮同名项覆盖）" % _rel)
     errs = list(lg.exit_errors(strict=bool(getattr(a, "strict_gates", False))))
     gj = rep = ""
     if persist:
@@ -2461,13 +2528,32 @@ def _load_batch(path):
 
         script = _abs(row["script"])
         stem = os.path.splitext(os.path.basename(script))[0]
+        scenes = _abs(row.get("scenes"))
+        if not scenes:
+            # 缺省只在剧本目录**真的有** scenes.py 时才传：无条件传一个不存在的路径，
+            # 会让批量里"靠技能内置渲染器出片"的片子全部报「--scenes 不存在」，
+            # 而同样的剧本单跑是能出片的（_resolve_scenes 的第三档回退）。
+            default_scenes = os.path.join(os.path.dirname(script), "scenes.py")
+            scenes = default_scenes if os.path.exists(default_scenes) else ""
         jobs.append(dict(
             script=script,
-            scenes=_abs(row.get("scenes"), os.path.join(os.path.dirname(script), "scenes.py")),
+            scenes=scenes,
             work=_abs(row.get("work"), os.path.join(base, "work_" + stem)),
             out=_abs(row.get("out"), os.path.join(base, "out", stem + ".mp4")),
             label=str(row.get("label") or stem),
         ))
+    # 不同目录下的同名剧本会解析出同一个 work/out：后一条把前一条的成片覆盖掉，
+    # 但两条都报 OK——"批量成功"里少了一部片，交付时才发现。撞车一律在开跑前拒绝。
+    for _key in ("work", "out"):
+        _seen = {}
+        for j in jobs:
+            _k = os.path.normcase(os.path.abspath(j[_key]))
+            if _k in _seen:
+                raise SystemExit(
+                    "[batch] %s 撞车：%r 与 %r 都解析到 %s。批量里同名剧本必须逐条显式写 "
+                    "work / out（清单条目给全 {script, work, out}）"
+                    % (_key, _seen[_k], j["label"], j[_key]))
+            _seen[_k] = j["label"]
     return jobs
 
 
@@ -2526,14 +2612,31 @@ def run_batch(a):
     for j in jobs:
         print("\n---- [batch] %s ----" % j["label"])
         cmd = [sys.executable, os.path.join(here, "render.py"),
-               "--script", j["script"], "--scenes", j["scenes"],
+               "--script", j["script"],
                "--work", j["work"], "--out", j["out"], "--stage", "all"]
+        # --scenes 只在清单显式给了、或剧本目录真的有 scenes.py 时才传（见 _load_batch）。
+        if j.get("scenes"):
+            cmd += ["--scenes", j["scenes"]]
         cmd += ["--engine", a.engine] if a.engine else []
         cmd += ["--cost"] if a.cost else []
         cmd += ["--strict-gates"] if a.strict_gates else []
         # --layout 必须透传：父进程的 _early_layout 只作用于父进程，子进程是独立进程，
         # argv 里没有 --layout 就按横屏渲——批量出竖屏片会静默全变横屏。
         cmd += ["--layout", a.layout] if a.layout else []
+        # 逐条也成立的开关必须透传：父进程解析完就丢，等于用户写了 --jobs 4 却按单进程
+        # 跑、写了 --force-tts 却复用旧旁白。
+        if int(a.jobs or 0) != 1:
+            cmd += ["--jobs", str(a.jobs)]
+        for _flag, _on in (("--resume", a.resume),
+                           ("--force-tts", a.force_tts),
+                           ("--force-music", a.force_music),
+                           ("--strict-stale", a.strict_stale),
+                           ("--allow-stale", a.allow_stale),
+                           ("--no-gate", a.no_gate),
+                           ("--require-proposal", a.require_proposal),
+                           ("--strict-scenes", a.strict_scenes)):
+            if _on:
+                cmd.append(_flag)
         t0 = time.time()
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            errors="replace")
@@ -2716,7 +2819,18 @@ def main():
                                         ("--gate", bool(a.gate)),
                                         ("--run-id", bool(a.run_id)),
                                         ("--vmaf", bool(a.vmaf)),
-                                        ("--no-preflight", bool(a.no_preflight))) if on]
+                                        ("--no-preflight", bool(a.no_preflight)),
+                                        # 下面这些在批量里没有 per-film 出口：显式给了
+                                        # 就报错，不再静默当没看见（--out/--work 尤其
+                                        # 常见：用户以为能让整批都写到那儿）。
+                                        ("--verdict", a.verdict != "approved"),
+                                        ("--note", bool(a.note)),
+                                        ("--by", bool(a.by)),
+                                        ("--stills", bool(a.stills)),
+                                        ("--script", a.script != "film.json"),
+                                        ("--scenes", bool(a.scenes)),
+                                        ("--out", a.out != "out/film.mp4"),
+                                        ("--work", a.work != "work")) if on]
         if _clash:
             raise SystemExit("[batch] 与 %s 互斥：批量只按清单逐条跑 `--stage all`，"
                              "这些开关写进清单或用单条 render.py 指定"
@@ -2861,7 +2975,11 @@ def main():
                 print("              %-8s %s" % (g, GT.GATES[g]))
         elif not rejected:
             _LEDGER.ok("signoff", "人工签核", "%d/4 道闸已签" % len(GT.GATE_ORDER))
-    if a.force_music:
+    # --force-music 的语义是"丢弃配乐后由 score 阶段重出"（argparse help 也这么写），
+    # 但它排在 stage 分发之前：原实现对任何 stage 都先删 music.wav/score.json，
+    # `--stage explain`（只读）/ `--stage qa` / `--stage accept` 这类不会重出配乐的
+    # 命令会静默把已交付的配乐删掉。只有 all/score（且不是 --preview）才真重出。
+    if a.force_music and not a.preview and a.stage in ("all", "score"):
         plan, _why = K.music_plan(script, has_music_file=os.path.exists(os.path.join(a.work, "music.wav")))
         if plan in ("off", "bed", "file"):
             print("[force-music] %s：不清 work/music.wav（那是外部配乐 / 本片不用配乐）" % plan)
@@ -2870,6 +2988,8 @@ def main():
                 p = os.path.join(a.work, name)
                 if os.path.exists(p):
                     os.remove(p)
+    elif a.force_music:
+        print("[force-music] --stage %s 不会重出配乐，跳过清理（只在 score / all 生效）" % a.stage)
     tl_p = os.path.join(a.work, "timeline.json")
     tts_p = os.path.join(a.work, "tts.json")
 
@@ -2933,8 +3053,19 @@ def main():
             secs = float(a.preview)
         except ValueError:
             raise SystemExit("[preview] 需要秒数，例如 --preview 15") from None
-        if secs <= 0:
-            raise SystemExit("[preview] 秒数必须 > 0")
+        # 0 / 负数 / nan / inf 都在这里挡住：nan、inf 会在 int(round(...)) 抛
+        # ValueError/OverflowError traceback；0 会渲 0 帧后照样 return 0（空预览当成功）。
+        if not math.isfinite(secs) or secs <= 0:
+            raise SystemExit("[preview] 秒数必须是大于 0 的有限数字，例如 --preview 15")
+        # --preview 是独立模式，排在 stage 分发之前：与单 stage 同给时原来会静默只出
+        # 预览、把 --stage qa 之类的请求整个吞掉；且预览固定走 PIL 逐帧（_render_range），
+        # --engine web 的项目会拿到一部"用另一个渲染器画的"预览片。两处都不许静默。
+        if a.stage not in ("", "all"):
+            raise SystemExit("[preview] --preview 与 --stage %s 互斥：先出预览，再单跑该 stage"
+                             % a.stage)
+        if engine == "web":
+            raise SystemExit("[preview] 只支持 --engine pil：web 页面按整片渲染，预览请用 "
+                             "--stage frames 分块（或改用 pil 引擎）")
         # 自动补前置（照抄 stills 分支的写法）：README 把 --preview 15 列在常用开关里，
         # 可干净 work/ 下直接 ensure_tl() 会 SystemExit「先跑 --stage layout」——照文档
         # 抄一遍必失败，而且用户看不出"只差一次 TTS + 排轴"。这里缺什么就真跑什么，
@@ -2963,6 +3094,9 @@ def main():
         out_mp4 = os.path.join(pdir, "preview", stem + "_preview.mp4")
         os.makedirs(os.path.dirname(out_mp4), exist_ok=True)
         n = min(int(round(secs * float(tl["fps"]))), int(tl["frames"]))
+        if n < 1:
+            raise SystemExit("[preview] %.3f 秒不足一帧（fps=%s），至少给 %.3f 秒"
+                             % (secs, tl["fps"], 1.0 / float(tl["fps"])))
         print("== Preview（前 %.1fs / %d 帧）" % (n / float(tl["fps"]), n))
         sc2 = dict(script)
         sc2["_total"] = tl["total"]
@@ -3083,7 +3217,9 @@ def main():
             _print_style(script["_style"])
             _need(os.path.exists(os.path.join(a.work, "style.json")), "style.json 没写出来")
             _LEDGER.ok("style", "风格包解析", str(script["_style"].get("style")))
-            _LEDGER.write_json()
+            # 这里**不能**先 write_json()：带了 style 就落盘的账本只有 「stale+style」两条，
+            # 随后 _finish_gates 的合并读到的是这份半成品，上一轮 --stage all 的 G4–G13
+            # 反而捡不回来（实测：15 条被覆盖成 2 条）。合并与落盘统一交给 _finish_gates。
             # 不能无条件 return 0：--strict-gates 下 skipped 会让 _finish_gates 返回 1，
             # 账本里也可能已经有 fail —— 门禁结论必须落到退出码，否则 CI 把失败当成功。
             rc = _finish_gates(a)

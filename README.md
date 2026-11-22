@@ -1,12 +1,12 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-2.7.2-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-2.7.3-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **DeepSeek Harness 技能插件：两条生产线做中文视频——有素材就剪素材（footage 模式），没素材才用代码画。**
 
 写剧本 → edge-tts 旁白 → **实测时长**排时间轴 → **提示点**驱动配乐与音效 → PIL 或浏览器逐帧渲染 →
-ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）+ **四道新闸**
-（渲前资源预检 `G0` / 词级时间戳 `G10` / 全片 VMAF `G11` / ASR 回读 `G12`）。
+ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时间 / 页面）+ **五道新闸**
+（渲前资源预检 `G0` / 词级时间戳 `G10` / 全片 VMAF `G11` / ASR 回读 `G12` / 版式文字冲突 `G13`）。
 零素材、可复现、可断点续跑、可脚本化验收；装成插件后，整片生产流程随技能一起进入每个会话。
 
 ## 这个技能解决什么
@@ -28,7 +28,7 @@ ffmpeg 编码 → 采样级混音 → **四层质检**（容器 / 信号 / 时�
 | `holds` 写成拼写错误却静默失效 | `filmcheck.py` 执行 film.json 契约（接进 `ci_check` 第 12 项）；`schemas/film.schema.json` 供人和编辑器读字段（不做校验，只有两个测试读它核对枚举） |
 | 机器替你选风格、你从头到尾没参与 | **提案优先**：`propose.py` 先出 N 个候选（各带静帧联系表 + 设计距离），人 `--confirm` 后才冻结 `design.json` |
 | 每个视频都差不多 | 设计 DSL 现场采样（每次新 nonce）+ 候选两两 ≥2 维不同 + 底色色相分叉 + **片间去重台账** |
-| 外观只能从几套模板里挑 | 没有内置风格表：配色是连续色相空间、母题/转场/缓动/版式/字幕全字段开放，且候选要过 `theme_lint` 对比度体检（G13 剪影可区分是仓库离线门禁，CI 与 selfcheck 第 55 条守着判据） |
+| 外观只能从几套模板里挑 | 没有内置风格表：配色是连续色相空间、母题/转场/缓动/版式/字幕全字段开放，且候选要过 `theme_lint` 对比度体检（剪影可区分是仓库离线门禁 `S13`，CI 与 selfcheck 第 55 条守着判据） |
 
 ## 效果：同一个 brief，两次就是两部不同的片（可复现）
 
@@ -60,7 +60,7 @@ python <SKILL_DIR>/scripts/propose.py --brief "AI 大模型的三年，30 秒科
 
 **画面长什么样，由设计决定而不是由"第几套模板"决定**：10 类构图（hero / statement / list / stat /
 compare / process / quote / chapter / chart / outro）× 9 种装饰母题（默认素净、不带细线）× 6 种转场 × 连续色相配色 ×
-字幕样式 × 按章节轮换的版式——而且每个候选都要过 `theme_lint` 对比度体检；G13 剪影可区分是仓库离线门禁（`tools/silhouette_qa.py`，selfcheck 第 55 条守着判据）。
+字幕样式 × 按章节轮换的版式——而且每个候选都要过 `theme_lint` 对比度体检；剪影可区分是仓库离线门禁 `S13`（`tools/silhouette_qa.py`，selfcheck 第 55 条守着判据）。
 
 > 证据是**命令 + 你机器上的实测输出**，不是截图：这份仓库里没有"参考成片"，
 > 因为每次采样的外观都不一样，任何一张图都只代表某一次跑的结果。
@@ -102,7 +102,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，100 条断言，不联网）
+# 2) 环境自检（可选，105 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -175,9 +175,10 @@ cordis.patch.yml             组合包 patch（insert: video-studio）
 icon.svg / locale/*.json     插件页展示元数据
 skills/video-studio/
   SKILL.md                   主线：零拷贝上手 / 提案 / 设计 DSL / 八阶段 / 引擎 / 画质 / 声音 / 提示点 / 质检 / 升级
-  references/                proposal · scene-grammar · pipeline · scene-authoring · audio · audio-variation
-                             sfx-design · web-engine · frame-qa · quality-gates · word-timeline · delivery-gates
-                             change-impact · appearance · pitfalls
+  references/                （20 篇，按需加载）proposal · scene-grammar · pipeline · scene-authoring · appearance
+                             footage · hybrid-overlay · audio · audio-variation · sfx-design
+                             web-engine · frame-qa · quality-gates · delivery-gates · word-timeline · change-impact
+                             portrait-and-motion · machine-facts · pitfalls · script-index
   scripts/intake.py          出片前问诊（固定 8 题 -> work/intake.json -> brief；含制作方式推荐与产线路由）
   scripts/propose.py         提案器（--brief/--revise/--confirm/--diff + 片间去重台账）
   scripts/designkit.py       设计 DSL（采样/校验/转计划/设计距离/字幕参数）
@@ -193,7 +194,7 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（100 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（105 条针对真实缺陷的断言）
   scripts/critic.py          审美质检（离线启发式 0-100 分 + 可选 VLM 复评；只用于排序候选，不阻断交付）
   scripts/matchstyle.py      hybrid 风格对齐（素材画像 -> 图文段配色/画幅；--apply 前过 theme_lint，失败零写入）
   scripts/layoutkit.py       画布/安全区单一真源（横竖屏 profile；scenes/filmkit/designkit 共用）
@@ -203,6 +204,13 @@ skills/video-studio/
   scripts/musicgen.py        参数化配乐编排器（没有风格表：和弦进行 / 动机 / 鼓型 / 音色全可传参）
   scripts/webengine.py       浏览器逐帧渲染（CDP 截图、分块并行、崩溃重开、cue 导出、文字质检）
   scripts/qa_frames.py       帧级深检（单帧闪烁 / 画面空窗 / 画面静止 / 音画同步 / 亮度响度曲线）
+  scripts/stylekit.py        视觉/音频原语库（颜色数学、版式几何、主题体检；纯数据 + 纯函数，不含任何外观成品）
+  scripts/compose.py         hybrid 形态 3 合成入口（素材打底 + 小面积叠加；overlay.json 契约）
+  scripts/qatext.py          版式文字冲突门禁 G13（文本框相交 / 越出安全区 / 压字幕带；PIL 路线的采集与判定）
+  scripts/footage.py         素材剪辑一条龙（10 个 stage；契约是 footage.json）
+  scripts/footagekit.py      素材线取材层（load_footage / probe / fetch / transcribe / locate / 画面治理滤镜）
+  scripts/footageedit.py     素材线剪辑层（build_edl / check_edl / cut_shots / mix_tracks / write_ass / assemble）
+  scripts/footageqa.py       素材线专属门禁 F1–F9（越界 / 烧录字幕残留 / 水印残留 / 音画等长 / 署名 / 旁白主导…）
   requirements.txt           Python 依赖（必需 / 强烈建议 / 可选三档，带注释）
   assets/film.json           测试夹具（含 bpm / music / sfx.cues / 逐句 hold；不是给用户抄的模板）
   assets/scenes.py           技能内置渲染器（10 类构图 + draw_frame + cues() 钩子；--scenes 的默认回退）
@@ -212,17 +220,25 @@ skills/video-studio/
   assets/golden_frames_portrait.json  竖屏金帧基线（--layout portrait --write 重录；横屏基线不受影响）
   assets/golden_frames_compose.json   构图层基线（10 类构图各一帧；--compose --write 重录）
   assets/golden_frames_compose_portrait.json  竖屏构图层基线（同上，--layout portrait --compose）
+  assets/scenes_hybrid_template.py    在内置渲染器上做最小改动的正确写法（形态 1 图文段包装）
+  assets/footage/footage.template.json 素材线契约模板（先把 sources 落地，再给每句旁白指定 shot.at）
+  assets/footage/regression/ 素材线回归样例（footage.json + 联系表；tools/footage_selftest.py 用它）
   assets/web/                浏览器页面示例（--engine web 需要你自己的页面；不是出片模板）
 schemas/design.schema.json   设计 DSL 契约（含 visual.subtitle / layout_cycle）
 schemas/proposal.schema.json 提案契约
 schemas/film.schema.json     film.json 字段说明（给人/IDE 补全；执行者是 scripts/filmcheck.py）
-tools/ci_check.py            仓库级体检（15 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数/素材预算与形态路由，不需 ffmpeg）
+schemas/footage.schema.json  素材线契约（footage.json；执行者是 scripts/footagekit.py）
+tools/ci_check.py            仓库级体检（18 项；语法/JSON/依赖白名单/打包卫生/文档引用/film+footage 契约/断言条数/素材预算与形态路由/G13 注册/包面清单，不需 ffmpeg）
 tools/estimate.py            开渲前成本预演（帧数/耗时/磁盘/分块建议，--json 可机读；含 preflight/vmaf/asr）
 tools/golden_frames.py       金帧像素回归（--write 重录 / --check 校验；同环境像素变了 = fail）
-tools/silhouette_qa.py       剪影可区分门禁 G13（换设计不能只是换色）
+tools/silhouette_qa.py       剪影可区分门禁 S13（离线检查，不进账本；换设计不能只是换色）
 tools/audio_similarity.py    音频差异/相似度验收（--strict 阈值判定，改音频代码后必跑）
 tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scipy 后跑 sfxkit/musicgen 自检）
-.github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu）
+tools/footage_selftest.py    素材线自检（自己造带烧录字幕/水印的素材，跑 probe→qa 全链 + F1–F9）
+tools/matchstyle_selftest.py hybrid 风格对齐自检（素材画像 -> 图文段配色，含左右黑带回归）
+tools/scenes_hybrid_selftest.py 包装内置渲染器的真回归（留原件 / 返回副本 / 缓存键三坑）
+tools/plugin_entry_check.mjs 插件入口冒烟（apply() 必须真的注册 provider，防 DSH 换接口后静默降级）
+.github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu，含 VMAF/素材线/hybrid/web）+ py39 + Windows advisory
 ```
 
 ## 环境前提
@@ -276,24 +292,25 @@ DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时*
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 15 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
+python tools/ci_check.py -v     # 18 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /
                                 #         Markdown 围栏（状态机）/ CI workflow /
                                 #         单文件体积 / film.json 契约（调 filmcheck.py，规则只留一份）/
                                 #         footage.json 契约（调 footagekit.load_footage；缺 numpy/Pillow 记 SKIP）/
-                                #         素材预算与 hybrid 形态路由（source_budget 常量、F8 注册、--hybrid-form）
+                                #         素材预算与 hybrid 形态路由（source_budget 常量、F8 注册、--hybrid-form）/
+                                #         版式文字冲突门禁（G13/F9 注册 + 采集钩子）
 ```
 
 它**不需要 ffmpeg、字体或网络**，任何机器都能跑；它检查的是"这个仓库作为可分发包是否完整"。
 **它不能替代** `skills/video-studio/scripts/selfcheck.py`——那个要 ffmpeg + 中文字体，真的调编码器，
-查的是"技能本身还能不能出片"（**100 条**断言）。
+查的是"技能本身还能不能出片"（**105 条**断言）。
 
 三条产线级自检（都要 ffmpeg，在 `ci.yml` 的 skill job 里跑）：
 
 ```bash
-python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F8 全链路
+python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F9 全链路
 python tools/matchstyle_selftest.py   # hybrid：素材画像 -> 图文段配色，含"左右黑带"回归
 node tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
 ```
