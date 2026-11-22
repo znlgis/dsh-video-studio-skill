@@ -2358,7 +2358,6 @@ def _draw_chapter(scene, t, dur, tg, script, frame, plan, th):
         kicker = ""                     # 章节名与 kicker 同文：只画一次
     if kicker:
         pk = ease(rng(t, 0.15, 0.8))
-        lay_c = _scene_layout(scene, th)
         ksize = int(th["scale"]["kicker"][0])
         # chapter 的标题字号是 68（固定），kicker 顶到它上面
         ky = min(410.0, 470.0 - 68 * 1.05 - ksize * 0.35)

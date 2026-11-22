@@ -1926,7 +1926,7 @@ def _word_gate(lg, tl, work):
 # 真实标定（qavmaf 作者实测，参考帧含字幕与片头片尾淡入淡出）：
 #   模板片 crf17 VMAF 97.24(pass) / crf30 95.74(pass+warning) / 二次编码坏片 29.45(fail)
 # 想按片收紧或放宽就写 film.json 的 qa.vmaf.pass / qa.vmaf.warn，会透传给 qavmaf。
-def _qa_text_layout_gate(lg, tl, scenes_mod, script):
+def _qa_text_layout_gate(lg, tl, work, scenes_mod, script):
     """G13 版式文字冲突：任意两行字的落笔矩形是否相交 / 是否越出安全区。
 
     为什么这是一个**独立**门禁而不是塞进 G9：G9 看的是成片帧上的亮度/位移异常，
@@ -2220,7 +2220,7 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
         _qa_gates(lg, rep, deep, tl, work)
         # 全片 VMAF/SSIM 放在最后跑：它最贵（约 1.2× 实时），前面有 fail 时可省下这十分钟。
 
-        _qa_text_layout_gate(lg, tl, scenes_mod, script)
+        _qa_text_layout_gate(lg, tl, work, scenes_mod, script)
         _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=vmaf_mode)
         # ASR 回读最便宜（模板片 6 s），放最后跑：前面已经 fail 的片没必要再花这 6 秒。
         _qa_asr_gate(lg, film, work, script, tl, cfg=((script or {}).get("qa") or {}))

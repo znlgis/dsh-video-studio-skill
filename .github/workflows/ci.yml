@@ -1,7 +1,7 @@
 # 仓库体检 + 技能自检。
 #
 # 一共 5 个 job（开发机上的本地等价物见 README「仓库自检」一节）：
-#   repo           —— tools/ci_check.py 的 15 项（py/js 语法、JSON+版本一致性、技能清单、
+#   repo           —— tools/ci_check.py 的 16 项（py/js 语法、JSON+版本一致性、技能清单、
 #                     依赖白名单、打包卫生、文档路径与相对链接、3.9 语法、Markdown 围栏、
 #                     workflow 语法、单文件体积、film.json / footage.json 契约、断言条数一致）。
 #                     不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍
@@ -55,7 +55,7 @@ jobs:
           node-version: "20"
       # ruff 是**独立 step**，不进 ci_check 的检查表：ci_check 要能在裸机器（只装 python）
       # 上跑，而这条需要先装 ruff。分开的另一个好处是失败信息直指文件行号，
-      # 不用在 15 项汇总里再拆一层。
+      # 不用在 16 项汇总里再拆一层。
       #
       # 为什么必须有这一步：pyproject.toml 从很早就配了 ruff（select = F,E9,B），
       # 但 CI 从来没跑过它——于是 F821（undefined name）这种"导入即崩"的缺陷

@@ -517,8 +517,6 @@ def f9_subtitle_fit(foot, work, out, tl, edl, ctx):
     一句长旁白会直接横穿画面。实测 DEMO 二/三 29 句里有一半超宽，撞上叠加层，
     而当时 F1..F8 全部 pass —— 这就是"门禁不覆盖的渲染分支"。
     """
-    import re
-    ass = (work / "sub.ass") if hasattr(work, "name") else None
     try:
         ass_path = Path(work) / "sub.ass"
     except Exception:                                          # noqa: BLE001
@@ -528,12 +526,10 @@ def f9_subtitle_fit(foot, work, out, tl, edl, ctx):
                     detail="没有 work/sub.ass（字幕还没烧或不是 ASS 路线），本片没查")
     video = foot.get("video") or {}
     w = int(video.get("width") or 1920)
-    h = int(video.get("height") or 1080)
     subcfg = foot.get("subtitle") or {}
     size = int(subcfg.get("size", 46))
     ml = int(subcfg.get("margin_l", 110))
     mr = int(subcfg.get("margin_r", 110))
-    mv = int(subcfg.get("margin_v", max(28, int(h * 0.035))))
     max_w = w - ml - mr
     try:
         import filmkit as _K
