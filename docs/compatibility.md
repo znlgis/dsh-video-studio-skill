@@ -1,8 +1,8 @@
 # 兼容性报告（DSH）
 
 > 本文件由 `npm run compat:report`（`tools/compat_report.mjs`）**生成**，不是手写。
-> 生成时间：2026-11-24 12:10:03 UTC（UTC+08:00）
-> 生成器版本：@dsh-gis/dsh-video-studio-skill 2.7.3
+> 生成时间：2026-11-24 12:49:33 UTC（UTC+08:00）
+> 生成器版本：@dsh-gis/dsh-video-studio-skill 2.7.4
 > 宿主版本提示：null（diagnose().hostVersionHint；只认 DSH_VERSION 与 DSH_INSTALL_DIR/package.json，探不到就是 null）
 
 判据与证据分离：package.json 的 engines.dsh 是 npm 侧判据，dsh.compatibility 是证据侧；两者不合并。
@@ -26,8 +26,8 @@
 
 | 检查 | 命令 | 退出码 | 耗时 | 结果 | 输出尾行 |
 |---|---|---|---|---|---|
-| 插件入口 / 配置面 / 诊断冒烟 | node tools/plugin_entry_check.mjs | 0 | 0.10 s | pass | `PASS 插件入口：video-studio provider 注册成功 / list 1 个候选 / get 19699 字 / 配置面 6 类非法配置全部报错 / diagnose healthy=true（目录 219 token）` |
-| 仓库体检（18 项） | python tools/ci_check.py | 0 | 4.12 s | pass | `PASS 18 / FAIL 0 / SKIP 0` |
+| 插件入口 / 配置面 / 诊断冒烟 | node tools/plugin_entry_check.mjs | 0 | 0.09 s | pass | `PASS 插件入口：video-studio provider 注册成功 / list 1 个候选 / get 19699 字 / 配置面 6 类非法配置全部报错 / diagnose healthy=true（目录 219 token）` |
+| 仓库体检（18 项） | python tools/ci_check.py | 0 | 3.71 s | pass | `PASS 18 / FAIL 0 / SKIP 0` |
 
 `not-run` = 这台机器跑不了（缺 node / python / DSH 运行时），**不等于通过**；`fail` 才是结论不成立。
 

@@ -1,3 +1,13 @@
+## 2.7.4 — 正文瘦身 70% + 可诊断性 + 加载时配置注入
+
+> 技能正文 1350 行 → 313 行：只留铁律 / 五步上手 / 目录，其余 32 段原样迁入 references 并标注来源；
+> 每次加载 token 31942 → 9574（−70%），reference 内容改为按需加载。
+> 新增 diagnose()（技能 / 可见 / 降级 / 悬空引用 / 孤儿引用 / 目录 token / 宿主版本）与 npm run diagnose，
+> 把「装了没生效」变成可查的问题；插件配置（mode / optionalModules / strictGates）改为加载时注入，
+> 不写进 SKILL.md 源文件。
+>
+> 门禁：ci_check 18 项、selfcheck 105 条、npm run diagnose 全绿；新增 tools/diagnose_selftest.mjs（29 条断言）。
+
 ## 2.7.3 — 全面审查：13 个域各查一遍，修掉一批静默假绿与「文档说了代码没做」
 
 > 这轮把仓库切成 13 个互不重叠的审查域（渲染编排 / 绘制与排版 / 设计 DSL / 提案与问诊 /
