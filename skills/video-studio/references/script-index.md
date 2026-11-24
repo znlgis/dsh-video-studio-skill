@@ -65,3 +65,39 @@
 | `K.glyph_missing_chars / check_glyphs` | 缺字形自查（✓ × ↵ 会画成方块） |
 | `K.write_ass(...)` | 直接输出 ASS，头里声明 PlayResX/Y=1920/1080 |
 | `K.encode_quality(film, ref_img=...)` | 锐度比；参考帧必须来自场景函数，不能是成片抽帧 |
+
+## 附：SKILL.md 正文迁入（原 10 脚本资产）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 10. 脚本资产
+
+> 全部脚本都在技能目录里按路径调用，**不需要拷进工程目录**（零拷贝，见 §1）。
+> 这里只列"哪个脚本干什么"；逐脚本的参数、契约、坑位见 `references/script-index.md` 和各自的 `--help`。
+
+| 你要干的事 | 用哪个 |
+|---|---|
+| 出片前把 8 个问题问完（含制作方式与产线推荐；hybrid 形态用 `--hybrid-form {3,1}` 显式指定，默认 3） | `scripts/intake.py` |
+| 出候选 / 冻结设计 / 换方向重出 / 手改设计后 `--adopt` 重绑指纹 | `scripts/propose.py` |
+| 排轴 / 渲染 / 混音 / 质检 / 批量 / 断点续跑 | `scripts/render.py`（14 个 stage） |
+| 评候选静帧"好不好看"（离线打分 + 可选 VLM） | `scripts/critic.py` |
+| 记不住入口时 | `scripts/studio.py <子命令>`（薄门面） |
+| 设计 DSL / 预览 / 场景语法 / 声线 / 排版内核 | `designkit.py` `previewkit.py` `grammar.py` `voicekit.py` `filmkit.py` |
+| 配乐 / 音效 / 混音原语 | `musicgen.py` `sfxkit.py` `scorekit.py` |
+| 门禁账本 / 阶段新鲜度 / 契约 / 渲前预检 | `gates.py` `stagewatch.py` `filmcheck.py` `preflight.py` |
+| 帧级 / 全片 / ASR 质检 | `qa_frames.py` `qavmaf.py` `qaasr.py` |
+| 浏览器逐帧渲染 | `webengine.py` |
+| **素材剪辑一条龙**（下载/转写定位/切镜/混音/字幕/门禁） | `scripts/footage.py`（10 个 stage） |
+| 素材线核心：取材 / 剪辑 / 专属门禁（`footageqa.py` 的 F1–F9；`footagekit.source_budget` 素材预算） | `footagekit.py` `footageedit.py` `footageqa.py` |
+| **hybrid 形态 3 合成**（素材打底 + 小面积叠加 + 强制响度归一） | `scripts/compose.py` |
+| **hybrid 风格对齐**（素材画像 -> 图文段配色/画幅；素材本身不上色） | `scripts/matchstyle.py` |
+| 回归自检（105 条断言） | `selfcheck.py` |
+
+内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
+`assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、
+`assets/voice_loudness.json`（响度补偿实测表）。
+
+仓库工具（在 `<REPO>/tools/`）：`estimate.py` 开渲前预演、`golden_frames.py` 金帧像素回归、
+`silhouette_qa.py` 剪影可区分（S13，离线检查，不进账本）、`ci_check.py` 仓库级体检、`audio_similarity.py` 音频相似度、
+`selftest_noscipy.py` 无 scipy 兜底路径、`plugin_entry_check.mjs` 插件入口冒烟（技能要不要真的挂上）、
+`matchstyle_selftest.py` hybrid 风格对齐自检、`footage_selftest.py` 素材线自检。

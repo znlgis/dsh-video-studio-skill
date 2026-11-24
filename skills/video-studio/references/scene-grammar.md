@@ -305,3 +305,52 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
   WARN 不是通过，也不是失败，是"画面上没有"。
 - **`work/storyboard.json` 是审计产物，不是输入**：改它不会改变渲染结果；
   想要固定构图请改 `film.json` 的 `lines[].type`。
+
+## 附：SKILL.md 正文迁入（原 5.5b 场景语法：同一部片内部的骨架也要变）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+### 5.5b 场景语法：同一部片内部的骨架也要变
+
+画面不只有"皮肤"（配色/字体），还有三层正交结构：
+
+| 层 | 决定什么 | 谁读它 | 产物 |
+|---|---|---|---|
+| 叙事 `kind` | 声线、语气、配乐能量 | voicekit / musicgen | `kind` 的取值集合不随场景类型变化 |
+| 场景 `type`（10 类构图） | 这段画面长什么样 | `assets/scenes.py` 的 10 个绘制器（`_DRAWERS`） | timeline 的 `scene_type`、`work/storyboard.json` |
+| 设计 `visual` 五组签名 | 这套设计怎么画（母题/转场/字距/重心） | 设计 DSL → `work/style.json` | `work/style.json` 的 `language` 与 `layout_cycle` |
+
+场景类型有 10 个：`hero` 封面 / `statement` 金句 / `list` 要点 / `stat` 数字卡 /
+`compare` 左右对比 / `process` 流程轴 / `quote` 引语 / `chapter` 章节卡 /
+`chart` 数据条 / `outro` 收尾。**不写就不管**——grammar 按内容自动选（字段存在性 >
+关键词 > 结构位置，段长不足按固定表降级，连续同类型 ≤2 段）；要锁定就写行级 `lines[].type`。
+
+看选型（命令都不需要 `--scenes`，除非你要用自己的渲染器）：
+
+```bash
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage layout
+#   分镜: 3 段 / 封面×1 要点列表×1 收尾×1
+#     l01    hook     -> hero      v0 d0  首段/开场
+#     l02    body     -> list      v1 d1  items>=3
+#     l03    outro    -> outro     v0 d0  末段/收尾
+#   同时落 work/storyboard.json：每段的 type / variant / decor / layout / 理由，可审计
+
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage style
+#   版式轮换: split-right -> left-stack（按章节轮换，防全片一张版式）
+#   视觉语言: 母题=plain 转场=paper(0.40s) 字距=3.0 编号=cn 重心=(-60,+60)   # 默认素净
+#   字幕: 底部安全区 44px 对齐=center 背板α=138 圆角=2 最多1行
+#   （坏配置在这里就拦，不等渲完 300 帧）
+```
+
+**边界（必须记住）**：
+
+1. **10 类构图有渲染开销，但仍在预算内**：示例片 frames 约 **19 ms/帧（54–61 fps）**，预算 25 ms。
+   开销来自每类构图各自的装饰与几何；装饰母题**烘焙进背景底版**（1.3–2.0 ms）而不是逐帧 paste
+   （实测 5.6 ms），这是把开销压回预算内的关键。
+2. **同一部片仍锁一个明暗族**：段界跨族会整屏换底、触发闪烁门禁，也像换片。
+3. **web 引擎不跟随场景语法**：`--engine web` 的页面由你自己写，没有 10 类构图，
+   画风也只有你页面里的颜色。
+
+选型规则、`storyboard.json` 字段、加第 11 类构图的步骤、常见误用，见
+[scene-grammar.md](references/scene-grammar.md)；配色/母题/字幕等设计字段见
+[appearance.md](references/appearance.md)。

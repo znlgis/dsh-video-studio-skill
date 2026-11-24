@@ -14,9 +14,33 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "verified": [
+        {
+          "version": "0.2.2-rc.5",
+          "date": "2026-11-24",
+          "result": "pass",
+          "evidence": "tools/plugin_entry_check.mjs"
+        }
+      ],
+      "assumed": [
+        {
+          "range": ">=0.1.0-rc.6 <0.2.2-rc.5",
+          "reason": "engines.dsh 声明范围内的旧版本，未逐一实测；0.1.x 走 filesystem provider 回退路径"
+        },
+        {
+          "range": ">=0.2.2-rc.5 <0.3.0-0",
+          "reason": "engines.dsh 声明范围内的更新版本，未逐一实测；升级前先跑 node tools/plugin_entry_check.mjs"
+        }
+      ]
     }
   },
   "icon": "./icon.svg",
+  "scripts": {
+    "diagnose": "node tools/diagnose.mjs",
+    "compat:report": "node tools/compat_report.mjs"
+  },
   "files": [
     "index.js",
     "cordis.patch.yml",
@@ -24,6 +48,7 @@
     "locale/*.json",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md",
+    "docs",
     "skills",
     "!skills/**/__pycache__",
     "!skills/**/*.pyc",
@@ -75,6 +100,6 @@
       "optional": true
     }
   },
-  "_compatibilityNote": "engines.dsh = DSH 插件兼容性判据（含预发布版）；peerDependencies 中的 dsh-skill-filesystem 只服务 0.1.x 回退路径，0.2.x 走自带 provider、不 import 任何 @deepseek-ai/* 包。详见 README「兼容性」。",
+  "_compatibilityNote": "engines.dsh = DSH 插件兼容性判据（含预发布版）；dsh.compatibility = 证据侧（实测版本 + 真实存在的校验脚本），两者不合并。peerDependencies 中的 dsh-skill-filesystem 只服务 0.1.x 回退路径，0.2.x 走自带 provider、不 import 任何 @deepseek-ai/* 包。跑 npm run compat:report 生成 docs/compatibility.md；详见 README「兼容性」。",
   "license": "MIT"
 }

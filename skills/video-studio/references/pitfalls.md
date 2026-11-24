@@ -124,3 +124,37 @@ VMAF 97+、SSIM 0.999——所有现有门禁都说没问题。
 另外两条产品约束也来自这次反馈：**默认设计不带细线**（细线是母题/底纹/HUD 三条来源，
 压缩后最容易显脏）、**默认不推镜**（推镜只会把上面的台阶放大到整屏）。
 护栏：`selfcheck` 第 71、72 条。
+
+## 附：SKILL.md 正文迁入（原 8 常见故障速查）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 8. 常见故障速查
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 后半段全程静音 | ffmpeg 多输入混流竞争 | 改 numpy 总线 `bus[i:i+n] += src*gain` |
+| 混音爆音/削波 | 先 `astype(float32)` 再判 dtype，归一化分支不执行 | **先判 dtype 再转**，并打印中间峰值 |
+| 字幕越出画面被裁 | 字幕带贴底 | `SUB_BAND` 上移到 872，`base_y` 夹紧 |
+| 文字发虚 | cv2 中间文件二次压缩 | 改 rawvideo 直通 + CRF18，用锐度比验证 |
+| 音画不同步 | 按字数估时长 | 改实测时长驱动 |
+| 字幕交叠 | 按字符比例分配字幕时长 | 以 TTS 句边界为窗，窗内按标点切 |
+| 全片该有的淡入/图名框消失 | 字段改名没跑冒烟 | 改名后必跑 `snap`；质检加"元素存在性" |
+| 渲染越跑越慢 / 内存涨 | 每块开新浏览器没关 | 复用会话 + `finally` 关闭 |
+| 拼出的片子缺一段还不报错 | 分块按"第几块"命名 | 按**绝对起始帧**命名 + 显式缺口检测 |
+| **请求 524 帧却只出 488 帧** | `-shortest` 按较短一路（音频）截断 | 去掉 `-shortest`，显式 `-t <视频时长>` + 校验音视频时长差 < 0.05 s |
+| 产出 13 小时的怪物文件 | `-stream_loop -1` 让 `-shortest` 失效 | 显式 `-t`，别依赖 `-shortest` |
+| BGM 混音后掉 6 dB / 听不清 | `amix` 默认 `normalize=1` 会按输入数均分 | `amix=...:normalize=0` 再 `loudnorm=I=-16` |
+| 旁白整体偏移 ~0.6 s | `adelay` 铺轨有系统性偏移 | 别用 adelay，改 numpy 按采样点写位 |
+| 烧录字幕字号小得看不清 | SRT 交 libass 按 `PlayResY=288` 排版 | `FontSize/MarginV` 要 ×3.75，或直接用 ASS 指定 PlayRes |
+| ASS 字幕位置全乱 | Format 行漏了 `MarginL/MarginR/MarginV` 字段 | ASS 头 Format 行字段顺序必须与 Dialogue 完全对应 |
+| 渲染出上一部片的内容 | `sys.path` 顺序导致 import 到旧模块 | 用绝对路径 + 每次全新进程；子进程别继承父进程模块缓存 |
+| 画面里 ✓ × ↵ 显示成方框 | msyhbd 缺这些字形 | 用矢量画（ImageDraw 线条），不要用符号字符；或先跑 `K.check_glyphs` |
+| **改了台词但配音没变** | TTS 缓存只判断"文件存在" | text/voice/rate/pitch 哈希必须写进 `*.mp3.json`；只判存在性的旧缓存要 `--force-tts` 一次 |
+| **长句字幕读到一半消失** | `sub_window` 把 t1 钳在 `voice_start+5.2` | 默认覆盖整句；要钳短显式传 `max_hold` |
+| **--stage qa 也重渲全片** | stage 分发写成 `in ("all","frames","mux","qa")` | 每个 stage 独立；qa 只读成片 |
+| **concatenation 打不开分块** | concat.txt 里写相对路径，ffmpeg 按自己 cwd 解析 | 写**绝对路径** |
+| 成片比 silent.mp4 慢一倍 | mux 对已编码视频又编一遍 | `-c:v copy`（默认）；只在要改分辨率时 `reencode_video=True` |
+| 每帧渲染慢 2–3 倍 | 每帧重新 `wrap_cn`（中文逐字测宽） | 用 `K.wrap_cn_cached` / `K.text_w_cached` |
+| 混音偶发爆表 | 归一化分支没执行 / 叠加峰值 >1 | `AudioBus.mix()` 会打印叠加峰值并软限幅，峰值 >0.97 报警 |
+| **成片音轨变成 96kHz** | mux 没指定 `-ar`，loudnorm 内部升到 192kHz 后 AAC 取了 96k | mux 显式 `-ar 48000`（内置于 mux，selfcheck 第 12 条守着） |

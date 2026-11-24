@@ -144,3 +144,36 @@ def build_audio(self, total=None, sr=SR, base_db=None, default_gain_db=0.0,
 
 - sfxkit 9 条渲染的 sha256（ui_blip ×3 / answer_chime / text_stream ×2 / data_chirp / roulette_tick ×2）逐条相同。
 - scorekit 的 `render()` 只承担合成原语（成片配乐走 musicgen）：同 seed 逐样本一致（`scorekit.py --selftest` 第 18 条）。
+
+## 附：SKILL.md 正文迁入（原 5.7 声音的片间差异与片内分离）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+### 5.7 声音的片间差异与片内分离
+
+> 问题陈述：**同一套参数下每部片的配乐仍像同一首**。内容指纹只进 seed 时只改音色细节，
+> 和弦进行/动机/鼓型全固定——实测同 bpm、同调、只换内容指纹，两段配乐相关性 **0.966**。
+
+指纹必须推进到**结构层**（详见 **references/audio-variation.md**）：
+
+| 层 | 做法 |
+|---|---|
+| 配乐和声 | 指纹决定**每两小节一次的稳定和弦替换**（不影响乐句末与片尾规则） |
+| 配乐进行 | 指纹在 calm/body/drive 三档里选一档（同素材，只换功能顺序） |
+| 配乐动机 | 指纹对级数做 **±1 稳定偏移**（节奏不变，问句/答句独立派生；跨主音带八度修正） |
+| 配乐鼓型 | 指纹加 ghost kick（不与现有落点重复），clap 位置 ±0.5 拍 |
+| 出片接线 | `render.py` 的 `st_score` 把 `seed_effective`（含指纹）传给 `musicgen.render()` |
+| 音效 seed | `content_seed(seed_base, style, content_fp, type, t)`（跟内容走，不跟 cue 顺序走） |
+| 提示音音高 | `in_key(freq, key)` 跟随配乐调性 |
+| 段落边界 | 边界前 2.2 s 内的 whoosh/riser **自动 -3 dB**（不与配乐过门撞车） |
+| duck | 按设计分级（默认 4.0 dB），配乐让得彻底而不至于一抖一抖 |
+| 旁白优先 | 配乐 -12 dB 基线 + 人声处再压 6 dB（音效 3 dB），人声段 SNR 实测 15 dB |
+
+**可关**：`sfx.content_seed: false` 时音效走 `seed_base + i`（只跟 cue 顺序）的路径，
+同参数逐样本稳定（selfcheck 第 33 条守着）。注意：**没有 legacy 外观**——外观永远来自 `design.json`。
+
+验收工具（改音频相关代码后必须跑）：
+
+```bash
+python <REPO>/tools/audio_similarity.py --strict   # A/B/C/D 四组阈值，失败 exit 1（在包根执行）
+```

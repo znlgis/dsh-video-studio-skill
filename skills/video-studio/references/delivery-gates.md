@@ -252,3 +252,70 @@ python qaasr.py film.mp4 --timeline ... --asr-json <已有 ASR 结果.json>
 另外 `<REPO>/tools/golden_frames.py` 是**像素级**金帧回归（不进门禁账本）：
 `--check` 渲 3 帧算 SHA-256 与 `assets/golden_frames.json` 比对，
 同环境像素变了 = fail，换机器（字体指纹不同）= skipped。改绘制代码后先跑它，再跑 `selfcheck.py`。
+
+## 附：SKILL.md 正文迁入（原 7 质检门禁 / 7.0 交付凭据 / 7.0b 阶段新鲜度）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 7. 质检门禁（error 必过 / warning 别当看不见）
+
+```bash
+python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
+python selfcheck.py                 # 技能自身回归（105 条针对真实缺陷的断言）
+python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
+# qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
+#       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
+```
+
+### 7.0 交付凭据：`out/QC-REPORT.md` 与人工签核
+
+> 这一节解决的是"**质检结论只活在控制台里**"——会话一断，"我查过了"就无从复现。
+
+**三档状态**（这是最关键的语义，不许混）：
+
+| 状态 | 含义 | 退出码 |
+|---|---|---|
+| `pass` | 本次**真的查了**且通过 | 0 |
+| `fail` | 查了没过 | 非 0（除非 `--no-gate` 绕过，且会留痕） |
+| `skipped` | 本次**没有执行**（没装 cv2 / 没写 visual_at / 没签核） | 默认 0，`--strict-gates` 下非 0 |
+
+**"skipped ≠ 通过"** 是这套机制的全部意义：以前"没查"和"查了没事"在输出上都叫"没报错"。
+
+```bash
+cat out/QC-REPORT.md                          # gate matrix + 实测值 + 签核 + 耗时，交付时一起给
+python render.py ... --stage qa --strict-gates   # 交付前：skipped 也算失败
+python render.py ... --stage accept --gate stills --note "看过联系表"   # 人工签核
+```
+
+**报告头部有「运行编号」与「输入指纹」两行**：前者是 `--run-id`（不给就按时间戳生成），
+后者是 script / scenes / words / filmkit 四个内容的指纹。同一部片跑了好几版之后，
+"上一版的门禁结论到底是什么"就靠 `work/runs/<runId>/` 里的快照回答（只归档小文件，
+视频/音频/分块就地保留）。
+
+**四道人工签核闸**（`style` 风格与声线 / `stills` 母版静帧 / `facts` 上屏数字 / `release` 成片验收）：
+
+- 签核前会检查"证据产物存在"（如 `stills` 要求 `work/qa/sheet.png`），**没有证据不许签**——
+  否则签核就是橡皮图章。
+- 签核绑**内容指纹**（剧本 + `scenes.py` + 引擎）。改了其中任何一个，旧签核**自动失效**，
+  报告里会标成 `skipped` 并写明"内容已变"。这不是麻烦，是防止"我签过了"变成空头支票。
+- 逃生阀是 `--no-gate`（整体跳过签核检查），但会写进 QC 报告的"本次绕过的门禁"一节，
+  **留痕不等于通过**。
+
+**耗时台账** `work/cost.jsonl`：每个 stage 一行实测墙钟。**只有显式加 `--cost` 才记**——`--stage all` 不会替你打开它（旧文写"自动记"，与实现不符）。
+它是 SKILL §12 那张"排期公式"的对照——公式从来没被验证过，现在有数据了。
+
+### 7.0b 阶段新鲜度：别让旧产物混进新片
+
+> 与 §1 的分块指纹同源：那里只修了 `frames` 一个点，其余 stage 此前是裸奔的
+> （改了 `style` 后 `--stage audio` 仍读旧 `music.wav`；改了 `hold` 后 `--stage frames` 仍用旧 `cues.json`，**都不报错**）。
+
+```bash
+python render.py ... --stage explain          # 哪些阶段过时了、为什么、最小重跑命令
+python render.py ... --stage qa --strict-stale   # 有过时就失败（CI / 交付前）
+# 机读：问 stagewatch（render.py 的 explain 只打人读文本，不接受 --json）
+python scripts/stagewatch.py --work work --json
+```
+
+机制：每个 stage 结束往 `work/manifest.json` 记一行 `{stage, at, inputs:{名:指纹}, outputs:{名:指纹}}`；
+下次该 stage 开始前重算上游输入与自己的产物指纹。**默认只告警**（`--strict-stale` 升级为失败，
+`--allow-stale` 显式放行并留痕）。改一句要重跑什么，见 [references/change-impact.md](references/change-impact.md)。

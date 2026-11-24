@@ -7,7 +7,8 @@
 （出片要靠 selfcheck.py + 真跑一遍 render.py，见 SKILL.md §13）：
 
   1  语法：scripts/ + assets/ + tools/ 下的 .py 全部能编译（SyntaxWarning 也算失败）
-  2  JS 语法：根目录与 assets/web/ 的 .js 通过 node --check
+  2  JS 语法：根目录与 assets/web/ 的 .js 通过 node --check；再真跑 plugin_entry_check（入口 / apply 配置面 /
+     diagnose 真包）与 diagnose_selftest（好包 + 五类坏包的诊断回归）
   3  JSON：所有 .json 能被解析（locale / marketplace-entry / assets / schemas / package.json），
      schemas/ 的契约文件必须有以 http 开头的 $schema 方言，且 package.json 的 version 与 README 徽章一致
   4  技能清单：SKILL.md 的 frontmatter 有 name/description，name 与目录名一致
@@ -184,7 +185,17 @@ def t_syntax_js():
                        encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=120)
     out = ((r.stdout or "") + (r.stderr or "")).strip()
     assert r.returncode == 0, "插件入口冒烟失败（技能可能挂不上）：%s" % out[-500:]
-    return "%d 个 .js 全部通过 node --check；插件入口冒烟通过（provider 注册 + list/get）" % len(js)
+    # 诊断入口（P0-4）的坏包回归：好包全绿只是"没崩"，要证明诊断真在查，必须造坏包——
+    # 删 references 后 danglingRefs 要点名、frontmatter 非法时 degraded 要给 reason。
+    # 这个脚本只读仓库、在系统临时目录造夹具，不写工作树。
+    diagnose_selftest = ROOT / "tools" / "diagnose_selftest.mjs"
+    assert diagnose_selftest.is_file(), "缺 tools/diagnose_selftest.mjs（诊断入口的坏包回归）"
+    d = subprocess.run([node, str(diagnose_selftest)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=120)
+    d_out = ((d.stdout or "") + (d.stderr or "")).strip()
+    assert d.returncode == 0, "诊断自检失败（diagnose 对坏包的判断不对）：%s" % d_out[-500:]
+    return ("%d 个 .js 全部通过 node --check；插件入口冒烟通过（provider 注册 + list/get + "
+            "apply 配置面 / 非法配置报错）；诊断自检通过（%s）" % (len(js), d_out.splitlines()[-1] if d_out else ""))
 
 
 def _which(exe: str):
@@ -495,10 +506,27 @@ def t_doc_refs():
                     rel = rel.split("{")[0].split("*")[0].rsplit("/", 1)[0] if ("{" in rel or "*" in rel) else rel
                 if not (base / rel).exists():
                     ph_bad.append("%s:%d 的 %s/%s 不存在" % (md.name, ln_no, m.group(1), rel))
+    # 第四种（反向）：references/ 下的文件必须被 SKILL.md 正文点名。
+    # 前三种都只查"写出来的路径存不存在"，查不到"存在的参考资料有没有被目录表漏掉"——
+    # 正文瘦身后最容易留下的形态正是"材料还在、目录表没登记"，模型永远不会去读它。
+    # 判据取"文件名主干是否出现在正文里"，宁松不误伤。
+    skill_md = SKILL / "SKILL.md"
+    orphan_refs = []
+    if skill_md.is_file():
+        body = skill_md.read_text(encoding="utf-8")
+        for f in sorted(REFS.glob("*.md")):
+            stem = f.stem
+            if (("references/%s" % f.name) in body or ("references/%s" % stem) in body
+                    or stem in body):
+                continue
+            orphan_refs.append("references/%s" % f.name)
+    assert not orphan_refs, ("这些 references 文件存在但 SKILL.md 一次都没提到（目录表漏登记）：%s"
+                             % "、".join(orphan_refs[:8]))
     assert not ph_bad, "；".join(sorted(set(ph_bad))[:8])
     assert not link_bad, "；".join(sorted(set(link_bad))[:8])
     assert not missing, "；".join(sorted(set(missing))[:8])
-    return "%d 篇文档的路径引用 + 正文相对链接全部存在" % sum(1 for m in md_files if m.is_file())
+    return ("%d 篇文档的路径引用 + 正文相对链接全部存在；references/"
+            "%d 篇全部被 SKILL.md 点名" % (sum(1 for m in md_files if m.is_file()), len(list(REFS.glob("*.md")))))
 
 
 # ---------------------------------------------------------------- 7 体积

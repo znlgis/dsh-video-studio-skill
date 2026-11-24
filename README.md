@@ -237,7 +237,11 @@ tools/selftest_noscipy.py    无 scipy 兜底路径自检（CI 用；屏蔽 scip
 tools/footage_selftest.py    素材线自检（自己造带烧录字幕/水印的素材，跑 probe→qa 全链 + F1–F9）
 tools/matchstyle_selftest.py hybrid 风格对齐自检（素材画像 -> 图文段配色，含左右黑带回归）
 tools/scenes_hybrid_selftest.py 包装内置渲染器的真回归（留原件 / 返回副本 / 缓存键三坑）
-tools/plugin_entry_check.mjs 插件入口冒烟（apply() 必须真的注册 provider，防 DSH 换接口后静默降级）
+tools/plugin_entry_check.mjs 插件入口冒烟（apply() 必须真的注册 provider / 配置面真的注入 / 非法配置真的报错，防 DSH 换接口后静默降级）
+tools/diagnose.mjs           一行诊断入口（npm run diagnose：技能数 / 可见数 / 降级原因 / 悬空引用 / 目录 token 估算，healthy=false 退 1）
+tools/diagnose_selftest.mjs  诊断入口的坏包回归（好包全绿 / 删除 references 报 danglingRefs / frontmatter 非法与 name 不一致报 degraded / 缺失与 IO 降级）
+tools/compat_report.mjs      兼容性报告生成器（npm run compat:report -> docs/compatibility.md；真跑入口冒烟 + 仓库体检，跑不了写 not-run）
+docs/compatibility.md        兼容性证据报告（生成物：DSH 版本 + 证据脚本 + 本轮真实执行结果）
 .github/workflows/ci.yml     CI：repo 体检（ubuntu+windows）+ 技能自检（ubuntu，含 VMAF/素材线/hybrid/web）+ py39 + Windows advisory
 ```
 
@@ -257,7 +261,7 @@ G11（全片 VMAF）不需要新依赖，但要求 ffmpeg 构建**带 libvmaf**�
 pip install -r skills/video-studio/requirements.txt   # 必需 + 强烈建议；可选项目已注释，按需打开
 ```
 
-`SKILL.md` 第 12 节是参考机器（Windows 11 + Ryzen AI 9 HX 370）的实测基准，**换机请先重测**：
+参考机器（Windows 11 + Ryzen AI 9 HX 370）的实测基准在 [`references/machine-facts.md`](skills/video-studio/references/machine-facts.md)（正文瘦身后不再常驻），**换机请先重测**：
 `ffmpeg -version`、`python -c "import numpy,PIL,cv2"`、中文字体文件、`edge-tts --list-voices`。
 ffmpeg 路径可用环境变量 `FILMKIT_FFMPEG` 覆盖，字体候选在 `filmkit.FONT_CANDIDATES`。
 
@@ -277,6 +281,25 @@ DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时*
 **上界为什么钉在 0.3.0**：0.3 若改 `SkillProvider` 契约（`list/get` 签名或候选字段），插件会静默降级；
 升级 DSH 大版本前先跑一次 `plugin_entry_check.mjs`，它绿了再改 `engines.dsh` 上界。
 
+**机器可读的证据侧**在 `package.json` 的 `dsh.compatibility`：`verified[]` 里的每个版本都指向一个
+**真实存在的校验脚本**（`evidence`），`assumed[]` 写明未逐一实测的范围与原因。它与 `engines.dsh` 分工不同、
+不合并：`engines.dsh` 是 npm 装包时的判据，`dsh.compatibility` 是"我们实测过什么"的证据。
+重新生成证据报告：
+
+```bash
+npm run compat:report     # -> docs/compatibility.md（真跑 plugin_entry_check + ci_check，跑不了写 not-run）
+```
+
+**装好之后技能为什么没出现？** 跑一行诊断，不用翻日志：
+
+```bash
+npm run diagnose                    # JSON 到 stdout；healthy=false 时退出码 1
+npm run diagnose -- --human         # 人读版
+```
+
+它只读、不联网、不写盘：返回 `skills` / `visible` / `missing` / `degraded`（frontmatter 非法、name 与目录名不一致）/
+`danglingRefs`（正文与 references 里指向不存在的文件）/ `catalogTokens` / `hostVersionHint` / `healthy`。
+
 技能注册接口在 0.2.x 换过：
 
 | DSH | 技能注册接口 | 本插件怎么走 |
@@ -292,7 +315,7 @@ DSH 0.2.x 的加载器读 `engines.dsh` 判插件能否跑；写这个字段时*
 ## 仓库自检（给贡献者与 CI 用，不是给用户用的）
 
 ```bash
-python tools/ci_check.py -v     # 18 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 /
+python tools/ci_check.py -v     # 18 项：py 语法（含 tools/，SyntaxWarning 记失败）/ node --check + 插件入口冒烟 + 诊断坏包自检 /
                                 #         JSON + 版本号一致性（package.json vs README 徽章 vs CHANGELOG）/
                                 #         技能清单 / 依赖白名单 / npm pack 打包卫生 /
                                 #         文档路径 + 正文相对链接 / Python 3.9 语法 /
@@ -313,6 +336,9 @@ python tools/ci_check.py -v     # 18 项：py 语法（含 tools/，SyntaxWarnin
 python tools/footage_selftest.py      # 素材线：自己造带烧录字幕/水印的片子，跑 F1–F9 全链路
 python tools/matchstyle_selftest.py   # hybrid：素材画像 -> 图文段配色，含"左右黑带"回归
 node tools/plugin_entry_check.mjs   # 插件入口：apply 必须真的注册 provider（0.2.x 契约）
+node tools/diagnose_selftest.mjs    # 诊断入口：好包全绿 + 五类坏包必须报出来（不写工作树）
+node tools/diagnose.mjs             # 一行诊断：真包必须 healthy=true
+npm run compat:report               # 兼容性报告：真跑入口冒烟 + 仓库体检，生成 docs/compatibility.md
 ```
 
 `plugin_entry_check.mjs` 是**DSH 兼容性的哨兵**：DSH 换技能注册接口时，插件会静默降级成"一行空插件"，

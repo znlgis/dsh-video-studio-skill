@@ -180,3 +180,39 @@ python compose.py ... --stage qa         # 帧级深检（自动传 --shots 切�
 | 素材 -> 图文段配色 | `scripts/matchstyle.py` |
 | 素材线细节（治理、门禁 F1–F9） | `references/footage.md` |
 | 帧级门禁判据 | `references/frame-qa.md` |
+
+## 附：SKILL.md 正文迁入（原 0.1.1 hybrid 的一致性：素材不动，让图文段向素材看齐）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+### 0.1.1 hybrid 的一致性：素材不动，让图文段向素材看齐
+
+> 一句话：**素材是基准，图文段是跟随者**。反过来（拿主题色去盖素材）就是糊画面。
+>
+> **适用范围**：图文段占相当比例（形态 1）时才需要。**技能默认形态是 3，形态 1 需显式 `--hybrid-form 1`**；
+> 也就是说 `matchstyle.py` 只服务形态 1，默认链路里不该出现它。走**形态 3**（素材打底 + 小面积叠加）
+> 时图文段只有 ~15%，套不套调色差别很小，**却可能把整套设计意图改掉**——所以
+> `matchstyle.py` 现在会检查"设计原本亮底 vs 素材把配色锚到暗底"并给出警告
+> （`day_night_conflict` 字段可机读）。出现警告时优先改形态 3，而不是硬套调色。
+
+```bash
+python matchstyle.py --footage footage.json --work work --report               # 先看画像（只写 work/style_profile.json 快照，不改 design/footage）
+python matchstyle.py --footage footage.json --work work --apply --align-bars   # 落地
+python propose.py --adopt --work work                                          # 调色板变了，重绑确认
+```
+
+| 它做什么 | 为什么这么做 |
+|---|---|
+| 按 EDL 抽帧（只抽成片里真会用的镜头），取**中位数**色相/饱和度/明度 | 平均值会被一块黑场或一片天空带跑；观众记住的是"典型颜色" |
+| 明暗跟素材走（luma < 0.35 记暗底，与 `stylekit.is_dark` 同一判据） | 暗素材配浅底，观感就是"两部片拼一起" |
+| 色相全收，饱和度**打折**（默认 ×0.6，`--sat-damp` 可调） | 素材里一块高饱和招牌铺满整屏会变荧光板 |
+| 配色交给 `designkit._solve_palette`，写盘前过 `theme_lint` | 对比度门槛只有一份判据；写进去再发现，就是"渲完才看见字幕看不清" |
+| `letterbox_color` 改成**同族近黑** | 自绘段黑边是纯黑；素材黑边若是米色，拼接处会直接跳 |
+| `--align-bars` 把素材可见高算到自绘段画幅 | 40/44px vs 居中黑边，差 3px 以上就看得出画幅跳 |
+| `--align-bars` 会**同时收缩 crop** | pad 是纵向居中的：只改 scale 时，宽度不够的素材右边会冒出黑带（实测 640x360 素材对齐 996 高时右侧 150px）。取景窗宽高比必须等于目标画幅；代价是多裁几个百分点，报告会写清楚 |
+
+- 只改两块：`design.json` 的 `visual.palette` 与 `footage.json` 的 `treatment`（颜色 + 可选 scale）。
+  **不碰** `treatment.color`——那是素材自己的显式调色，不是主题色。
+- 失败一律零写入：配色无解 / 缺 `design.json` → 退 2 并打印"该补什么"；只写 `work/style_profile.json`。
+- 覆盖前留备份：`work/backup/*.before-matchstyle.json`（回滚靠它，不靠记忆）。
+- 算出来的颜色照样要**亲眼看**：`render.py --stage stills`，铁律 6 不因为"颜色是算出来的"就免掉。

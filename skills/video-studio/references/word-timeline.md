@@ -145,3 +145,58 @@ python render.py ... --stage qa      # 看 QC-REPORT.md 的 G10 行
 - 只跳过门禁不跳过能力：没有开关——G10 就是词级数据的体检，没数据就 skipped，不会 fail。
 - 词事件拿不到（服务端变了）：不阻断出片，G10 `skipped` / `fail` 二选一看覆盖面，
   meta 里 `words_ok=false`、`words_events=0` 是排查入口。
+
+## 附：SKILL.md 正文迁入（原 6.1 词级时间轴与词锚点）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 6.1 词级时间轴与词锚点
+
+> **一句话**：句时长仍然是权威；词级时间戳是**附加值**，只用来「字幕按词折行 / cue 打到某个词上 /
+> 门禁判它有没有变」——它不参与排轴，也**绝不**用词时长之和去推算句子时长。
+
+**开与关**：`film.json` 顶层 `"words": true|false`，默认 **true**。
+`--stage tts` 会额外收 edge-tts 的 `WordBoundary` 事件，落盘 `work/words.json`：
+
+```jsonc
+{ "schema": 1, "enabled": true,
+  "lines": { "l03": { "dur": 7.18, "n": 13, "covered": 5.2, "tail": 0.09,
+                      "gaps": [0.18, 0.21, ...], "mono": true,
+                      "words": [{"text":"画质","start":0.04,"end":0.32}, ...] } },
+  "stats": { "lines": 4, "words": 64, "empty": [] } }
+```
+
+**它怎么来的（实现口径，改代码前先看）**：
+- 必须显式 `edge_tts.Communicate(..., boundary="WordBoundary").stream()` 同时收音频与词事件。
+  用 `save()` 会把词事件丢掉；不传 `boundary` 时默认是 `SentenceBoundary`，**一条词事件都收不到**
+  （实测 edge-tts 7.3.1 / zh-CN：默认设置下词事件数 = 0）。
+- 音频先写 `<句>.mp3.part` 再 `os.replace`。旧写法直接 `open(..., "wb")`，一次断网就把**已缓存的好音频
+  截成 0 字节**；现在失败只丢这次的新音频，旧缓存还在。
+- 词事件 offset 是相对**原始 mp3** 的 100 ns 单位；`trim_silence=True` 时时间轴用的是裁剪后的语音，
+  所以 `words_normalize(offset_shift=裁掉的句首秒数)` 会把词表整体平移。**不平移，词会整体提前 0.1–1 s**
+  （实测模板句 shift = 0.10 s 量级）。
+- 词表有独立缓存键 `tts_words_key`，没并进 `tts_key_v2`：老音频照旧复用，只在"这次显式要词级"时补采一次。
+- 词事件收不到**不是失败**：meta 里记 `words_ok=false`、`words_events=0`，打印 WARN 并复用已有音频；
+  G10 会记 `skipped`（"词事件为空"），不许冒充 pass。
+
+**下游怎么用**：
+
+| 能力 | 用法 | 退化行为 |
+|---|---|---|
+| 字幕按词折行 | `fit_sub_lines(..., words=)` / `draw_subtitle(..., words=)` | 词表对不上原文或折出来超过 2 行 -> **回退字符折行**（老项目排版不变） |
+| cue 词锚点 | `"at": "l03:w2"` / `"at": "l03:w2+0.1"`（**从 1 数**，w1 = 第一个词） | 该句没有那么多词 -> 退化为 `l03+偏移` 并打 WARN；场景 id 也不存在才报错 |
+| 门禁判据 | G10 读 `work/words.json`（唯一事实来源，不再各自翻 `*.mp3.json`） | 没开/没数据 -> skipped |
+
+**三个坑（都在真实跑里踩过）**：
+
+1. **词间有空隙**：实测 edge-tts 相邻词之间有 0.1–0.3 s 不在任何事件里。所以"词时长求和"永远小于句长，
+   G10 的覆盖率阈值才定在 45%（低于它才是"明显少了"），别拿 `sum(dur) == dur` 当判据。
+2. **句尾静音不在词事件里**：约 0.5 s，靠**整句实测时长**兜底。G10 只检查"末词终点离句尾不超过 0.40 s"
+   （示例片实测 0.07–0.12 s），超过它通常意味着词事件本身错位了。
+3. **词锚点会静默退化**：`l03:w99` 不会炸，只会 WARN 后退回句偏移。**改台词后先看 stdout 有没有这条 WARN**——
+   否则你会以为自己精确打到了某个词。同样的，`words=false` 或词事件为空时，字幕不会报错，只是退回整句断行。
+
+**老项目第一次升级**：默认 `words=true` 会让每句**重新联网合成一次**（老缓存里没有 `words_key`）。
+一次全片 TTS 的网络成本，换词级能力；不想付就把 `"words": false` 写进 `film.json`，行为退回整句断行。
+
+细则（词级契约、时长权威性、裁剪平移公式、词锚点退化路径）见 [references/word-timeline.md](references/word-timeline.md)。

@@ -1,7 +1,7 @@
 # 参考机器的已验证环境事实
 
 > 这一篇是从 `SKILL.md` 挪出来的：里面的数字**只对一台机器成立**（Windows 11 + Ryzen AI 9 HX 370 +
-> OSGeo4W Python 3.12），却每次触发技能都要占上下文。换机后按 `SKILL.md` §13 的 60 秒自检重测，
+> OSGeo4W Python 3.12），却每次触发技能都要占上下文。换机后按本文件末尾「换机 60 秒自检」重测，
 > 把结论写回你自己的工程笔记，不要指望这里的数字。
 
 > **本节是作者机器（Windows 11 + Ryzen AI 9 HX 370 + OSGeo4W Python 3.12）的实测基准，不是跨机器承诺。**
@@ -55,3 +55,46 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 2. **`-stream_loop -1` 让 `-shortest` 失效**：会产生 13 小时的怪物文件。循环输入必须配显式 `-t`。
 3. **`amix` 默认 `normalize=1`**：按输入数均分，2 路输入直接掉 6 dB。要么 `normalize=0`，要么走 numpy 总线（推荐）。
 
+## 附：SKILL.md 正文迁入（原 12 参考机器的已验证环境事实）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 12. 参考机器的已验证环境事实
+
+> **这些是作者机器（Windows 11 / Ryzen AI 9 HX 370 / OSGeo4W Python 3.12）的实测基准，不是跨机器承诺。**
+> 换机先跑 §13 的 60 秒自检，把结论写回自己的笔记——别照抄这里的版本号与路径。
+> 完整表格（ffmpeg 构建、编码速度、各模块耗时、排期公式、三条隐形坑）见
+> `references/machine-facts.md`。
+
+## 附：SKILL.md 正文迁入（原 13 换机 60 秒自检）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 13. 换机 60 秒自检（比读文档快）
+
+```bash
+cd <SKILL_DIR>/scripts
+python selfcheck.py                  # 105 条断言；FAIL 就照提示修环境
+python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
+python musicgen.py --selftest        # 配乐编排器（参数化）
+python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）
+python webengine.py --selftest       # 浏览器引擎（36 项，会真起无头浏览器，约 60 秒）
+python qa_frames.py --selftest       # 帧级质检（自己造测试视频）
+python <REPO>/tools/footage_selftest.py   # 素材剪辑线（离线造素材跑全链 + F1–F9 断言）
+```
+
+selfcheck 自己造测试信号、现场调 ffmpeg 编码，**不联网、不依赖任何成片**。
+每条 FAIL 都对应一个具体环境缺口（缺字体 / ffmpeg 无 libx264 / 无 numpy / 缺 sfxkit），
+报错信息直接写该改哪里。可选模块缺失时 selfcheck 标 `SKIP` 而不是 FAIL——
+**别把"没装可选件"和"坏了"混为一谈**。
+
+> **仓库级体检**是另一层，别和 selfcheck 搞混：
+> `python <REPO>/tools/ci_check.py -v`（在包根执行）只查"这个仓库作为可分发包是否完整"（语法/JSON/依赖白名单/
+> 打包卫生/文档路径引用），**不需要 ffmpeg、字体或网络**，任何机器都能跑；
+> selfcheck 查的是"技能还能不能真的出片"。两层都在 CI 里跑。
+>
+> ci_check 第 12 项是「film.json 契约」（直接调 `scripts/filmcheck.py` 校验模板，并把
+>`schemas/film.schema.json` 的存在与合法性一起断言）、第 13 项是「footage.json 契约」
+>（用 `footagekit.load_footage` 载入 `assets/footage/footage.template.json`，并校验
+>`schemas/footage.schema.json` 可解析）。两边的口径一致：**校验规则只允许有一份**，不在这里重写
+>——素材剪辑线的契约同样只有一份真源（见 [references/footage.md](references/footage.md)）。

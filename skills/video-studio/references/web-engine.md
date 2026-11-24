@@ -201,3 +201,52 @@ PNG 截图比 JPEG q94 慢但无压缩伪影，本模块按契约固定 PNG。
 - 逐帧 seek、分块并行、崩溃重开、断点续跑的算法改编自 ai-history-film（MIT）的 video/render.py；
 - 页面场景组织（逐字入场 / 计数器 / HUD / cue）改编自其 video/web 与 video/qa_text.js；
 - 本目录代码全部用原生 Canvas2D 重写，不含任何 GSAP / three.js 代码或构建产物。
+
+## 附：SKILL.md 正文迁入（原 3 渲染引擎怎么选）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 3. 渲染引擎怎么选
+
+| 场景 | 选型 | 实测速度 | 适合 |
+|---|---|---|---|
+| 图文/数据/科普/UI 风 | **PIL（numpy+cv2 辅助）** — `filmkit` 默认 | 40–80 fps @1080p30（示例片 75） | 绝大多数中文科普片、报告转视频 |
+| 需要流畅矢量/粒子/3D/纸纹质感 | **无头浏览器 Canvas2D/WebGL + CDP 截图 → image2pipe**（`webengine.py`） | 80–130 ms/帧（核显，PNG 截图） | 纪录片级长片、需要复杂视觉语言 |
+| 纯数据动画 | **manim**（若已安装） | 视场景而定 | 数学/公式推导 |
+
+> 上表速度是**单机空载**实测口径（换机、重负载画面都会变；详见 §12）。别把区间当保证。
+
+> **设计只覆盖 PIL 引擎**（`engine: pil`，默认）：`work/design.json` 的配色/字体/版式/母题
+> 由 `assets/scenes.py` 读取。`--engine web` 的页面由**你自己**写（`assets/web/` 只是能跑通的示例页，
+> 不是出片模板），画面不跟随设计；但配乐与旁白**照样**跟随 `design.json`（它们不依赖渲染引擎）。
+
+**默认走 PIL**：依赖少（numpy+Pillow 就够）、启动快、确定性强、调试成本低。
+需要"一镜到底的粒子形变 / 实时着色器质感"才上浏览器方案：
+
+```bash
+cp -r <SKILL_DIR>/assets/web ./web                     # 页面模板（原生 Canvas2D，零三方库）
+pip install playwright && python -m playwright install chromium   # 只在走 web 引擎时需要
+python render.py ... --engine web --stage cues        # 从页面导出提示点
+python render.py ... --engine web --stage frames --jobs 3 --resume
+python webengine.py textqa ./web/index.html            # 文字重叠/出画/一闪而过/从没露面
+```
+
+两条路线的取舍（**先想清楚再选，换引擎要重做画面**）：
+
+| | PIL（`engine: pil`） | 浏览器（`engine: web`） |
+|---|---|---|
+| 依赖 | numpy + Pillow（+cv2 做锐度比） | + playwright + Chromium/Edge |
+| 速度 | 40–80 帧/秒 | 8–12 帧/秒（逐帧截图+编码，慢一个数量级） |
+| 画面语言 | 位图合成、渐变、几何、文字 | Canvas2D/WebGL：粒子、形变、着色器、矢量动画 |
+| 确定性 | 天然（纯函数画图） | 靠"把时间轴精确 seek 到 f/FPS"保证（`window.renderFrame`） |
+| 调试 | 改一帧跑一帧 | 浏览器里 `index.html?dev=1&t=秒` 直接看，出了 bug 好查 |
+| 适合 | 图文/数据/科普/宣传片 | 纪录片级长片、需要一镜到底的视觉语言 |
+
+**浏览器引擎的三条硬约束**（`webengine.py` 已实现，自己写页面时也要守）：
+1. 所有补间放在一条**暂停的**主时间轴上，渲染第 f 帧 = 把它 seek 到 `f / FPS` 秒；**不许依赖播放**。
+2. 循环/粒子/波浪这类程序化内容用"按时间直算"的更新器（`update(fn)`），不许用 `setInterval` 累加。
+3. 页面必须暴露 `window.ready / DURATION / renderFrame(f) / getCues()`；**不连 CDN、不请求网络**。
+
+要**跨浏览器会话**的字节级可复现（崩溃重开、多次渲染做 diff、质检要比对两张图）时开确定性模式：
+`--deterministic` 或环境变量 `WEBENGINE_DETERMINISTIC=1`（关 GPU 光栅，实测 8/8 会话一致，
+代价约 +22%/帧）。默认不开：同一会话内本来就一致，跨会话只有 ≤4 像素、±1 级的抗锯齿差异。

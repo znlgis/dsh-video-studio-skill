@@ -12,6 +12,12 @@
  * 断言它**确实注册了 provider**，并且 provider 的 list()/get() 能返回
  * skills/video-studio/SKILL.md 的内容。
  *
+ * 除了入口本身，这个脚本还守着两条**运行期契约**（都是"静默失效"的高发区）：
+ *   - apply(ctx, config)：配置面（P1-1）必须真的把 mode / optionalModules / strictGates
+ *     注入技能正文，且非法配置（未知 mode / 未知 module / 类型不对 / 未知键）必须抛错；
+ *   - diagnose()：一行诊断（P0-4）在真包上必须 healthy=true——正文里只要有一个悬空的
+ *     references 引用，这里就会红，而不是等用户点进 404 的说明书。
+ *
  * 用法：node tools/plugin_entry_check.mjs [--verbose]
  * 退出码：0 = 通过；1 = 失败（消息里写明哪一步不成立）。
  */
@@ -115,7 +121,66 @@ async function main() {
   const expectedBody = bodyStart >= 0 ? raw.slice(bodyStart + 4).replace(/^\r?\n/, "").trim() : "";
   check(expectedBody.length > 0 && definition.content === expectedBody, "正文必须等于 SKILL.md 中 frontmatter 之后的部分");
 
-  console.log("PASS 插件入口：" + SKILL_NAME + " provider 注册成功 / list 1 个候选 / get " + definition.content.length + " 字");
+  // ---- apply(ctx, config)：配置面（P1-1） ----
+  // 带配置时必须"原文 + 追加块"，而不是改写正文；没有配置时正文必须与源文件逐字节一致（上面已断言）。
+  const configCtx = makeContext();
+  await mod.apply(configCtx.ctx, { mode: "footage", optionalModules: ["sfxkit", "qa_frames"], strictGates: true });
+  check(configCtx.registered.length === 1, "带 config 时 apply 仍必须注册 1 个 provider");
+  const configProvider = configCtx.registered[0]({ signal: new AbortController().signal, invalidate: () => {} });
+  const configCandidate = (await configProvider.list({})).find((c) => c && c.name === SKILL_NAME);
+  check(Boolean(configCandidate), "带 config 时 list() 仍要包含 " + SKILL_NAME);
+  const configDefinition = await configProvider.get(configCandidate, {});
+  check(
+    configDefinition.content.startsWith(expectedBody),
+    "带 config 时正文必须以 SKILL.md 原文开头（配置只允许追加，不许改写正文）",
+  );
+  const configNeedles = [
+    "mode: `footage`",
+    "optionalModules",
+    "`sfxkit`",
+    "`qa_frames`",
+    "strictGates: true",
+    "--strict-gates",
+    "--require-proposal",
+  ];
+  for (const needle of configNeedles) {
+    check(configDefinition.content.includes(needle), "配置块里必须出现 " + needle);
+  }
+  // 非法配置必须抛错：静默忽略等于"配了 footage 却按 auto 跑"，一路跑到成片才被发现。
+  const badConfigs = [
+    [{ mode: "bogus" }, "未知 mode"],
+    [{ optionalModules: ["no-such-module"] }, "未知 module"],
+    [{ optionalModules: "sfxkit" }, "optionalModules 不是数组"],
+    [{ strictGates: "yes" }, "strictGates 不是布尔"],
+    [{ unknownKey: 1 }, "未知配置键"],
+    ["footage", "config 不是对象"],
+  ];
+  for (const [bad, why] of badConfigs) {
+    let threw = false;
+    try {
+      await mod.apply(makeContext().ctx, bad);
+    } catch {
+      threw = true;
+    }
+    check(threw, "非法配置（" + why + "）必须抛错，不能静默忽略");
+  }
+
+  // ---- diagnose()：一行诊断（P0-4） ----
+  check(typeof mod.diagnose === "function", "入口必须导出 diagnose()（一行诊断入口）");
+  const diag = await mod.diagnose();
+  check(
+    diag && diag.provider === SKILL_NAME && diag.healthy === true,
+    "diagnose() 在真包上必须 healthy=true（实际：" + JSON.stringify({
+      healthy: diag && diag.healthy,
+      missing: diag && diag.missing,
+      degraded: diag && diag.degraded,
+      danglingRefs: diag && diag.danglingRefs && diag.danglingRefs.slice(0, 3),
+    }) + "）",
+  );
+  check(typeof diag.catalogTokens === "number" && diag.catalogTokens > 0, "diagnose().catalogTokens 必须 > 0");
+
+  console.log("PASS 插件入口：" + SKILL_NAME + " provider 注册成功 / list 1 个候选 / get " + definition.content.length
+    + " 字 / 配置面 6 类非法配置全部报错 / diagnose healthy=true（目录 " + diag.catalogTokens + " token）");
   return 0;
 }
 

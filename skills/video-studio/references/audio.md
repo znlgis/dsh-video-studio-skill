@@ -485,3 +485,145 @@ D 组构造"有人声段 + 间隙"，量人声段旁白/背景响度差。任何
 2. `python <SKILL_DIR>/scripts/selfcheck.py` —— **105 条**全 PASS（第 33 条盯内容派生 seed、第 35–38 条盯旁白优先，第 39 条盯音频边界）。
 3. `python musicgen.py --selftest` / `python sfxkit.py --selftest` —— 各自全 PASS（musicgen 的 26 项覆盖编排与确定性）。
 4. 改 `assets/scenes.py` 的 `cues()` 后，跑一次 `--stage cues` 看类型分布是否覆盖 hook/body/quote/outro。
+
+## 附：SKILL.md 正文迁入（原 5.1-5.4 三层声音 / 提示点 / 配乐 / 音效）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+## 5. 声音：配乐 + 音效 + 提示点
+
+> 这一节的思路来自一部真实成片（`ai-history-film`）的复盘：**声音不好不是"混得不够响"，而是"声音不认识画面"**。
+> 解决顺序永远是：先让声音知道画面上发生了什么（提示点），再谈音色，最后才是母带。
+
+### 5.1 三层声音
+
+| 层 | 谁做 | 落盘 | 说明 |
+|---|---|---|---|
+| 旁白 | `filmkit.tts`（edge-tts） | `work/tts/*.mp3` | **唯一的时长权威**：时间轴由它反推 |
+| 配乐 | `musicgen.py`（参数化编排） | `work/music.wav` | 按设计里的 bpm/key/scale/mood/seed + 编排参数现场生成；**没有现成曲风可挑** |
+| 音效 | `sfxkit.py`（物理建模） | `work/sfx.wav` | 按 `cues.json` 里登记的提示点逐条合成 |
+
+三条总线在 `--stage audio` 里合成：**音效响起时配乐自动让位**（`duck_db` 默认 4 dB，
+cinema/epic 5.5 dB——3 dB 的让位量在段落过门时配乐几乎与音效等高，听感会糊成一团），
+最后交给 ffmpeg 两遍 loudnorm 到 -16 LUFS / 真峰 ≤ -1 dBTP。**不要**自己在 numpy 里做最终响度标准化——
+你有 `loudnorm`，它比手写归一化准得多，而且真峰才是门禁。
+
+> **片内分离**：配乐在段落交界本来就有过门（编排器写的 swell / riser / sub_boom），
+> sfx 轨不在同一个边界重复放 whoosh/riser——`--stage sfx` 会对落在
+> [边界 - 2.2 s, 边界] 内的转场类 cue 自动 -3 dB（`sfx.duck_transitions=false` 可关）。
+> 提示音的音高跟随配乐调性（`in_key(freq, key)`），不硬编码某个调的五声音阶。
+
+### 5.2 提示点：让声音跟着画面走
+
+**这是整套声音设计的地基。** 画面在该响一下的地方登记一个提示点，音频阶段按提示点合成音效：
+
+```python
+# 方式一：写在 film.json 里（好改，适合少量关键音效）
+"sfx": {"cues": [
+  {"at": "l03+0.05", "type": "impact", "size": 1.1},
+  {"at": "abs:12.5", "type": "whoosh", "dur": 0.9}
+]}
+
+# 方式二：写在 scenes.py 的 cues() 钩子里（推荐——画面改了声音自动跟着改）
+def cues(tl, script):
+    out = []
+    for s in tl["scenes"]:
+        for i, _it in enumerate(s.get("items") or []):
+            out.append({"at": "%s+%.2f" % (s["id"], 0.48 + 0.32 * i), "type": "ui_blip"})
+    return out
+
+# 方式三：web 引擎里由页面导出（提示点跟着动画代码走）
+S.cue(t, 'impact', {size: 1.1});   // 页面里的时刻是"本幕局部秒"
+python render.py ... --engine web --stage cues   # 自动导出 work/cues.json
+```
+
+`at` 有三种写法：`"abs:12.5"`（绝对秒）、`12.5`（数字同义）、`"l03+0.35"` / `"l03-0.2"`（段 id ± 偏移）。
+
+**为什么值得多写这一层**：改一句台词、加一个停留窗口、把 BPM 从 120 改成 100，
+所有音效仍然贴着画面，不需要重新对时间。纯手工"在 12.5 秒放一声"的方案，改一次节奏就全废。
+
+### 5.3 配乐（musicgen 编排；scorekit 只是合成原语）
+
+> 配乐的"身份"（调式/调性/BPM/情绪）由 `design.json` 的 `audio.music` 决定（§5.5），
+> 下面这些都是**可选**的底层覆盖；不写就听设计的。
+
+`film.json` 里仍可手调这些底层参数（`bpm: "auto"` 表示按 design 的 BPM 走）：
+
+```json
+"bpm": "auto",
+"music": {"enabled": true, "mode": "score", "mood": "auto",
+          "key": "auto", "seed": 7, "seed_from_content": true,
+          "gain_db": -12, "duck_db": 4.0,
+          "sections": [{"at": "l01", "name": "intro", "energy": 0.3},
+                       {"at": "l03", "name": "drive", "energy": 0.8}]}
+```
+
+> 没有"配乐风格表"这回事：`music.style` 写了也不参与渲染。
+> 配乐的调式/调性/BPM/情绪/seed 由 `design.json` 的 `audio.music` 决定，`musicgen` 现场编排。
+
+- **一张和弦表贯穿全片**，段落之间只换"色彩与能量"，不换调——这是"听起来像一首曲子"而不是"一堆配乐"的关键。
+- `energy` 控制律动层数（pad / bass / kick / hat / arp）与亮度；安静段比律动段低 4–8 dB。
+- 段落边界**对齐小节线**（按 `bpm` 算），画面重音才落在拍点上。
+- 重击前用 `Score.suck()` 让配乐"吸一口气"（压低 3–8 dB、0.2 s 内恢复），落差立刻出来——
+  **不要**用静音断层，那会让声音像断了。
+- `"mode": "bed"` 是和弦床兜底（没有 bpm 编排时用）；`"mode": "off"` 不要配乐。
+
+### 5.4 音效（sfxkit）
+
+`sfxkit` 是**物理建模**而不是"画波形"：撞击 = 材质（衰减率）× 形状（模态比）× 敲击位置 × 接触时间；
+风 = 噪声 + 时变滤波（参数由慢变控制曲线驱动）；雨/火 = 泊松事件 + 幂律幅度 + 多核散布。
+
+```bash
+python sfxkit.py --list                      # 全部配方与参数
+python sfxkit.py --render impact --seed 3 --set size=1.2 --out /tmp/i.wav
+python -c "import sfxkit; print(sfxkit.render('whoosh', dur=1.2).shape)"
+```
+
+常用配方（**cue 的 `type` 就是这些名字**）：
+
+| 用途 | 配方 |
+|---|---|
+| 界面/提示 | `ui_blip` `ui_click` `relay_click` `roulette_tick` `answer_chime` |
+| 文字 | `typing` `typing_at`（逐字对齐，`times` 是相对提示点的秒数组） `text_stream` |
+| 转场 | `whoosh` `riser` `impact` `sub_drop` `reverse_swell` `glitch` `tape_rewind` |
+| 环境 | `wind` `rain` `campfire` |
+| 撞击 | `knock_wood` `metal_hit` `glass_clink` `go_stone` |
+
+**音效设计的三条经验**（都是踩过坑才写下的）：
+
+1. **"叮叮咚咚"是头号污染源**：有音高的小提示音多了就变成八音盒。全片只留几个**关键**的叮
+   （开场任务完成、认出猫、片尾），其余换成不带音高的"咔嗒"。
+2. **"嗖"要从物理出发**：多普勒 + 1/r 音量钟形 + 越远越闷 + 地面反射的梳状相位。
+   合成器式的扫频"咻"听起来像电子音，物理飞过模型才像"有东西飞过去"。
+   它的定位是**环境声**：基准电平要比同刻配乐低 10 dB 以上。
+3. **音量一律在成片混音里量**，不要按配方内部音量推断——混音时每个音效会先按峰值归一，配方里的"响"是没用的。
+
+## 附：SKILL.md 正文迁入（原 5.6 混音链）
+
+> 以下是 SKILL.md 瘦身时**原样迁移**的内容（为避免「精简即丢信息」，一字未改）；与本文上文重复处以上文细则为准。
+
+### 5.6 混音链（照着做，别自创）
+
+```
+旁白(单声道, 居中) ─────────────────────────────┐
+配乐(立体声, -12dB 基线) ─> 音效duck(-4dB) ─> 旁白duck(-6dB) ─┤─> 求和 ─> 峰值保护(0.89) ─> loudnorm 两遍 ─> -16 LUFS / TP<=-1
+音效(立体声) ───────────────────> 旁白duck(-3dB) ─────────────┘
+```
+
+- **旁白优先是硬行为**，不是文档口号：`mix_film` 里旁白固定 `voice_gain=1.0` 居中、不被任何侧链影响；
+  配乐基线 `music.gain_db=-12`（再高一档背景就会与台词几乎等高）；有人声的地方再按旁白包络压
+  配乐 6 dB、音效 3 dB（`music.voice_duck_db` / `music.voice_duck_sfx_db`，间隙自动恢复）。
+  实测人声段"旁白/背景"响度差 **12.9 dB**（真实配乐素材下；合成信号口径 15 dB），
+  selfcheck 第 35/36 条与 `audio_similarity.py --strict` 的 D 组守着这条。
+- **SNR 兜底（混音的最后一道闸）**：混音后按台词活跃区实测"人声/背景"，不足 12 dB 就整体再压背景
+  （`music.guard_snr_db`，最多 `guard_cap_db=30`；补压 >18 dB 会提示检查素材电平）。
+  这是唯一一条"混音后自己改电平"的门禁，保证换任何配乐素材都不会把旁白盖住。
+- **BGM 与音效是可选层**：它们的作用是铺情绪与打重音，不该抢字。想更安静就调低 `music.gain_db`
+  或设 `music.enabled=false`；"让观众听清旁白"永远优先于"背景好听"。
+- 音效响时配乐自动让位：`design.json` 的 `audio.music.duck_db` 决定档位（默认 4.0 dB），
+  `film.json` 的 `music.duck_db` 显式值永远优先。3.0 dB 的让位量不够——段落过门时配乐几乎与音效等高，
+  听着像"配乐和音效是同一套"。但让得太多会"音乐一抖一抖"，所以按设计分级而不是一律压狠。
+- **本项目不做母带压缩**：链路是 求和 → duck → 峰值保护 0.89 → `ffmpeg loudnorm` 两遍。
+  代码里**没有压缩器**（想加请自行在 `mix_film` 之后接），所以也不存在"压太狠"的问题；
+  要让重击前后有能量差，靠的是配乐分段 energy 与 `suck()`，不是压缩。
+- 成片音轨必须 48 kHz（`mux` 已显式 `-ar 48000`，selfcheck 第 12 条守着）。
