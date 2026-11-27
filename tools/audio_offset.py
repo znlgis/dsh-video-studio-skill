@@ -59,9 +59,11 @@ def decode_mono(path: str, ffmpeg: str, sr: int = SR) -> np.ndarray:
            "-ar", str(sr), "-f", "f32le", "-"]
     p = subprocess.run(cmd, capture_output=True)
     if p.returncode != 0:
-        msg = (p.stderr or b"").decode("utf-8", "replace").strip().splitlines()
         # 退出码 2 = "测不了"（与 main() 的 0/1/2 口径一致）。裸 SystemExit("字符串")
         # 的进程码是 1，会被 CI 当成"偏移不合格"而不是"环境/媒资不可测"。
+        err = (p.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        print("[测不了] 解不出音轨（%s）：%s"
+              % (path, err[-1] if err else "ffmpeg 失败"), file=sys.stderr)
         raise SystemExit(_UNMEASURABLE)
     if not p.stdout:
         raise SystemExit(_UNMEASURABLE)

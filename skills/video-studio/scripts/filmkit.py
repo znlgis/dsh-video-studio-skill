@@ -1080,18 +1080,32 @@ def cue_time(at, scenes=None, total=None, beat_data=None):
                           % (at, head, len(ws), num), flush=True)
                     return round(float(sc["start"]) + off, 3)
             raise ValueError("cue at=%r：找不到场景 %r（先跑 layout，或改用 abs:秒）" % (at, head))
-    # 形如 <id>[+-]<offset>
+    # 形如 <id>[+-]<offset>。id 可以含 "-"（schema 的 pattern 允许），所以不能按第一个
+    # +/- 字符切分——"shot-01" 会被切成 "shot"，"shot-01+0.2" 直接 float("-01+0.2") 抛错。
+    # 正确做法：按 scenes 里的**已知 id 做最长前缀**匹配，剩下的才当偏移。
+    if scenes:
+        hits = [str(sc.get("id")) for sc in scenes
+                if str(sc.get("id") or "") and s.startswith(str(sc.get("id")))]
+        if hits:
+            sid = max(hits, key=len)
+            rest = s[len(sid):]
+            try:
+                off = float(rest) if rest else 0.0
+            except ValueError:
+                raise ValueError("cue at=%r：场景 %r 之后的偏移 %r 不是数字"
+                                 % (at, sid, rest)) from None
+            for sc in scenes:
+                if str(sc.get("id")) == sid:
+                    return round(float(sc["start"]) + off, 3)
+        raise ValueError("cue at=%r：找不到场景（先跑 layout，或改用 abs:秒）；现有 id：%s"
+                         % (at, ", ".join(str(sc.get("id")) for sc in scenes[:8])))
+    # 没有 scenes（只解析 abs/词锚点）：保留旧的"按第一个 +/- 切"行为，报错更具体
     cut = len(s)
     for i, ch in enumerate(s):
         if ch in "+-" and i > 0:
             cut = i
             break
     sid = s[:cut]
-    off = float(s[cut:] or 0.0) if cut < len(s) else 0.0
-    if scenes:
-        for sc in scenes:
-            if str(sc.get("id")) == sid:
-                return round(float(sc["start"]) + off, 3)
     raise ValueError("cue at=%r：找不到场景 %r（先跑 layout，或改用 abs:秒）" % (at, sid))
 
 

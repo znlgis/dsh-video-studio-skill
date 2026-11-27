@@ -1727,7 +1727,6 @@ def t_scene_types_single_truth():
     G = _load_grammar()
     if G is None:
         return "skip（没有 grammar.py）"
-    here_scripts = HERE
     got = {"grammar": set(G.SCENE_TYPES)}
     # filmcheck.SCENE_TYPES
     try:
@@ -1739,19 +1738,17 @@ def t_scene_types_single_truth():
     mod = _load_scenes_mod()
     if mod is not None and hasattr(mod, "_DRAWERS"):
         got["scenes"] = set(mod._DRAWERS.keys())
-    # schema 的 enum
-    schema = os.path.join(os.path.dirname(os.path.dirname(here_scripts)),
-                          "..", "..", "schemas", "film.schema.json")
-    schema = os.path.normpath(schema)
-    if os.path.exists(schema):
-        try:
-            data = json.load(open(schema, encoding="utf-8"))
-            enum = (data["properties"]["lines"]["items"]["properties"]["type"]["enum"])
-            got["schema"] = set(enum)
-        except Exception:                                   # noqa: BLE001
-            pass
-    if len(got) < 3:
-        return "skip（只找到 %d 处真值：%s）" % (len(got), sorted(got))
+    # schema 的 enum。路径**必须**是 scripts/../../../schemas（= <REPO>/schemas）：
+    # 以前多写了一级 "..", 解析到 <REPO>/../schemas（不存在），于是 if os.path.exists 为假、
+    # 异常又被 pass 吞掉——"4 处真值"实际只比了 3 处，schema 的枚举从没被校验过。
+    schema = os.path.normpath(os.path.join(HERE, "..", "..", "..", "schemas",
+                                           "film.schema.json"))
+    assert os.path.exists(schema), "找不到 schemas/film.schema.json：%s" % schema
+    data = json.load(open(schema, encoding="utf-8"))
+    got["schema"] = set(data["properties"]["lines"]["items"]["properties"]["type"]["enum"])
+    # 四处缺一不可：缺一处就 FAIL（旧代码 len<3 时记 skip，等于"少一处也算过"）
+    want = {"grammar", "filmcheck", "scenes", "schema"}
+    assert set(got) == want, ("场景类型真值来源不齐：缺 %s" % sorted(want - set(got)))
     base_name, base = sorted(got.items())[0]
     for name, s in got.items():
         if s != base:

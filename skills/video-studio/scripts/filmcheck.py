@@ -598,8 +598,15 @@ def _check(val, rule, path, rep, ctx):
 # 跨字段校验
 # ============================================================================
 
-def _cue_ref(at):
-    """复刻 filmkit.cue_time 的解析：返回 ("abs"|"id"|"bad", 值或错误说明)。"""
+def _cue_ref(at, known_ids=()):
+    """复刻 filmkit.cue_time 的解析：返回 ("abs"|"id"|"beat"|"bad", 值或错误说明)。
+
+    两类锚点这里**不能**当成场景 id：
+      * beat:<n> / bar:<n>[±off]：卡点锚点，由 beatgrid 网格解析（filmkit.cue_time 支持，
+        但旧实现把它当 id 抛 cue_id_missing，--strict 直接把合法卡点片判红）；
+      * 含 "-" 的 id：schema 允许 ^[A-Za-z0-9_.-]+$，而按第一个 +/- 切分会把
+        "shot-01" 切成 "shot"；这里改成按已知 id 做**最长前缀**匹配。
+    """
     if isinstance(at, (int, float)) and not isinstance(at, bool):
         return "abs", float(at)
     s = str(at or "").strip()
@@ -614,6 +621,30 @@ def _cue_ref(at):
         return "abs", float(s)
     except ValueError:
         pass
+    # 节拍锚点：交给 beatgrid 解析（需要 work/beat_data.json，这里只判写法）
+    if s.startswith("beat:") or s.startswith("bar:"):
+        head, _sep, tail = s.partition(":")
+        if not re.match(r"^\s*-?[0-9]+(?:\.[0-9]+)?\s*(?:[+-][0-9.]*)?\s*$", tail):
+            return "bad", "%s: 后面要跟数字（如 %s:12 或 %s:3.5+0.1）" % (head, head, head)
+        return "beat", s
+    # 有已知 id 时用最长前缀匹配：id 里可以有 "-"（schema 允许），不能按第一个 +/- 切
+    hits = [str(i) for i in (known_ids or ()) if i and s.startswith(str(i))]
+    if hits:
+        sid = max(hits, key=len)
+        rest = s[len(sid):]
+        if rest and rest[0] in "+-":
+            try:
+                float(rest)
+            except ValueError:
+                return "bad", "偏移 %r 不是数字（写 l03+0.35 或 l03-0.2）" % rest
+        elif rest and not rest.startswith(":w"):
+            return "bad", "at=%r 在 id %r 之后还有无法解析的部分 %r" % (s, sid, rest)
+        if rest.startswith(":w"):
+            tail = rest[2:]
+            num = re.match(r"^([0-9]+)", tail)
+            if not num or int(num.group(1)) < 1:
+                return "bad", "词锚点要写成 l03:w2（词序号从 1 开始），收到 %r" % s
+        return "id", sid
     cut = len(s)
     for i, ch in enumerate(s):
         if ch in "+-" and i > 0:
@@ -759,7 +790,8 @@ def check_cross(script, script_path, rep, ctx):
         at = cue.get("at", cue.get("t"))
         if at is None:
             continue                                      # 缺 at 已由必填检查报过
-        kind, val = _cue_ref(at)
+        # 传已知 id：_cue_ref 要靠它做最长前缀匹配（id 可以含 "-"），并识别 beat:/bar:
+        kind, val = _cue_ref(at, idset)
         if kind == "bad":
             rep.err("sfx.cues[%d].at" % i, "at 写法不对：%s" % val, "bad_cue_at")
         elif kind == "id" and val not in idset:
