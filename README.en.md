@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-3.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-3.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **English | [中文](README.md)**
 
@@ -132,7 +132,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage acce
 `style | tts | layout | beats | cues | score | sfx | audio | frames | mux | qa | stills | review |
 editlist | jianying | accept | explain | all`.
 
-The `--stage all` order is `style -> tts -> layout -> beats -> cues -> score -> sfx -> audio ->`
+The `--stage all` order is `style -> tts -> layout -> score -> beats -> cues -> sfx -> audio ->`
 `frames -> mux -> qa -> editlist`. `review` and `jianying` are deliberately **not** in `all`
 (independent final review is a delivery-time action; JianYing export needs the `--no-subs` plate).
 
