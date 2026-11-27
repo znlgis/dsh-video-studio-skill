@@ -84,14 +84,6 @@ jobs:
           # 污染工作树（打包卫生那一项靠 .gitignore/npm 规则兜，没必要靠）
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tools/ci_check.py -v
-      # hybrid 包装模板的三条铁律（留原件 / 返回副本 / 缓存键一致）以前只有一个独立
-      # 脚本在守，而它**从未被任何 job 调用**——脚本里第 6 条还是 check(..., True)
-      # 这种断言常量的假通过。现在第六条真造"素材目录不存在"的场景，并接入 CI。
-      # 只依赖 numpy/Pillow（repo job 已装），不需要 ffmpeg/字体/网络。
-      - name: 'selftest: scenes_hybrid（包装模板三条铁律）'
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python tools/scenes_hybrid_selftest.py
 
   skill:
     name: skill selfcheck (Linux)
@@ -147,6 +139,15 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python selfcheck.py
+      # hybrid 包装模板的三条铁律（留原件 / 返回副本 / 缓存键一致）以前只有一个独立
+      # 脚本在守，而它**从未被任何 job 调用**——脚本里第 6 条还是 check(..., True)
+      # 这种断言常量的假通过。现在第六条真造"素材目录不存在"的场景，并接入 CI。
+      # 放在 skill job 而不是 repo job：它真要画一帧（PIL 渲染中文），repo job 不装中文字体。
+      - name: 'selftest: scenes_hybrid（包装模板三条铁律）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/scenes_hybrid_selftest.py
+
       # 可选模块的 selftest 拆成独立 step：一个 step 里串三条 `set -e`，
       # 只看得出"这一坨失败了"，看不出是哪条——第一次跑 CI 就吃了这个亏。
       - name: 'selftest: sfxkit（24 配方 + 音质指标）'
