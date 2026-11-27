@@ -157,8 +157,15 @@ def packet_markdown(manifest, report_path="", sheet_path="", frames_dir=""):
     L.append("")
     g = m.get("gates") or {}
     if g:
-        L.append("## 二、门禁现状（机器读出来的，不是复述）")
+        L.append("## 二、门禁现状（本包生成那一刻的快照）")
         L.append("")
+        # 快照会漂：签核或重跑 qa 之后这一节就过期了。评审者读到旧数字，就会把已经修好的
+        # 事报成阻断项（实测发生过：PACKET 在签核前生成，评审者据此报「signoff 未签」）。
+        # 所以①标死快照时刻，②把 QC-REPORT.md 指成唯一权威，别让旧数字冒充现状。
+        L.append("> 下面是**生成本包时**的门禁快照，不是现状；签核或重跑 qa 之后会变。")
+        L.append("> 以 `%s` 为准。" % (report_path or "out/QC-REPORT.md"))
+        L.append("")
+        L.append("- 快照时刻：%s" % (m.get("generatedAt") or "-"))
         L.append("- 合计：pass %s · fail %s · skipped %s"
                  % (g.get("pass", "?"), g.get("fail", "?"), g.get("skipped", "?")))
         fails = g.get("failItems") or []

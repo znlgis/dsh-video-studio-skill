@@ -4572,6 +4572,167 @@ def t_ffmpeg_priority_order():
     return "解析顺序：%s" % " > ".join(order)
 
 
+# ---------------------------------------------------------------- v3.1.0 新口径
+def t_visual_fields_gate():
+    """画面字段漂移要自动合并且不能被"旧画面"骗过去；声音字段漂移必须失败。
+
+    事故：把 l08 从 chart 改成 stat、l19 的 steps 改字之后只跑 --stage layout，
+    timeline 里仍是旧的 type/series，stills 也照出旧图，退出码 0 —— 看起来全绿，
+    交付的却是旧内容。根因是 layout 的 line 数据来自 work/tts.json（整条 line 快照）。
+
+    两个方向都要守（第一版只做了一半，另一半点被文档打回）：
+      ① 画面字段漂移 → 从剧本合并进快照（合并是**完整**的修复，且画面字段对音频
+         毫无影响，没有理由逼用户重跑 tts —— change-impact.md 承诺「改字幕 TTS 可复用」）；
+      ② text/kind/行集合漂移 → 合并不了（音频已按旧内容合成），必须 SystemExit。
+    """
+    p = os.path.join(HERE, "render.py")
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "VISUAL_LINE_FIELDS" in src, "render.py 没有 VISUAL_LINE_FIELDS：画面字段没有单一真源"
+    tail = src.split('VISUAL_LINE_FIELDS')[1].split(')', 1)[0]
+    for k in ('type', 'items', 'stats', 'steps', 'series', 'sides', 'big', 'sub', 'chapter'):
+        assert (chr(34) + k + chr(34)) in tail, (
+            'VISUAL_LINE_FIELDS 漏了 %s：改这个字段会画旧图或误报' % k)
+    for k in ('text', 'kind'):
+        assert (chr(34) + k + chr(34)) not in tail, (
+            'VISUAL_LINE_FIELDS 混进了影响声音的字段 %s：会被静默合并成声画不一致' % k)
+    assert "AUDIO_LINE_FIELDS" in src and "def _audio_drift(" in src, \
+        "缺 _audio_drift()：声音字段漂移没被当回事"
+    assert "def _merge_visual_lines(" in src, "缺 _merge_visual_lines()：画面字段漂移没自愈"
+    body = src.split("def st_layout")[1][:3200]
+    assert "_audio_drift(" in body, "st_layout 没有检查声音字段漂移"
+    assert "_merge_visual_lines(" in body, "st_layout 没有合并画面字段（会画旧图）"
+    assert "raise SystemExit(" in body, "声音字段漂移必须 FAIL，不能只打印"
+    # 合并必须发生在 resolve_style 之前：版式选型要用新字段。
+    assert body.index("_merge_visual_lines(") < body.index("resolve_style("), \
+        "合并写在 resolve_style 之后：版式仍按旧字段选"
+    return '画面字段合并自愈 + 声音字段 fail-closed'
+
+
+def t_beat_grid_fingerprint():
+    """节拍网格必须绑定 music.wav：换 BGM 不重跑 beats 时 G14 不许拿旧网格判 pass。
+
+    这是 3.0.0 自己列在「已知未修」里的点，v3.1.0 补上。三个断言：
+    ① 写盘时带 musicFp；② 读缓存时比对；③ G14 校验并 fail。
+    """
+    p = os.path.join(HERE, "render.py")
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "def _file_fp(" in src, "render.py 缺 _file_fp()"
+    beat = src.split("def _beat_payload(")[1].split("def st_beats(")[0]
+    assert (chr(34) + 'musicFp' + chr(34)) in beat, '网格没写 musicFp：无法判断它配不配当前音乐'
+    assert 'data.get(' in beat and 'music_fp' in beat, '读缓存时没比对 musicFp：旧网格会被复用'
+    g14 = src.split("def _qa_beat_gate(")[1].split("def st_editlist(")[0]
+    assert 'musicFp' in g14, 'G14 没校验 musicFp：换 BGM 会拿旧网格判 pass'
+    assert 'lg.fail(' in g14 and 'G14' in g14, 'G14 校验失败必须 fail'
+    return 'beats 写入/读取/G14 三处都绑 musicFp'
+
+
+def t_strict_gates_pil_passable():
+    """--strict-gates 在默认引擎（pil）下必须可过：web_page 是 N/A 不是 skipped。
+
+    事故：preflight 对 engine=pil 把 web_page 记 skipped（理由「不适用」），
+    而 --strict-gates 把 skipped 当失败 —— 于是默认产线的片永远不可能通过
+    「交付前强制门禁」，这个能力等于不存在。
+    """
+    p = os.path.join(HERE, "render.py")
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    pf = src.split("def _run_preflight(")[1]
+    assert 'na_items' in pf, '预检闸没有 N/A 概念：pil 片的 web_page 会一直算 skipped'
+    # 判定必须真的按 engine 分流（不是无条件 n/a 掉）：web 引擎下"不适用"不成立。
+    assert 'engine or "pil"' in pf, 'N/A 判定没读 engine：任何引擎都能把它 n/a 掉'
+    assert 'skip_items.remove(k)' in pf, 'N/A 项没有从 skipped 里摘出去'
+    assert 'n/a' in pf, 'detail 里没留下 n/a 痕迹（不适用也要写清楚）'
+    return 'web_page 在非 web 引擎记 n/a，strict 可过'
+
+
+def t_process_no_overlap():
+    """process 构图的标签/序号/说明不许压在一起（G13 恒 fail 的根因）。
+
+    事故：标签写死 y=470（字号 body-4）、序号画在 ay-66=494，纵向相交 18px，
+    G13 对任何带 steps 的 process 段报 43% 压盖（实测一段 24 条）——
+    这个构型等于不可用，只能降级成 list 丢掉流程轴。
+    """
+    p = os.path.normpath(os.path.join(HERE, "..", "assets", "scenes.py"))
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    proc = src.split("def _draw_process(")[1].split("def _draw_process_portrait(")[0]
+    assert '_lbl_base' in proc, '标签基线还是写死的：与序号必然抢同一段纵向空间'
+    assert '470.0, lsize' not in proc, '标签仍硬编码 y=470'
+    # 序号与标签同一行（整组按 cx 居中）：这是唯一从构造上不产生第二个纵向带的做法。
+    # 历史上试过三版：轴上方（与标签相交 18px）、轴下方（与说明文字相交）、
+    # 轴线左侧（被 2px 轴线穿字）——都出过实测截图，所以这里钉死同一行。
+    assert 'total_w' in proc and 'x_num' in proc, '序号没有和标签排在同一行'
+    assert 'num_w + gap_n' in proc, '同一行排布没把序号宽度算进去（会压住标签）'
+    assert proc.count('_draw_text(') >= 3, '说明文字/序号/标签的绘制次数不对'
+    return 'process 序号与标签同一行，轴线与说明文字都不共享纵向带'
+
+
+def t_duration_floor_and_review_gate():
+    """时长下限 G15 + 独立终检签核闸 review（v3.1.0 新增两条交付口径）。
+
+    ① G15：brief 里的「不少于 N 分钟」过去只是 layout 打印一行，删台词掉到 2 分钟
+       不会有任何门禁红，交付凭据里也查不到这条要求。
+    ② review 闸：--stage review 只证明「评审包生成了」，不证明有人看过；
+       R1 的 detail 自己写着「要人看过才算过」，却没有地方记结论。
+    """
+    p = os.path.join(HERE, "render.py")
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "def _qa_duration_gate(" in src, "缺 G15 时长下限门禁"
+    assert '_qa_duration_gate(lg, tl, script)' in src, 'G15 没接线'
+    g15 = src.split("def _qa_duration_gate(")[1].split("def _qa_beat_gate(")[0]
+    assert 'target_sec' in g15, 'G15 没读 target_sec（intake 的时长要求没进门禁）'
+    assert 'lg.fail(' in g15, 'G15 缺 fail（时长不足必须红）'
+    # 没有下限要求 ≠ 没执行：记 skipped 会让 --strict-gates 误杀"本来就没设下限"的片。
+    assert 'lg.ok(' in g15, 'G15 缺 n/a 分支：没设 target_sec 时会被记成没执行'
+    assert 'n/a' in g15, 'G15 的 n/a 没有写进 detail：报告里看不出这是不适用'
+    # 写了非数字是配置错误，必须红——不能 n/a 掉，也不能静默当没设。
+    assert "target_sec 不是数字" in g15 and 'lg.fail(' in g15, '坏 target_sec 没被当配置错误报红'
+    gp = os.path.join(HERE, "gates.py")
+    with open(gp, encoding="utf-8") as fh:
+        gsrc = fh.read()
+    assert 'review' in gsrc, 'gates.py 没有 review 闸'
+    order = gsrc.split('GATE_ORDER = (')[1].split(')')[0]
+    assert 'review' in order, 'GATE_ORDER 里没有 review'
+    assert 'review' in src and 'PACKET.md' in src, 'review 签核没有证据要求（空口签核）'
+    # 签核条目的分母不能写字面量：加闸时它不会跟着变（实测把 5/4 打进了 QC 报告）。
+    # 只查**代码行**里的格式串，注释里提到这个数字不算问题。
+    _code = [ln for ln in src.splitlines() if ln.lstrip().startswith('#') is False]
+    assert not any(('"%d/4 道闸' in ln) or ("'%d/4 道闸" in ln) for ln in _code), \
+        '签核分母还是写死的 4：加闸后报告会打出 N/4'
+    assert '_n_gate = len(GT.GATE_ORDER)' in src, '签核分母没有从 GATE_ORDER 推导'
+    return 'G15 三档 + review 闸带证据要求 + 签核分母同源'
+
+
+def t_review_brief_and_stills_adhoc():
+    """评审任务单要落成产物；手挑静帧不许和母版静帧混目录。
+
+    ① REVIEWER-BRIEF.md：实测让评审者逐张看 40 帧，40 分钟不返回；收敛成
+       「联系表 + 4 张关键帧 + 5 问」后 15 分钟给结论。把这次奏效的收敛写死。
+    ② --stills 手挑的帧落 stills/adhoc/：与「每段中点一张」混放时文件名只差时间戳，
+       实测两次看错版本（对着旧图改画面）。
+    """
+    bp = os.path.join(HERE, "reviewbrief.py")
+    assert os.path.exists(bp), "缺 reviewbrief.py（评审任务单没有真源）"
+    with open(bp, encoding="utf-8") as fh:
+        bsrc = fh.read()
+    assert "def brief_markdown(" in bsrc, "reviewbrief.py 缺 brief_markdown()"
+    for k in ('Q1', 'Q2', 'Q3', 'Q4', 'Q5', '15 分钟', '无法验证'):
+        assert k in bsrc, '评审任务单缺要素：%s' % k
+    p = os.path.join(HERE, "render.py")
+    with open(p, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "REVIEWER-BRIEF.md" in src, "review stage 没写 REVIEWER-BRIEF.md"
+    stills = src.split("def st_stills(")[1][:1800]
+    assert 'adhoc' in stills, '--stills 手挑帧没落 adhoc/ 子目录'
+    # 分目录之后，只跑过手挑静帧的工程也要能签 stills 闸：证据列表必须认 adhoc 的联系表。
+    # 锚点要够独特：文件里别处也有 `want = {`（合并逻辑里），不能拿它切段。
+    acc_block = src.split('"stills": [os.path.join(a.work, "qa", "sheet.png")')[1][:900]
+    assert 'adhoc' in acc_block, '签核证据没认 adhoc 联系表：只跑手挑静帧的工程签不了核'
+    return '任务单要素齐 + stills 分目录 + 签核证据认 adhoc'
+
 CASES = [
 
     ("1  TTS 缓存校验文本", t_cache_key),
@@ -4684,6 +4845,12 @@ CASES = [
     ("108 镜头卡与交接（shotcards / asset_license / editlist / jianying）", t_cards_handoff),
     ("109 render stage 函数完整（注释吞掉 def 的结构损坏）", t_render_stage_integrity),
     ("110 ffmpeg 解析优先级（PATH 先于硬编码，VMAF 门禁真的能用上）", t_ffmpeg_priority_order),
+    ("111 画面字段陈旧闸（改 type/items 只跑 layout 必须 FAIL）", t_visual_fields_gate),
+    ("112 节拍网格绑 music.wav（换 BGM 不许拿旧网格判 pass）", t_beat_grid_fingerprint),
+    ("113 strict-gates 在 pil 下可过（web_page 记 n/a 不是 skipped）", t_strict_gates_pil_passable),
+    ("114 process 构图不压盖（标签/序号/说明分带）", t_process_no_overlap),
+    ("115 时长下限 G15 + 独立终检签核闸 review", t_duration_floor_and_review_gate),
+    ("116 评审任务单与手挑静帧分目录", t_review_brief_and_stills_adhoc),
 ]
 
 

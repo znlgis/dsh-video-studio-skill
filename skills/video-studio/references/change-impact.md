@@ -7,7 +7,7 @@
 ## 0. 先记住三条
 
 1. **时间轴是唯一的地基**：凡改了影响"每句多长"的东西（台词、语速、停留），
-   下游 `cues → score → sfx → audio → frames → mux → qa` 全部要重跑。
+   下游 `score → beats → cues → sfx → audio → frames → mux → qa` 全部要重跑（score 在前：cues 解拍要用这一版的音乐）。
    改字幕文案（`sub`）不影响语音时长，但会改字幕窗口 → 也要重跑 layout 及之后。
 2. **画面代码（scenes.py）变了，音轨可以复用**，但 `frames` 与 `qa` 必重跑
    （qa 的锐度参考帧是场景函数重新渲染的，画面一变参考帧就失效）。
@@ -23,6 +23,9 @@
 | `lines[].sub`（字幕文案） | sub.srt / sub.ass / timeline 的字幕窗口 / frames / mux / qa | `layout → frames → mux → qa`（TTS 可复用） | 帧数÷40 s |
 | `lines[].hold` / `lead` / `tail` / `bar` | timeline / cues / frames / mux / qa | 同上 | 帧数÷40 s |
 | `lines[].kind` | 声线计划 / 配乐分段 / 画面版式（scenes 按 kind 选绘制函数） | `style → tts → layout → …` 全链 | 全片 |
+| `lines[].type` / `items` / `stats` / `steps` / `series` / `sides` / `big` / `kicker` / `sub` / `chapter` / `quote` / `by`（**只影响画面的字段**） | timeline / storyboard / frames / mux / qa | `layout → frames → mux → qa`（**TTS 可复用**：layout 会把这批字段从剧本合并进 `work/tts.json` 的 line 快照，并打印合并了哪些行） | 帧数÷40 s |
+| `lines[].hold` / `lead` / `tail` / `bar` 之外的节奏（`pacing.*`） | timeline / cues / frames / mux / qa | `layout → cues → frames → mux → qa` | 帧数÷40 s |
+| `design.structure.target_sec`（时长下限） | G15 判定（qa） | `qa`（改的是门禁判据，不影响画面） | 秒级 |
 | `work/design.json`（设计变了：配色/字体/母题/版式/字幕/配乐/声线） | style.json / storyboard / voice_plan / tts(换声线时) / score / audio / frames / qa | 看 `--stage explain`：通常是全链 | 全片 |
 | `bpm` / `music.*` | score / audio / mux | `score → audio → mux → qa` | 秒级 |
 | `sfx.cues` / `scenes.py 的 cues()` | cues.json / sfx.wav / audio.wav / mux | `cues → sfx → audio → mux → qa` | 秒级 |

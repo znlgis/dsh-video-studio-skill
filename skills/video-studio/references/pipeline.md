@@ -178,7 +178,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage acce
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage explain  # 只报"哪些阶段过时、为什么、该跑什么"，不跑任何 stage
 ```
 
-`--stage all` 的完整顺序：`style → tts → layout → beats → cues → score → sfx → audio → frames → mux → qa → editlist`。
+`--stage all` 的完整顺序：`style → tts → layout → score → beats → cues → sfx → audio → frames → mux → qa → editlist`（**score/beats 在 cues 前**：cues 解拍要用这一版的 music.wav，否则网格建的还是上一轮的）。
 
 > `beats` 必须排在 `cues` 前（cue 的 `beat:` 锚点要靠网格解析）；`editlist` 排在 `qa` 后
 > （它要把 `cues.json` 的音效落点写进表，早于 cues 会得到一份「音效列全是 —」的错表）。

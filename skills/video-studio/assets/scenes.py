@@ -1617,20 +1617,41 @@ def _draw_statement(scene, t, dur, tg, script, frame, plan, th):
     # 逐字显现：4 字一组（单字一次 text 太贵；整行一次又没"写出来"的感觉）
     reveal = clamp(t / max(0.35, min(1.6, dur * 0.45)))
     total_chars = sum(len(x) for x in lines)
-    shown = int(total_chars * ease(reveal))
+    shown_f = total_chars * ease(reveal)
+    # 已完全显出的字数（小数字符数）与"正在淡入的那一个"：
+    # 这两件事必须分开算。曾经把 int(shown_f) 当"要画的字数"、又只在 frac>0.02 时画
+    # 尾字，于是 shown_f 正好是整数（显完的那一帧）时尾字**永远不画** —— 实测整句
+    # 静止后仍缺最后一个字（「最后一公」少了「里」）。现在：前 n_full 个字按 1.0 画，
+    # 分界那个字按 frac 淡入，于是"显完"与"进行中"两种状态都完整。
+    n_full = int(shown_f)
+    frac = clamp(shown_f - n_full)
     walked = 0
     for i, ln in enumerate(lines):
-        if walked >= shown:
-            break
-        take = max(0, min(len(ln), shown - walked))
+        start = walked
         walked += len(ln)
-        seg = ln[:take]
-        if not seg:
+        if start > n_full:
+            break
+        # 本行里完全显出的字数（可能整行都显完了）
+        full = min(len(ln), max(0, n_full - start))
+        seg = ln[:full]
+        # 分界落在本行内且还没显满：再多画一个"半透明"的字
+        partial = ""
+        if frac > 0.02 and start + full == n_full and full < len(ln):
+            partial = ln[full]
+        if not seg and not partial:
             continue
-        w = _text_w(seg, size, "bold", th)
+        glyphs = seg + partial
+        w = _text_w(glyphs, size, "bold", th)
         x0 = (W - w) * 0.5
-        _draw_text(img, th, v, seg, x0, top + i * lh, size, "bold", th["ink"],
-                   "left", 1.0, trk)
+        if seg:
+            _draw_text(img, th, v, seg, x0, top + i * lh, size, "bold", th["ink"],
+                       "left", 1.0, trk)
+        if partial:
+            # 最新显出来的那个字做渐入：整字 pop 等于「这一帧突然多了一个笔画完整的字」，
+            # 8x8 分块上就是一次单帧硬跳（实测符号一致度 0.62，离 G9 的 0.60 阈值只剩
+            # 0.02，字再大一点就会被判成闪烁）。
+            _draw_text(img, th, v, partial, x0 + _text_w(seg, size, "bold", th),
+                       top + i * lh, size, "bold", th["ink"], "left", clamp(frac), trk)
 
     # 持续动态：字距呼吸 + 下划线从左生长（保证"3–6 秒内有可见变化"）
     hz = float((lang.get("motion") or {}).get("breathe_hz") or 0.85)
@@ -2140,8 +2161,23 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
                   fill=_rgba(th["accent"], int(200 * pn)))
         lbl = str(st.get("label") or "")
         lsize = int(th["scale"]["body"][0] - 4)
-        lw = _text_w(lbl, lsize, "bold", th)
-        _draw_text(img, th, v, lbl, cx - lw * 0.5, 470.0, lsize, "bold",
+        # 序号与标签画在**同一行**（序号在左，一个小间距后接标签），整组按 cx 居中。
+        # 为什么改成同一行：过去标签写死 y=470、序号画在 ay-66=494，纵向相交 18px，
+        # G13 对任何带 steps 的 process 段报 43% 压盖（实测一段 24 条）——这个构型等于
+        # 不可用，只能降级成 list 丢掉流程轴；挪到轴线左侧又会被那条 2px 轴线穿过字身
+        # （实测出图就是「· 0」被圆点盖住）。同一行排布从构造上没有第二个纵向带，
+        # 轴线与说明文字都不共享它的区间，也不存在"谁盖谁"的取巧。
+        num = _number_text(str(_typo(lang).get("number") or "dim"), i + 1)
+        nw = "reg" if any("\u4e00" <= ch <= "\u9fff" for ch in num) else _NUM_WEIGHT
+        nsize = int(lsize * 0.8)
+        num_w = _text_w(num, nsize, nw, th)
+        gap_n = 14.0
+        total_w = num_w + gap_n + _text_w(lbl, lsize, "bold", th)
+        x_num = cx - total_w * 0.5
+        _lbl_base = float(ay) - 24.0 - lsize * 1.28
+        _draw_text(img, th, v, num, x_num, _lbl_base + (lsize - nsize) * 0.5, nsize,
+                   nw, th["dim"], "left", pn * 0.9)
+        _draw_text(img, th, v, lbl, x_num + num_w + gap_n, _lbl_base, lsize, "bold",
                    th["ink"], "left", pn)
         note = str(st.get("note") or "")
         if note:
@@ -2149,10 +2185,6 @@ def _draw_process(scene, t, dur, tg, script, frame, plan, th):
                 nw = _text_w(ln, int(lsize * 0.82), "reg", th)
                 _draw_text(img, th, v, ln, cx - nw * 0.5, 610.0 + j * int(lsize * 1.05),
                            int(lsize * 0.82), "reg", th["muted"], "left", pn * 0.95)
-        num = _number_text(str(_typo(lang).get("number") or "dim"), i + 1)
-        nw = "reg" if any("\u4e00" <= ch <= "\u9fff" for ch in num) else _NUM_WEIGHT
-        _draw_text(img, th, v, num, cx - 26, ay - 66, int(lsize * 0.8), nw,
-                   th["dim"], "left", pn * 0.9)
 
     # 持续动态：进度光点沿轴匀速（周期 = 段长），永远有运动
     if dur > 0.1:
@@ -2281,17 +2313,29 @@ def _draw_quote(scene, t, dur, tg, script, frame, plan, th):
     top = 300.0
     reveal = clamp(t / max(0.4, min(2.2, dur * 0.55)))
     total = sum(len(x) for x in lines)
-    shown = int(total * ease(reveal))
+    reveal_f = total * ease(reveal)
+    # 与 _draw_statement 同一套"完全显出的字数 + 正在淡入的那一个"：
+    # 整字 pop 在 8x8 分块上就是一次单帧硬跳，是 G9 闪烁判据最容易误抓的形态。
+    n_full = int(reveal_f)
+    frac = clamp(reveal_f - n_full)
     walked = 0
     for i, ln in enumerate(lines):
-        if walked >= shown:
-            break
-        take = max(0, min(len(ln), shown - walked))
+        start = walked
         walked += len(ln)
-        seg = ln[:take]
+        if start > n_full:
+            break
+        full = min(len(ln), max(0, n_full - start))
+        partial = ""
+        if frac > 0.02 and start + full == n_full and full < len(ln):
+            partial = ln[full]
+        seg = ln[:full]
         if seg:
             _draw_text(img, th, v, seg, 340.0, top + i * lh, qsize, "light",
                        th["ink"], "left", 1.0, trk * 0.4)
+        if partial:
+            _draw_text(img, th, v, partial,
+                       340.0 + _text_w(seg, qsize, "light", th), top + i * lh,
+                       qsize, "light", th["ink"], "left", clamp(frac), trk * 0.4)
 
     if by:
         pb = ease(rng(t, 0.9, 1.9))

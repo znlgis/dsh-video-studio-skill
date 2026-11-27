@@ -1,3 +1,186 @@
+## 3.1.0 — 十处「看起来对、其实没查到」补上：layout 陈旧闸 / process 压盖 / strict 可过 / 网格绑音乐 / 终检签核
+
+> 这一版的十个点全部来自**一次真实出片会话**的复盘：拍一条 3 分 24 秒的介绍片，
+> 过程中踩到的每个坑都有复现路径。没有新玩法，只有两类事：
+> **让静默错误现形**（改画面只跑 layout 会交付旧图、换 BGM 拿旧网格判 pass），
+> **让证明链闭合**（strict 门禁在默认引擎下永远过不了、独立终检的结论无处可签）。
+
+### P0 · 会让人拿到「错但看起来成功」的结果
+
+**1. 改画面字段只跑 `--stage layout` 会静默沿用旧 `tts.json` 快照**
+
+- 事故：把 l08 从 `chart` 改成 `stat`（`series` → `stats`）、l19 的 `steps` 改字之后只跑
+  `--stage layout`，`timeline.json` 里仍是 `type=chart` / 旧 `series`，`stills` 也照出旧图，
+  退出码 0。看起来全绿，交付的是旧内容。
+- 根因：`st_layout` 的 line 数据来自 `work/tts.json`，而 tts.json 存的是**整条 line dict**
+  （含 `type/items/stats/steps/series/big/kicker/sides`）。于是「只影响画面、不影响语音」
+  的字段一改，layout 就用上一轮 tts 时的旧值。
+- 修法：`VISUAL_LINE_FIELDS` 定为单一真源，`st_layout` 把剧本的画面字段**合并**进
+  tts.json 的 line 快照（并打印合并了哪些行）；只有 `text` / `kind` / 行集合这类
+  **影响声音**的漂移才 `raise SystemExit` 要求重跑 tts。
+- 为什么不是一律失败（第一版就是这么写的，被 `change-impact.md` 打回）：画面字段对
+  音频零影响，合并是**完整**修复；一律失败会让「只改一句字幕」也逼人重合成语音，
+  与文档承诺的「TTS 可复用」矛盾。
+
+**2. `type: process` 在内置渲染器里结构性压盖，G13 恒 fail**
+
+- 事故：一段 process 报 24 条 `文字压盖 43%：'PACKET.md' 与 '· 01'`，只能被迫降级成 `list`，
+  丢掉流程轴的表达力。
+- 根因：标签写死基线 `y=470`（字号 `body-4` → 占 470–512），序号画在 `ay-66=494`
+  （字号 `lsize*0.8` → 占 494–528），纵向**相交 18px**。任何带 `steps` 的段都会中招。
+- 修法：标签基线改由 `ay` 推导（不再写死 470），并把**序号与标签排在同一行**（序号在左，
+  整组按中心居中）。这是唯一从构造上不产生第二个纵向带的做法——实测排除了三种候选：
+  轴上方（与标签相交 18px）、轴下方（与说明文字相交）、轴线左侧（被 2px 轴线穿过字身，
+  出图就是「· 0」被圆点盖住）。同一行排布下轴线与说明文字都不共享它的纵向区间。
+- 重录 `golden_frames_compose.json` 的 process 帧基线。
+
+**3. `--strict-gates` 在默认引擎（pil）下永远不可能通过**
+
+- 事故：默认产线跑完是 `pass 15 · fail 0 · skipped 1`，那 1 个 skipped 就是 `G0` 的
+  `web_page`；而 `--strict-gates` 把 skipped 当失败 —— 默认路径下的「交付前强制门禁」
+  这个能力等于不存在。
+- 根因：`preflight._check_web_page` 对 `engine=pil` 记 `skipped`（理由就写着「不适用」），
+  与「没执行」共用同一档语义。
+- 修法：`_run_preflight` 引入 N/A 概念 —— 非 web 引擎的 `web_page` 从 `skip_items` 摘出，
+  detail 里写 `web_page=n/a（engine=pil，不适用）`。不适用的项不算「没执行」。
+
+### P1 · 门禁口径与交付可信度
+
+**4. 节拍网格不绑定当前 `music.wav`（3.0.0 列的「已知未修」，本轮实测命中）**
+
+- 事故：`--stage all` 时 `cues` 在 `score` 之前跑，用的是上一轮遗留的 music.wav；它写出的
+  `beat_data.json` 来自旧音乐，随后 `score` 重生成了 music.wav，G14 却拿旧网格判 `pass`
+  （53.00 BPM / 残差 5.0ms）—— 那种 pass 毫无意义。
+- 修法：`_file_fp()` 算 music.wav 的 sha1，网格写盘带 `musicFp`；读缓存时比对，不一致就重算；
+  G14 校验 `musicFp != 当前指纹` 直接 fail（点名「先跑 --stage beats」）。
+
+**5. 独立终检的「结论」没有签核落点**
+
+- 事故：`--stage review` 只产评审包；`R1` 的 detail 自己写着「要人/评审 agent 看过才算过」，
+  但系统里没有任何地方记录「谁看过、结论是什么」。最后只能把结论塞进 `release` 的 note，
+  撑不住审计。
+- 修法：`gates.GATES` 增加第五道闸 `review`，`GATE_ORDER` 变成
+  `style → stills → facts → review → release`；`--stage accept --gate review` 要求
+  `work/review/PACKET.md` 真的存在（不许空口签核）。
+
+**6. 评审包的门禁摘要是「生成那一刻的快照」，会漂**
+
+- 事故：`PACKET.md` 在签核之前生成（写 `pass 13` / `signoff 未签`），签核发生在之后 ——
+  评审者读到旧摘要，据此把已经修好的事报成阻断项。
+- 修法：PACKET.md 把那一节标题改成「本包生成那一刻的快照」，写明快照时刻，并把
+  `out/QC-REPORT.md` 指成唯一权威。
+
+**7. 「不少于 N 分钟」只是打印，不进门禁**
+
+- 事故：layout 打印 `下限时长 180.0s / 实际 204.29s`，纯 stdout；台词删到 2 分钟不会有任何
+  门禁红，交付凭据里也查不到这条要求。
+- 修法：新门禁 **G15**：读 `design.structure.target_sec`，实测时长 < 下限 × 0.97 → fail
+  （差的秒数写进 detail）；没设 target_sec → skipped 并写明「这次没有时长下限要求」。
+
+### P2 · 体验与稳定性
+
+**8. `statement` / `quote` 的逐字显现是「整字硬跳」，逼近 G9 闪烁阈值**
+
+- 事故：t=166.5s 的「跳过 ≠ 通过」逐字显现，`sign_agree=0.62`，阈值 `0.60` —— 差 0.02
+  就被误判成闪烁，只能把该段 `statement` 换成 `hero` 绕过去。
+- 修法：最新显出来的那个字按小数部分做 alpha 渐入（`shown_f - shown`），保留「写出来」的
+  节奏，也不制造单帧阶跃。
+
+**9. `--stage stills` 的默认帧与手挑帧混放同一目录**
+
+- 事故：`work/stills/` 里同时有 `l08_008.3.png`（每段中点）与 `l08_003.0.png`（`--stills`
+  指定），文件名只差时间戳，实测两次看错版本，对着上上轮的旧图改画面。
+- 修法：手挑帧落 `work/stills/adhoc/`，并在 stdout 明说「与母版静帧分开」。
+
+**10. 「怎么派评审」的经验没有固化成产物**
+
+- 事故：派了两个干净上下文评审者，第一个跑 45 分钟零输出被中断；换成「只看联系表 +
+  4 张关键帧 + 5 个问题」的收敛版本，15 分钟给出完整结论。
+- 修法：新增 `scripts/reviewbrief.py`，`--stage review` 顺手产出
+  `work/review/REVIEWER-BRIEF.md`（范围 / 5 问 / 输出格式 / 15 分钟时限）。
+
+### 自检与体检
+
+- selfcheck **110 → 116 条**：新增 111 画面字段陈旧闸 / 112 节拍网格绑 music.wav /
+  113 strict-gates 在 pil 下可过 / 114 process 构图不压盖 / 115 时长下限 G15 + review 闸 /
+  116 评审任务单与手挑静帧分目录。
+- ci_check 仍 **18 项**（依赖白名单补 `reviewbrief`，第 14/17 项计数与文件结构跟进）。
+- 文档口径同步：`110 条` → `116 条`（SKILL.md / README / README.en / marketplace-entry /
+  ci.yml / references，共 9 处）。
+
+### 第五个：`--stage all` 的顺序让节拍网格永远慢一轮（自查中发现）
+
+- 现象：`--stage all` 跑完，G14 报「work/beat_data.json 不是当前 music.wav 的网格」。
+  只在**内容变更后的首轮**复现，第二轮就正常——最容易被当成偶发而忽略。
+- 根因：`all` 的顺序是 `cues → score`。`cues` 会顺手触发一次节拍分析（卡点片一条命令
+  跑完的设计），而那时 music.wav 还是**上一轮的**；`score` 随后重生成音乐（内容指纹
+  变了 → 配乐种子变了 → 字节变了），于是刚写下的网格与当前音乐对不上。
+- 修法：`all` 里把 `score` 排到 `cues` 之前（两者没有相互依赖：score 只读 script，
+  cues 只读 script + timeline）。这样 cues 解拍时用的就是这一版的音乐，网格一次建对。
+- 这个缺陷不是 v3.1.0 引入的（顺序一直在），但**直到这一版给网格加上 musicFp 指纹**
+  它才有办法被看见：过去旧网格会被静默复用并判 pass。
+### 发布前自查（这一版自己改出来的四个问题，全部已修）
+
+> 写在这里的理由和 3.0.0 那段一样：不写就成了下一轮的假绿。
+
+**① `statement` 渐入把每行最后一个字弄丢了（我引入的回归）**
+
+- 现象：整句显完、画面静止之后，最后一行仍少一个字（实测「最后一公」少了「里」）。
+- 根因：把 `int(shown_f)` 当「要画的字数」，又只在 `frac > 0.02` 时画尾字 —— 分界正好
+  落在整数上（也就是「显完」那一帧）时，尾字**永远不画**。
+- 修法：`n_full = int(shown_f)` 与 `frac` 分开算：前 `n_full` 个字按 1.0 画，分界那个字
+  按 `frac` 淡入。两个状态（进行中 / 已显完）都完整。
+
+**② `layout` 陈旧闸误伤「只改字幕」的便宜路径（我引入的回归）**
+
+- 现象：`sub` / `chapter` 也在视觉字段表里，改一句字幕就被要求重跑 `--stage tts`。
+- 与文档冲突：`change-impact.md` 明说改字幕走 `layout → frames → mux → qa`、TTS 可复用。
+- 修法：见上面第 1 条的合并语义（画面字段合并、声音字段才失败）。
+
+**③ G15 没设下限时记 skipped，`--strict-gates` 会误杀**
+
+- 现象：本来就没声明「不少于 N 分钟」的片，G15 记 skipped，strict 下算失败。
+- 这与刚修的 G0 `web_page` 是同一类语义错误：**不适用 ≠ 没执行**。
+- 修法：没设 `target_sec` → `pass` + detail 写明 `n/a`；写了非数字 → `fail`（配置错误必须红）。
+
+**④ `--stills` 分目录后，只跑手挑静帧的工程签不了 stills 闸**
+
+- 现象：联系表跟着落进 `stills/adhoc/`，而签核证据只认 `stills/_sheet.png`。
+- 修法：签核证据列表补 `stills/adhoc/_sheet.png`。
+
+四处都由新增的自检断言 111/115/116 钉住（断言也同步改成了新语义，不是只改代码）。
+
+**⑤ `--stage all` 的顺序让节拍网格永远慢一轮**
+
+- 现象：改完内容后首次 `--stage all`，G14 报「beat_data.json 不是当前 music.wav 的网格」；
+  第二次又好了 —— 最容易被当成偶发。
+- 根因：`all` 的顺序是 `cues → score`。cues 会顺手触发节拍分析（卡点片一条命令跑完的设计），
+  而那时 music.wav 还是上一轮的；score 随后重生成音乐（内容指纹变 → 配乐种子变 → 字节变），
+  刚建好的网格立刻与当前音乐对不上。
+- 修法：`all` 改成 `score → beats → cues`（三者无相互依赖：score 只读 script，beats/cues
+  只读 script + timeline）。这个顺序缺陷一直都在，但**直到给网格加上 musicFp 指纹才看得见**：
+  过去旧网格会被静默复用并判 pass。
+
+**⑥ 签核条目的分母是写死的 4，加第五道闸后报告打出「5/4」**
+
+- 现象：QC 报告「人工签核 | pass | 5/4 道闸已签」——分母没跟着闸数量走。
+- 根因：`_LEDGER.ok(..., "%d/4 道闸已签" % len(GATE_ORDER))`，分子用常量、分母写字面量。
+- 修法：分子分母同源于 `GATE_ORDER`；新增断言钉住「代码里不许出现写死的 4」
+  （只查代码行，注释里提到这个数字不算问题——第一版断言连注释一起查，自己把自己判红了）。
+
+另外同步修的文档漂移：`render.py` 模块文档的 `--gate` 列表漏了 `review`；
+`delivery-gates.md` 仍写「四道签核闸」；`SKILL.md` / `README.md` 的 `--stage all` 顺序
+还停在 `cues → score`。
+### 真实回归（不是只跑自检）
+
+- 用一条真实工程（3 分 24 秒、20 段、1920×1080@30）重跑全链：G13 从 24 条压盖降到 **0**、
+  G9 从 **fail** 降到 0 条问题、G14 与 G15 进入矩阵。
+- 陈旧闸**实测触发**：故意把 l19 的 `type` 改成 `process` 后只跑 layout → 退出码 1 并点名
+  哪一行不一致；改回后 layout 恢复正常。
+- `--strict-gates` **实测通过**：`pass 14 · fail 0 · skipped 0`，退出码 0（改前恒为 1）。
+
+---
+
 ## 3.0.0 — 全面审查：修 20 处真缺陷（含 3 处「门禁配了但从不执行」）+ 断言 108 → 110
 
 > 这一版没有新功能，只有一件事：**把「看着绿、其实没查」的地方补上**。

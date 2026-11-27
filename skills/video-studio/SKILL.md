@@ -61,7 +61,7 @@ JSON
 #    画风/配乐/声线/节奏全部由 design 决定，film.json 里**没有** style 字段可写。
 python <SKILL_DIR>/scripts/filmcheck.py film.json          # 契约校验（可选，几秒）
 
-# 2) 先自检一次环境（可选；110 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；116 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先问诊（8 题一次问完），再出方案——同一个 brief 每次都不一样，必须让用户看过
@@ -76,7 +76,7 @@ python <SKILL_DIR>/scripts/propose.py --confirm --candidate A --work work
 
 # 5) 先看静帧，再出全片；--scenes 不写就用技能内置渲染器
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage stills --stills "l01:3,l02:5,l03:2.5"
-#    → work/stills/_sheet.png：用 read_image 亲眼看，别跳过
+#    → work/stills/_sheet.png（手挑帧在 work/stills/adhoc/，联系表在 adhoc/_sheet.png）：用 read_image 亲眼看，别跳过
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage all
 #    TTS→排版→配乐→音效→混音→逐帧→编码→质检 一条龙；中间产物全在 work/，可断点续跑。
 ```
@@ -118,7 +118,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage acce
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage explain  # 只报"哪些阶段过时、为什么、该跑什么"，不跑任何 stage
 ```
 
-`--stage all` 的完整顺序：`style → tts → layout → cues → score → sfx → audio → frames → mux → qa`。**任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
+`--stage all` 的完整顺序：`style → tts → layout → score → cues → sfx → audio → frames → mux → qa`（**score 在 cues 前**：cues 解拍要用这一版的 music.wav）。**任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
 
 **开渲前先算成本**（`estimate.py` 是仓库工具，按 `<REPO>` 调用；`--json` 可机读）：
 
@@ -129,7 +129,7 @@ python <REPO>/tools/estimate.py --script film.json --jobs 4
 要省掉全片 VMAF 就在 `film.json` 写 `"qa": {"vmaf": {"mode": "off"}}`（estimate 与 render 都读这个字段，G11 记 skipped）。
 
 **看交付凭据再签核**：`cat out/QC-REPORT.md`（gate matrix 分 pass / fail / skipped 三档，skipped = 本次没执行，不等于通过），
-然后 `--stage accept --gate release`。签核绑内容指纹：改了剧本 / `scenes.py` / 设计，旧签核自动失效。交付前要强制（skipped 也算失败）加 `--strict-gates`。
+然后 `--stage accept --gate review`（独立终检结论）与 `--stage accept --gate release`。签核绑内容指纹：改了剧本 / `scenes.py` / 设计，旧签核自动失效。交付前要强制（skipped 也算失败）加 `--strict-gates`。
 
 **长片渲染**（分块并行 + 断点续跑）：`--stage frames --jobs 4`，断点续跑再加 `--resume`。分块落在 `work/segments/`（按绝对起始帧命名，
 拼接前显式检测缺口）。**改台词 / 改 scenes.py / 改设计之后 `--resume` 会拒绝复用旧分块**（计划指纹对不上），并提示 `rm -rf work/segments`——旧分块配新时间轴会拼出"画面对不上旁白"的片子。
@@ -162,7 +162,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa -
 - **error 档**（出现即 red）：分辨率/帧率不符交付规格、音轨缺失、时长差 ≥0.5 s、真峰 > -1.0 dBTP、锐度比 < 0.85、单帧闪烁 >0、画面空窗、音画同步超差、字幕条数 ≠ 剧本句数、G0 渲前预检 error、G10 词级异常、G11 VMAF<92、G12 字符召回<0.72。
 - **warning 档**：采样率非 48 kHz、响度偏离 -16±1、真峰余量不足、锐度比 0.85–0.92、长黑帧/长静音、字幕安全区告警、缺字形、画面静止 >6 s、**门禁没执行**（最重要——它说明"看起来通过"其实没查）。
 - **音画同步门禁在 PIL 路线默认可能没在查**：要么给 cue 写 `visual_at`（画面上事件真正发生的绝对秒数），要么设 `QA_REQUIRE_SYNC=1` 把"没查"升级成 error。看到 `sync: []` 先确认是真同步还是根本没查。
-- **门禁矩阵、G0/G10/G11/G12/G13/G14 + R1 判据、交付凭据 `out/QC-REPORT.md`、阶段新鲜度**：见 [references/delivery-gates.md](references/delivery-gates.md)；
+- **门禁矩阵、G0/G10/G11/G12/G13/G14/G15 + R1 判据、交付凭据 `out/QC-REPORT.md`、阶段新鲜度**：见 [references/delivery-gates.md](references/delivery-gates.md)；
   帧级深检怎么读 `work/qa/deep.json`、闪烁/空窗/同步的判定与反例：见 [references/frame-qa.md](references/frame-qa.md)；方法论 G0–G8 与可复制代码见 [references/quality-gates.md](references/quality-gates.md)。
 
 ### 交付话术（不许自我宣称"做好了"）

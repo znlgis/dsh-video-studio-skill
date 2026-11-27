@@ -16,10 +16,10 @@
     qa      质检 + 抽帧 + 联系表 + 帧级深检（闪烁/空窗/音画同步）
     stills  只渲染若干关键帧做母版预览（不生成视频）
     review  独立终检评审包 -> work/review/（每镜 enter/settle 两张帧 + PACKET.md + 门禁摘要）
-    accept  人工签核一道闸（--gate style|stills|facts|release），写 work/signoff.json
+    accept  人工签核一道闸（--gate style|stills|facts|review|release），写 work/signoff.json
     explain 打印"现在哪些 stage 是旧的、为什么、该跑什么"（--explain-stale 的入口）
 
-依赖顺序：style -> tts -> layout -> cues -> score -> sfx -> audio -> frames -> mux -> qa。
+依赖顺序：style -> tts -> layout -> score -> beats -> cues -> sfx -> audio -> frames -> mux -> qa。
 --stage all 按顺序跑完；单跑某个 stage 时，若前置产物缺失会明确报错并提示先跑哪个。
 --engine 覆盖 film.json 的 engine：pil = Pillow 逐帧（默认，依赖最少）；web = 无头浏览器逐帧。
 
@@ -625,8 +625,106 @@ def _write_words(work, done, want_words):
 
 
 # ---------------------------------------------------------------- 排版
+# 只影响画面、不影响语音的 line 字段。改这些时 layout 可以直接把它们从剧本合进
+# tts.json 的 line 快照（不需要重合成语音，也就不该逼用户重跑 --stage tts）。
+# 与 references/change-impact.md 的「画面字段」一节同口径；新增字段请同步两处。
+VISUAL_LINE_FIELDS = ("type", "items", "stats", "steps", "series", "sides",
+                      "big", "kicker", "sub", "chapter", "quote", "by", "subtitle")
+# 影响「语音/语气/配乐」的 line 字段：改这些就必须重跑 tts，否则声音与画面对不上。
+# kind 决定声线计划与配乐能量；text 决定念什么。两个都不能靠合并自愈。
+AUDIO_LINE_FIELDS = ("text", "kind")
+
+
+def _merge_visual_lines(script, lines):
+    """把剧本里当前的「画面字段」合并进 tts.json 的 line 快照，返回 (lines, changed_ids)。
+
+    为什么合并而不是直接失败：tts.json 存的只是**整条 line dict** 的快照（它需要带上
+    这些字段是因为 timeline 由它排轴）。画面字段对音频没有任何影响，从剧本覆盖过去
+    就是**正确答案**，不存在"部分修复"的残留——所以这里合并，不逼用户重跑 tts
+    （否则改一个字幕文案也要重合成语音，与 change-impact.md 承诺的「TTS 可复用」矛盾）。
+
+    真正需要失败的是**影响声音**的漂移：行集合变了（增减句）、text 变了、kind 变了。
+    这些合并不了（音频已经按旧的念出来了），只能用 SystemExit 说清楚要重跑 tts。
+    """
+    want = {}
+    for ln in (script or {}).get("lines") or []:
+        lid = str((ln or {}).get("id") or "")
+        if lid:
+            want[lid] = ln
+    changed = []
+    merged = []
+    for ln in lines or []:
+        cur = dict(ln or {})
+        lid = str(cur.get("id") or "")
+        src = want.get(lid)
+        if src is not None:
+            for k in VISUAL_LINE_FIELDS:
+                if k in src:
+                    if cur.get(k) != src[k]:
+                        cur[k] = src[k]
+                        if lid not in changed:
+                            changed.append(lid)
+                elif k in cur and k not in src:
+                    # 剧本里删掉了这个可选字段（例如把 steps 换成 items）：快照里也要删，
+                    # 否则 timeline 会带着上一版的废旧字段，版式选型跟着错。
+                    cur.pop(k, None)
+                    if lid not in changed:
+                        changed.append(lid)
+        merged.append(cur)
+    return merged, changed
+
+
+def _audio_drift(script, lines):
+    """剧本与 tts.json 的**影响声音**的差异：返回 (缺失 id, 多余 id, 内容变了的 id)。
+
+    这三类都不能靠合并自愈（音频已经按旧内容合成完了），必须让用户重跑 --stage tts。
+    """
+    want, got = {}, {}
+    for ln in (script or {}).get("lines") or []:
+        lid = str((ln or {}).get("id") or "")
+        if lid:
+            want[lid] = ln
+    for ln in lines or []:
+        lid = str((ln or {}).get("id") or "")
+        if lid:
+            got[lid] = ln
+    missing = [lid for lid in want if lid not in got]
+    extra = [lid for lid in got if lid not in want]
+    changed = [lid for lid, ln in want.items()
+               if lid in got and any((got[lid] or {}).get(k) != ln.get(k)
+                                     for k in AUDIO_LINE_FIELDS)]
+    return missing, extra, changed
+
+
 def st_layout(script, work, lines=None):
+    from_tts = lines is None
     lines = lines or json.load(open(os.path.join(work, "tts.json"), encoding="utf-8"))
+    # tts.json 是「上一次 tts 时的整条 line 快照」。两类漂移分开处理：
+    #   ① 影响声音的（增减句 / text / kind）→ 合并不了，直接失败并给重跑命令；
+    #   ② 只影响画面的（type/items/stats/steps/sub/chapter…）→ 从剧本合并进来。
+    # ② 如果不处理，就会「退出码 0、stills 照出，但画的是上一版」——最坏的一类失败；
+    # 但也**不该**为它逼用户重跑 tts（画面字段对音频毫无影响）。
+    if from_tts:
+        missing, extra, audio_bad = _audio_drift(script, lines)
+        if missing or extra or audio_bad:
+            bits = []
+            if missing:
+                bits.append("剧本有、tts.json 没有：%s" % "、".join(missing[:6]))
+            if extra:
+                bits.append("tts.json 有、剧本没有（已删句）：%s" % "、".join(extra[:6]))
+            if audio_bad:
+                bits.append("text/kind 改了：%s" % "、".join(audio_bad[:6]))
+            raise SystemExit(
+                "[layout] 这些改动**影响声音**，work/tts.json 是旧的，画面对不上旁白：\n"
+                "   %s\n"
+                "   修法：重跑 --stage tts（没改的句子命中缓存，只补改动的）：\n"
+                "     python render.py --script film.json --work work --stage tts\n"
+                "   然后照常 --stage layout …。用 --stage all 不会遇到这个问题。"
+                % "\n   ".join(bits))
+        lines, merged = _merge_visual_lines(script, lines)
+        if merged:
+            print("   [note] 剧本的画面字段已合并进时间轴（不必重跑 tts）：%s"
+                  % "、".join(merged[:8]))
     plan = resolve_style(script, work)
     print("== Layout")
     pace = plan["pacing"]
@@ -888,25 +986,51 @@ def _music_path(script, work):
     return ""
 
 
+def _file_fp(path):
+    """文件内容指纹（sha1 前 16 位）；缺文件返回 ""，不抛异常。
+
+    用在「这份分析结果还配不配当前输入」的判定上（节拍网格 vs music.wav）。
+    """
+    if not path or not os.path.exists(str(path)):
+        return ""
+    try:
+        h = hashlib.sha1()
+        with open(str(path), "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return ""
+
+
 def _beat_payload(script, work, *, verbose=True):
     """读/算 beat_data：有 work/beat_data.json 就读它，没有就用音乐现算并写盘。
 
     单真源：cues 与 beats stage 都走这里，所以"什么算节拍网格"只有一处定义。
     算不出来返回 ok=false 的占位（不抛异常），让下游报错说人话。
+
+    网格必须**绑定它来自哪一份音乐**（musicFp）：换 BGM 而没重跑 beats 时，旧网格会让
+    G14 拿上一首曲子的拍点去判这一版成片 —— 那种 pass 毫无意义（v3.0.0 就把它列在
+    "已知未修"里；v3.1.0 补上）。旧文件没有该字段：只要当前有音乐就重算一次。
     """
     import beatgrid as BG
     out = os.path.join(work, "beat_data.json")
+    music_path = _music_path(script, work)
+    music_fp = _file_fp(music_path)
     if os.path.exists(out):
         try:
             with open(out, encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict) and "beats" in data:
-                return data
+                if not music_fp or data.get("musicFp") == music_fp:
+                    return data
+                if verbose:
+                    print("   [note] music.wav 换了（网格指纹对不上），重算节拍网格")
         except Exception:                                       # noqa: BLE001
             pass
     music = (script.get("audio") or {}).get("music") or {}
     fps = int(script.get("fps") or 30)
-    path = _music_path(script, work)
+    path = music_path
     if not path:
         return dict(version=1, source="", sr=0, fps=fps, bpm=0.0, t0=0.0, T=0.0,
                     residualMs=0.0, confidence=0.0, beats=[], bars=[], hits=[],
@@ -918,6 +1042,10 @@ def _beat_payload(script, work, *, verbose=True):
     except (TypeError, ValueError):
         hint = None
     data = BG.analyze_file(path, fps=fps, bpm_hint=hint)
+    # 把来源指纹写进网格：G14 与下次读取都靠它判断「这份网格还配不配这首歌」。
+    if isinstance(data, dict):
+        data["musicFp"] = music_fp
+        data["musicPath"] = os.path.basename(str(path or ""))
     try:
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=1)
@@ -1481,6 +1609,18 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
     # 并在账本里降级成 skipped（带原因），让报告如实反映"这一项没真查"。
     skip_items = [k for k, v in st.items()
                   if isinstance(v, dict) and str(v.get("status") or "") == "skipped"]
+    # web_page 在 engine=pil 下恒为 skipped（preflight 的理由就写着「engine=pil，不适用」）。
+    # 而 --strict-gates 把 skipped 当失败 —— 不区分的话，默认引擎（pil）的片**永远**
+    # 不可能通过 strict 交付门禁，「交付前强制门禁」这个能力等于不存在（实测：默认
+    # 路径的片跑到最后是 pass 15 / skipped 1，加 --strict-gates 直接退出码 1）。
+    # 口径：不适用的项不算「没执行」，从 skipped 摘出去，并在 detail 里留下 n/a 痕迹。
+    na_items = []
+    if str(engine or "pil").strip().lower() != "web":
+        for k in list(skip_items):
+            why_k = str((st.get(k) or {}).get("detail") or "")
+            if k == "web_page" or ("不适用" in why_k and "web" in why_k.lower()):
+                na_items.append(k)
+                skip_items.remove(k)
     if errs:
         if lg is not None:
             lg.fail("G0", "渲染前资源预检", "%d 处问题：%s" % (
@@ -1492,6 +1632,9 @@ def _run_preflight(script, work, engine, tl=None, skip=False):
             where = (e.get("where") if isinstance(e, dict) else "") or ""
             print("     - %s%s" % ((where + "：") if where else "", msg))
         return False
+    if na_items:
+        detail = "%s；%s=n/a（engine=%s，不适用）" % (
+            detail, "、".join(na_items), str(engine or "pil").strip().lower())
     if skip_items:
         why = "%s 未执行（%s）" % ("、".join(skip_items[:4]), detail)
         if lg is not None:
@@ -2391,6 +2534,7 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
 
         _qa_text_layout_gate(lg, tl, work, scenes_mod, script)
         _qa_beat_gate(lg, tl, work, script)
+        _qa_duration_gate(lg, tl, script)
         _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=vmaf_mode)
         # ASR 回读最便宜（模板片 6 s），放最后跑：前面已经 fail 的片没必要再花这 6 秒。
         _qa_asr_gate(lg, film, work, script, tl, cfg=((script or {}).get("qa") or {}))
@@ -2531,12 +2675,20 @@ def st_review(tl, work, script, out_mp4, report_path=""):
     with open(pj, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=1)
     md = os.path.join(outdir, "PACKET.md")
+    brief = os.path.join(outdir, "REVIEWER-BRIEF.md")
     with open(md, "w", encoding="utf-8") as fh:
         fh.write(RP.packet_markdown(
             manifest,
             report_path=(os.path.relpath(rep, outdir) if os.path.exists(rep) else ""),
             sheet_path=(os.path.relpath(sheet, outdir) if sheet else ""),
             frames_dir="frames"))
+    try:
+        import reviewbrief as RB
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write(RB.brief_markdown(manifest))
+        print("   任务单:", brief, "（评审范围 + 5 问 + 时限，派评审时直接发它）")
+    except Exception as e:                              # noqa: BLE001
+        print("   [WARN] REVIEWER-BRIEF.md 写不出来：%s" % e)
     print("   评审包:", md)
     print("   清单  :", pj)
     # 这里不能用 ✓/✗：Windows 控制台代码页是 GBK，print 会 UnicodeEncodeError 直接把
@@ -2558,6 +2710,46 @@ def st_review(tl, work, script, out_mp4, report_path=""):
                   "%d 段 x2 帧 + 清单 + 门禁摘要已产出（**要人/评审 agent 看过才算过**）"
                   % len(marks))
     return md
+
+
+def _qa_duration_gate(lg, tl, script):
+    """G15 时长下限：成片实测时长有没有达到定稿时要求的「不少于 N 秒」。
+
+    为什么必须是门禁而不是一行提示：intake 里用户明确回答过「不少于 3 分钟」，
+    但这句话过去只在 layout 阶段 print 一行，删掉几句台词让成片掉到 2 分钟时，
+    没有任何门禁会红 —— 交付凭据里也查不到这条要求（v3.1.0 补上）。
+
+    三档口径：design 里没写 target_sec -> skipped（没提要求就不判）；
+    达到了 -> pass（写明实测/下限）；不足 -> fail（差的秒数写进 detail，
+    因为「差多少」决定是补一句还是重写整段）。
+    容差 3%：TTS 时长本身有抖动，不让 1-2 秒的舍入把人卡死。
+    """
+    plan = (script or {}).get("_style")
+    target = (plan or {}).get("target_sec") if isinstance(plan, dict) else None
+    if target is None:
+        # 没有下限要求 ≠ 没执行：记 pass 并在 detail 里写明 n/a。
+        # 记 skipped 的话 --strict-gates 会把它当失败，于是「本来就没设下限」的片
+        # 永远过不了强制门禁——与 G0 的 web_page 是同一类语义错误（v3.1.0 统一）。
+        lg.ok("G15", "时长下限（brief 的「不少于」）",
+              "n/a：design.structure.target_sec 未设，本片没有声明时长下限")
+        return
+    try:
+        target = float(target)
+    except (TypeError, ValueError):
+        # 写了个非数字是**配置错误**，不是"没要求"：这条必须红，不能 n/a 掉。
+        lg.fail("G15", "时长下限（brief 的「不少于」）",
+                "design.structure.target_sec 不是数字：%r（改掉它或删掉这个字段）"
+                % (target,))
+        return
+    total = float((tl or {}).get("total") or 0.0)
+    floor = target * 0.97
+    if total + 1e-6 < floor:
+        lg.fail("G15", "时长下限（brief 的「不少于」）",
+                "实测 %.2fs < 下限 %.2fs（要求不少于 %.0fs，差 %.1fs）：加内容，别拉白"
+                % (total, floor, target, target - total))
+        return
+    lg.ok("G15", "时长下限（brief 的「不少于」）",
+          "实测 %.2fs ≥ 下限 %.0fs（余量 %.1fs）" % (total, target, total - target))
 
 
 def _qa_beat_gate(lg, tl, work, script):
@@ -2592,6 +2784,14 @@ def _qa_beat_gate(lg, tl, work, script):
     if not data.get("ok"):
         lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
                 "没测出等距节拍：%s" % (data.get("why") or "未知"))
+        return
+    # 网格是不是当前这一版音乐的：旧网格判 pass 等于没判。
+    music_fp = _file_fp(_music_path(script or {}, work))
+    grid_fp = str(data.get("musicFp") or "")
+    if music_fp and grid_fp != music_fp:
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "work/beat_data.json 不是当前 music.wav 的网格（%s != %s）：先跑 --stage beats"
+                % (grid_fp or "缺指纹", music_fp))
         return
     fps = float(tl.get("fps") or 30)
     resid = float(data.get("residualMs") or 0.0)
@@ -2710,8 +2910,14 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
     script = dict(script)
     script["_total"] = tl["total"]
     script.setdefault("_style", resolve_style(script, work))
-    outdir = os.path.join(work, "stills")
+    # 手挑的帧落 adhoc/ 子目录：默认「每段中点一张」与 --stills 手挑的帧混在一起时，
+    # 文件名只差一个时间戳（l08_003.0 vs l08_008.3），人工核对极易拿错版本 ——
+    # 实测发生过两次「对着上上轮的旧图改画面」。
+    adhoc = bool(specs)
+    outdir = os.path.join(work, "stills", "adhoc") if adhoc else os.path.join(work, "stills")
     os.makedirs(outdir, exist_ok=True)
+    if adhoc:
+        print("   手挑静帧 -> %s（与每段中点的母版静帧分开，别混着看）" % outdir)
     by_id = {s["id"]: s for s in tl["scenes"]}
     if not specs:
         specs = [[s["id"], s["dur"] * 0.55] for s in tl["scenes"]]
@@ -3394,7 +3600,10 @@ def main():
             for g in bad:
                 print("              %-8s %s" % (g, GT.GATES[g]))
         elif not rejected:
-            _LEDGER.ok("signoff", "人工签核", "%d/4 道闸已签" % len(GT.GATE_ORDER))
+            # 分母不能写字面量：加第五道闸（review）时这里还硬编码着 4，报告直接打成
+            # 于是打出「五比四」这种比例。分子分母必须同一个真源（GATE_ORDER）。
+            _n_gate = len(GT.GATE_ORDER)
+            _LEDGER.ok("signoff", "人工签核", "%d/%d 道闸已签" % (_n_gate, _n_gate))
     # --force-music 的语义是"丢弃配乐后由 score 阶段重出"（argparse help 也这么写），
     # 但它排在 stage 分发之前：原实现对任何 stage 都先删 music.wav/score.json，
     # `--stage explain`（只读）/ `--stage qa` / `--stage accept` 这类不会重出配乐的
@@ -3587,8 +3796,14 @@ def main():
             want = {"style": [os.path.join(a.work, "style.json"),
                               os.path.join(a.work, "voice_plan.json")],
                     "stills": [os.path.join(a.work, "qa", "sheet.png"),
-                               os.path.join(a.work, "stills", "_sheet.png")],
+                               os.path.join(a.work, "stills", "_sheet.png"),
+                               # --stills 手挑的帧落 adhoc/（v3.1.0），它的联系表也认：
+                               # 只跑过手挑静帧的工程不该因为"母版联系表不存在"签不了核。
+                               os.path.join(a.work, "stills", "adhoc", "_sheet.png")],
                     "facts": [os.path.join(proj, "FACTS.md"), os.path.join(a.work, "FACTS.md")],
+                    # review 闸的证据 = 评审包必须真的生成过（PACKET.md 存在）。
+                    # 只签「我评过了」而不要求证据，等于允许空口签核。
+                    "review": [os.path.join(a.work, "review", "PACKET.md")],
                     "release": [a.out]}.get(a.gate, [])
             # 每一组是"多选一"：任一条路径存在就算有证据。
             missing = None
@@ -3658,6 +3873,20 @@ def main():
         _need(os.path.exists(tts_p), "没有 tts.json，先跑 --stage tts")
         tl = st_layout(script, a.work)
         _stage_end("layout", _t0)
+    # score 必须排在 cues 前面：cues 里的 beat:/bar: 锚点要对着**这一版的** music.wav
+    # 解拍，而 cues 会顺手触发一次节拍分析并把网格写进 work/beat_data.json。
+    # 过去是 cues → score，于是网格建在上一轮的 music.wav 上，score 一重生成音乐，
+    # 网格就与当前音乐对不上了（G14 的 musicFp 校验会直接红；改内容指纹导致配乐种子
+    # 变化时尤其稳定复现 —— 实测改 scenes.py 后 --stage all 必红）。
+    # 两者没有相互依赖：score 只读 script，cues 只读 script + timeline，所以换序安全。
+    if stage in ("all", "score"):
+        tl = tl if stage == "all" else ensure_tl()
+        _t0 = _stage_begin("score")
+        st_score(script, a.work, tl)
+        _stage_end("score", _t0)
+    # beats 也必须在 score 之后：它分析的就是 music.wav，排前面会拿到上一轮的音乐。
+    # （cues 里也会按需触发一次分析，但那条路是"发现指纹不符才重算"的兜底，
+    #   正常链路应该一次建对，而不是先建错再修。）
     if stage in ("all", "beats"):
         _t0 = _stage_begin("beats")
         st_beats(script, a.work)
@@ -3668,11 +3897,6 @@ def main():
         cues = st_cues(script, a.work, tl, engine=engine)
         _stage_end("cues", _t0,
                    n_cues=(len((cues or {}).get("cues") or []) if isinstance(cues, dict) else None))
-    if stage in ("all", "score"):
-        tl = tl if stage == "all" else ensure_tl()
-        _t0 = _stage_begin("score")
-        st_score(script, a.work, tl)
-        _stage_end("score", _t0)
     if stage in ("all", "sfx"):
         tl = tl if stage == "all" else ensure_tl()
         _t0 = _stage_begin("sfx")

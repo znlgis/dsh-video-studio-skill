@@ -74,7 +74,7 @@ Pillow 路线：  墙钟秒数 ≈ 帧数 / 40 / 并行度 + 30%  余量
 
 ```bash
 cd <SKILL_DIR>/scripts
-python selfcheck.py                  # 110 条断言；FAIL 就照提示修环境
+python selfcheck.py                  # 116 条断言；FAIL 就照提示修环境
 python sfxkit.py --selftest          # 音效库（可选模块，装了才跑）
 python musicgen.py --selftest        # 配乐编排器（参数化）
 python scorekit.py --selftest        # 配乐合成原语（不是配乐引擎）

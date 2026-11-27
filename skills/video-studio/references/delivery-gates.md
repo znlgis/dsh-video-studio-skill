@@ -287,6 +287,24 @@ work/beat_data.json 还是上一版，音效就整片偏半拍。
 
 为什么容差是 1 帧：抢拍/拖拍是合法表演手段，但超过一帧就不是表演而是没卡上。
 
+### 3.6.4 网格绑定曲目（musicFp）
+
+`work/beat_data.json` 里记着它来自哪一份 `music.wav`（`musicFp` = 该文件 sha1 前 16 位）。
+G14 会比对当前音乐与网格的指纹：
+
+- 不一致 → **fail**，点名「先跑 --stage beats」；
+- 旧网格没有这个字段（v3.1.0 之前的产物）→ 有音乐就重算一次，不复用；
+- 没有音乐 → 不校验（非卡点片）。
+
+为什么必须绑：换 BGM 而不重跑 beats 时，旧网格会让 G14 拿**上一首曲子**的拍点去判这一版
+成片 —— 那种 pass 毫无意义。这条也是修 `--stage all` 顺序缺陷的副产品：修之前网格总是
+建在上一轮的音乐上，但没人看得见；加上指纹之后它当场就红了。
+
+> `--stage all` 的固定顺序是 `… → score → cues → sfx → audio → …`：**必须先有这一版的
+> 音乐，`cues` 才能解拍**。单跑 `--stage cues` 时如果 music.wav 不存在，会写出 ok=false 的
+> 占位网格，后续 `beat:` 锚点会明确报错而不是静默落到 0 秒。
+
+
 ### 3.6.3 自己验一遍
 
     python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage beats
@@ -296,6 +314,73 @@ work/beat_data.json 还是上一版，音效就整片偏半拍。
 
 > skipped 不等于通过：非卡点片的 skipped 要在交付说明里写明"本片没做卡点"；
 > 卡点片报 skipped 说明音乐没读到，属于配置漏项，不是"不需要"。
+
+## 3.7 G15：时长下限（--stage qa）
+
+### 3.7.1 为什么单独一条
+
+intake 里用户明确回答过「不少于 3 分钟」，但这句话过去只在 layout 阶段 `print` 一行
+（`下限时长 180.0s / 实际 204.29s`）——删掉几句台词让成片掉到 2 分钟，**没有任何门禁会红**，
+交付凭据里也查不到这条要求。要求写下来了却没进证明链，等于没要求。
+
+### 3.7.2 判据
+
+| 情况 | 结论 |
+| --- | --- |
+| `design.structure.target_sec` 没设 | skipped：这次没有时长下限要求 |
+| target_sec 不是数字 | skipped：写明拿到的原值 |
+| 实测 < target_sec × 0.97 | fail：写明实测/下限/差多少秒（差多少决定补一句还是重写一段） |
+| 实测 ≥ target_sec × 0.97 | pass：写明实测与余量 |
+
+容差 3%：TTS 时长本身有几十毫秒级抖动，不让 1–2 秒的舍入把人卡死。
+注意 G15 只判**下限**：成片一长到底仍由实测旁白决定，不要靠拉白凑时长。
+
+## 3.8 review：独立终检的结论必须可签核（--stage accept --gate review）
+
+`--stage review` 只证明「评审包生成了」；`R1` 的 detail 自己写着「要人/评审 agent 看过
+才算过」——但过去系统里**没有任何地方**记录「谁看过、结论是什么」，评审有没有真的发生
+无从证明。v3.1.0 起它变成第五道人工签核闸：
+
+    --gate: style | stills | facts | review | release
+
+签 `review` 的前提是 `work/review/PACKET.md` 真的存在（证据不在就拒绝签核）；
+签核同样绑内容指纹——改了剧本 / 场景 / 设计，旧签核自动失效。建议的 note 写法：
+「谁评的、几条阻断项、每条怎么处置（改了 / 反证不成立）」。
+
+> `--stage review` 还会顺手产出 `work/review/REVIEWER-BRIEF.md`：评审范围（联系表 +
+> 4 张关键帧）、必须回答的 5 问、输出格式、15 分钟时限。实测让评审者逐张看 40 帧会 40 分钟
+> 不返回；收敛成这份任务单后 15 分钟给完整结论。派评审时把它一起发过去。
+
+## 3.9 评审包的门禁摘要是快照，不是现状
+
+`PACKET.md` 里的「门禁现状」是**生成本包那一刻**的读数。签核或重跑 qa 之后它就过期了——
+实测发生过评审者拿旧摘要（`pass 13` / `signoff 未签`）把已经修好的事报成阻断项。
+现在该节标题写明「本包生成那一刻的快照」，标注快照时刻，并把 `out/QC-REPORT.md` 指成
+唯一权威。改过内容要重跑 `--stage qa` 再重新生成评审包。
+
+## 3.10 画面字段改了却只跑 layout？现在会自动合并（声音字段才失败）
+
+`st_layout` 的 line 数据来自 `work/tts.json`，而 tts.json 存的是**整条 line dict**
+（含 `type/items/stats/steps/series/big/kicker/sub/chapter`）。所以「只影响画面、不影响语音」
+的字段一改，只跑 `--stage layout` 会用上一轮 tts 时的旧值——timeline 落盘成功、退出码 0、
+stills 也照出，但画的是旧图。
+
+两类漂移分开处理：
+
+| 漂移 | 判定 | 理由 |
+| --- | --- | --- |
+| 画面字段（`type/items/stats/steps/series/sides/big/kicker/sub/chapter/quote/by/subtitle`） | **自动合并**并从剧本覆盖，打印合并了哪些行 | 这批字段对音频零影响，合并是完整修复；逼用户重跑 TTS 与「改字幕 TTS 可复用」矛盾 |
+| `text` / `kind` / 行集合（增减句） | **失败**（`SystemExit`，给出重跑命令） | 音频已按旧内容合成，合并只会得到声画不一致 |
+
+合并时的提示长这样（不是错误，是让你知道 timeline 用的是新字段）：
+
+    [note] 剧本的画面字段已合并进时间轴（不必重跑 tts）：l08、l19
+
+声音字段漂移则明确失败并给命令：
+
+    [layout] 这些改动**影响声音**，work/tts.json 是旧的，画面对不上旁白：
+       text/kind 改了：l05
+       修法：重跑 --stage tts（没改的句子命中缓存，只补改动的）
 
 ## 4. 三道门禁一起关掉会怎样
 
@@ -315,7 +400,7 @@ work/beat_data.json 还是上一版，音效就整片偏半拍。
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（110 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（116 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）
@@ -346,7 +431,7 @@ python render.py ... --stage accept --gate stills --note "看过联系表"   # �
 "上一版的门禁结论到底是什么"就靠 `work/runs/<runId>/` 里的快照回答（只归档小文件，
 视频/音频/分块就地保留）。
 
-**四道人工签核闸**（`style` 风格与声线 / `stills` 母版静帧 / `facts` 上屏数字 / `release` 成片验收）：
+**五道人工签核闸**（`style` 风格与声线 / `stills` 母版静帧 / `facts` 上屏数字 / `review` 独立终检结论 / `release` 成片验收）：
 
 - 签核前会检查"证据产物存在"（如 `stills` 要求 `work/qa/sheet.png`），**没有证据不许签**——
   否则签核就是橡皮图章。

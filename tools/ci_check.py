@@ -61,7 +61,7 @@ ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright",
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
                  # 独立终检（评审包）、验收帧/音轨偏移、节拍网格：纯函数模块，不引第三方
-                 "reviewkit", "reviewpacket", "audio_offset", "beatgrid",
+                 "reviewkit", "reviewpacket", "reviewbrief", "audio_offset", "beatgrid",
                  "shotcards", "editlist", "jianying", "asset_license",
                  "qatext",
                  "stylekit", "voicekit", "scenes", "scenes_demo",

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-3.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-3.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **[中文](README.md) | [English](README.en.md)**（英文版是入口摘要，细节以中文版为准）
 
@@ -104,7 +104,7 @@ mv ~/.dsh/skills/video-studio ~/.dsh/backup/video-studio.bak-$(date +%Y%m%d)
 mkdir -p myfilm && cd myfilm
 # 1) 只写一个 film.json（工程目录里唯一需要你手写的文件；最小骨架见 SKILL.md §1）
 
-# 2) 环境自检（可选，110 条断言，不联网）
+# 2) 环境自检（可选，116 条断言，不联网）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 先问诊：固定 8 题一次问完（题材/制作方式/时长/气质/画幅/声线/配乐/补充），气质默认「明亮活泼」
@@ -135,9 +135,9 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage acce
 即 `<SKILL_DIR>` 往上两级——`tools/`、`schemas/` 在 `<REPO>` 下。
 
 **分阶段**（`--stage` 每个只做自己的事，落盘后可单独重跑）：
-`style | tts | layout | beats | cues | score | sfx | audio | frames | mux | qa | stills | review | editlist | jianying | accept | explain | all`。
+`style | tts | layout | beats | score | cues | sfx | audio | frames | mux | qa | stills | review | editlist | jianying | accept | explain | all`。
 
-> `--stage all` 的顺序是 `style → tts → layout → beats → cues → score → sfx → audio → frames →
+> `--stage all` 的顺序是 `style → tts → layout → score → beats → cues → sfx → audio → frames →
 > mux → qa → editlist`；`review` / `jianying` 刻意不在 all 里（独立终检是交付前的独立动作，
 > 剪映导出要 `--no-subs` 出来的干净画面）。
 
@@ -203,9 +203,10 @@ skills/video-studio/
   scripts/preflight.py       渲染前资源预检（字形 / TTS 音频 / 字体 / web 入口页，门禁 G0）
   scripts/qavmaf.py          全片 VMAF/SSIM（参考帧由场景函数实时重渲，门禁 G11）
   scripts/qaasr.py           ASR 回读（成片音轨转文字对账，门禁 G12）
-  scripts/selfcheck.py       回归自检（110 条针对真实缺陷的断言）
+  scripts/selfcheck.py       回归自检（116 条针对真实缺陷的断言）
   scripts/reviewkit.py       验收帧（每段 enter/settle 写进 timeline）+ 音轨偏移补偿（纯函数，可单测）
   scripts/reviewpacket.py    独立终检评审包拼装（检查清单七组 / packet.json / PACKET.md，不抽帧不写盘）
+scripts/reviewbrief.py     评审任务单（REVIEWER-BRIEF.md：范围 5 问 / 输出格式 / 15 分钟时限）
   scripts/beatgrid.py        节拍网格（三频段 STFT + 等距最小二乘定 BPM/相位，纯 numpy；产出 beat_data.json）
   scripts/shotcards.py       镜头配方卡（10 张：构图/时长/字幕位/动效/音效；查卡、按意图找卡、只填空值套用）
   scripts/editlist.py        剪辑交接清单（逐镜 in/out + 帧号 + 旁白 + 音效提示 -> editlist.json / EDITLIST.md）

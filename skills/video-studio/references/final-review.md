@@ -28,6 +28,39 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/fi
 - 成片不存在直接报错（不降级重渲——评审必须对着交付的那一版）；
 - 帧抽失败逐条列出，缺证据的段在 R1 门禁里记 fail。
 
+## 二·五、派评审：用 REVIEWER-BRIEF.md，别让它逐张看 40 帧
+
+`--stage review` 还会产出 `work/review/REVIEWER-BRIEF.md`——那是**给派评审的人**看的操作单：
+范围（联系表 + 4 张关键帧，不是 40 张）、必须回答的 5 问、输出格式、15 分钟时限。
+把 `PACKET.md` 和它一起发给评审者，只给它 `work/review/` 这一个目录。
+
+为什么要有这一份（实测）：
+
+| 派法 | 结果 |
+| --- | --- |
+| 让它逐张看完 40 张验收帧 | 45 分钟零输出，被迫中断 |
+| 收敛成「联系表 + 4 张关键帧 + 5 问 + 15 分钟」 | 15 分钟给出完整结论（含 2 条阻断项） |
+
+评审要的是**证据够用的判断**，不是把所有像素看一遍。超时就先交结论，没看的项写进
+「无法验证」——比拖着不返回有用。
+
+## 二·六、评审结论必须落成签核（`--gate review`）
+
+生成评审包 ≠ 评审发生过。v3.1.0 起独立终检结论是一道**人工签核闸**：
+
+```bash
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 \
+  --stage accept --gate review --by <谁> --note "几条阻断项 / 每条怎么处置"
+```
+
+- 签核要求 `work/review/PACKET.md` 真的存在（证据不在就拒绝签）；
+- 签核绑内容指纹：改了剧本 / `scenes.py` / 设计，旧签核自动失效，**改完必须重评再签**；
+- `GATE_ORDER` 变成 `style → stills → facts → review → release`，
+  `--strict-gates` 下五道闸缺一不可。
+
+> 评审包里「门禁现状」那一节是**生成本包那一刻**的快照，不是现状。签核或重跑 qa 之后它
+> 就过期了——以 `out/QC-REPORT.md` 为准，必要时重跑 `--stage qa` 并重新生成评审包。
+
 ## 三、评审者的输出格式（必须照抄）
 
 ```text

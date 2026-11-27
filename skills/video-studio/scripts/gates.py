@@ -32,8 +32,12 @@ GATES = {
     "stills": "母版静帧已亲眼看过（work/qa/sheet.png）",
     "facts": "上屏数字已核对出处（FACTS.md）",
     "release": "成片已验收（音画 / 字幕 / 响度）",
+    # 独立终检的**结论**必须落成一个可签核的记录：--stage review 只证明「评审包生成了」，
+    # 不证明有人看过。R1 的 detail 自己写着「要人/评审 agent 看过才算过」，但系统里过去
+    # 没有任何地方记「谁看过、结论是什么」——那 R1 就只是一句口号（v3.1.0 补上这道闸）。
+    "review": "独立终检结论已回收（评审包已生成，且评审者给出过结论）",
 }
-GATE_ORDER = ("style", "stills", "facts", "release")
+GATE_ORDER = ("style", "stills", "facts", "review", "release")
 
 OK, FAIL, SKIP = "pass", "fail", "skipped"
 
