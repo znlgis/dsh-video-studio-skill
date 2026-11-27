@@ -61,7 +61,7 @@ JSON
 #    画风/配乐/声线/节奏全部由 design 决定，film.json 里**没有** style 字段可写。
 python <SKILL_DIR>/scripts/filmcheck.py film.json          # 契约校验（可选，几秒）
 
-# 2) 先自检一次环境（可选；108 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；110 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先问诊（8 题一次问完），再出方案——同一个 brief 每次都不一样，必须让用户看过

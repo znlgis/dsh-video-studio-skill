@@ -1,3 +1,116 @@
+## 3.0.0 — 全面审查：修 17 处真缺陷（含 2 处「门禁整年没真跑」）+ 断言 108 → 110
+
+> 这一版没有新功能，只有一件事：**把「看着绿、其实没查」的地方补上**。
+> 3.0.0 是主版本号，理由不是接口破坏，而是**校验口径变严**：几处过去记 pass 的结论
+> 现在会如实记 skipped（部分素材没声明、有段采集帧渲染失败、某些段采集不到文字框），
+> 按旧报告做交付判断的人需要重新读一遍门禁语义。既有产线命令、film.json 契约、
+> 渲染主链一个都没改。
+
+### 起因：CI 红在一个「整行被注释吃掉」的缺陷上
+
+- **render.py 的 def st_cues(...) 被上一版的行尾注释吞掉**：# ---- 提示点 与
+  def st_cues 挤在同一行，于是这个定义成了注释的一部分、它的函数体降级成 st_beats
+  里 return 之后的不可达代码。**模块照样 import 成功、ast.parse 通过、108 条自检全绿**，
+  但 --stage cues 一跑就是 NameError（提示点/音效全丢）。CI 的 ruff（F821）先发现了它。
+- 新增自检第 109 条盯这类结构损坏：render.py 里**每个被调用的 st_* 必须真有模块级定义**、
+  函数体不能只有 docstring、STAGES 里每一项都要有分发分支。用 AST 静态核对，不跑渲染。
+
+### 门禁「配了但从不执行」三处（影响最大）
+
+- **G11 全片 VMAF 在 CI 上整年记 SKIP**：filmkit._ffmpeg_candidates() 把硬编码路径
+  （/usr/bin/ffmpeg）排在 PATH **之前**。CI 明明把带 libvmaf 的静态构建装进了
+  /usr/local/bin，却永远先命中 apt 那个不带 libvmaf 的构建——「装了却没生效」。
+  现在顺序是 显式指定 → 向上搜索 → **PATH** → 硬编码兜底，并新增自检第 110 条按源码位置
+  钉住这个顺序（不按本机解析结果：本机两者常指向同一文件，去重后看不出顺序）。
+- **G13 版式文字冲突在单跑 --stage qa 时永远 skipped**：qa 分支没有注入 _style，采集要真的
+  重渲关键帧，scenes._plan() 于是 fail-closed 抛错 → 整条门禁静默降级。现在 --stage qa
+  会先解析一次 design（失败只 WARN，G13 自己记 skipped 并写清原因）。
+- **体积门禁在 Ubuntu runner 上是空检查**：t_size 用**绝对路径**的 parts 与 SIZE_SKIP_DIRS
+  取交集，而 GitHub 工作区是 /home/runner/work/<repo>/<repo>——work 就在路径里，于是每个
+  文件都被过滤掉、checked 恒为 0，却依旧报 PASS。现在用相对路径判定，并新增
+  assert checked > 0（「一个文件都没查到」必须失败，而不是静默通过）。
+
+### 三处「部分查了 = 全绿」改成如实降级
+
+- **F2/F3 素材治理**：5 个源里只有 1 个声明了烧录字幕带/水印框时，过去整条记 **pass**
+  （其余 4 个等于没查）。现在 checked < len(srcs) 记 **skipped**，并点名没声明的源 id。
+- **G13 采集**：某段 draw_frame 抛异常过去混进 skipped，其他段 0 错就整条 pass。现在渲染
+  失败单独记 failed，存在失败段时整条记 skipped（这些段的压盖无法证明）。
+- **compose 声明了 subtitle 却找不到文件**：过去静默不烧字幕、退出码 0，成片里没字幕而
+  报告里没痕迹。现在按契约错误 exit 2（与「缺图层 png」同口径）；未声明 subtitle 时明确
+  打印「本次不烧字幕」（干净画面是合法用法，不是错误）。
+
+### 内容指纹与签核
+
+- **content_hash 不含画幅档**：横屏签过 release 的片，改 --layout portrait 重出后旧签核
+  仍显示「已签」——而画布尺寸/安全区/字幕带/字号档全变了，是另一次交付。现在指纹纳入
+  layoutkit profile（key/W/H/SAFE/SUB_BAND/TYPE_SCALE），自检第 94 条追加断言
+  「横竖屏指纹必须不同」。
+
+### web 引擎（浏览器逐帧）
+
+- **显式 window.DURATION = 12.0 被当成兜底值丢弃**：film.js 用「数值是否等于
+  defaultDuration」判断显式性，而 render.py 的报错文案教的正是「把页面里的 window.DURATION
+  改成 12.000」——照做会被静默忽略，怎么改都修不好。现在 engine.js 给兜底值打
+  __DURATION_DEFAULTED__ 标记，film.js 按标记而不是按数值判定。
+- **「一闪而过」判据被采样步长量化**：判据用「点数 × 步长」，真实 0.45–0.55 s 的文字只被
+  采到 3 个点、算成 0.60 s，**永远报不出来**（文档写的是「< 0.6 s」）。现在按**最长连续
+  可见段**计算（(maxRun-1) × dt 为下界），0.45–0.55 s 能如实报出，0.6 s 及以上不误报。
+- **index.html 里「取消下面这行注释」不可操作**：那行 script 被整段包在 HTML 注释里，
+  按字面做没有可编辑的对象。现在改成行内 /* … */，删掉注释符即可生效。
+
+### 素材线画面治理
+
+- **没写 treatment.crop 时画面被强行拉伸**：缩放宽高错误地取了**输出画布**尺寸，于是
+  4:3 档案片、竖屏手机素材、2.39:1 宽银幕全被拉扁变形，而 docstring 承诺「不拉伸」。
+  现在改用 ffmpeg 的 force_original_aspect_ratio=decrease + **居中** pad（contain 语义），
+  既不需要调用方提供源宽高、也没有取整误差；有 crop 时仍按取景窗比例缩放。
+
+### 其它真实缺陷
+
+- **qa_frames.loudness_curve 无超时**：全文件唯一没设 timeout 的子进程调用，坏音频/网络盘
+  会让 --stage qa 永久挂住。现在 300 s 超时并转成可读错误。
+- **voicekit 只认 shutil.which("ffmpeg")**：与全仓「FILMKIT_FFMPEG 优先」口径相反，按文档
+  用环境变量指定 ffmpeg 的用户在这里会被静默降级（测不出响度却不报错）。
+- **asset_license --json 的 stdout 不纯**：与 --ledger/--credits 同用时多打印「台账: …」等行，
+  任何按 JSON 解析 stdout 的调用方直接 JSONDecodeError。现在这些提示走 stderr。
+- **audio_offset 测不出时仍给具体偏移**：两段全静音时每个 lag 的相似度都是 0，第一轮就
+  「胜出」，于是回报 -200 ms 这种看起来完全正常的结论，而 ok=false 与它并存。现在
+  ok=false 时三个偏移字段一律 null；「测不了」统一退出码 2（原来裸 SystemExit("...") 的
+  进程码是 1，会被当成「偏移不合格」）。
+- **scenes_hybrid_selftest 第 6 条断言的是常量 True**（永远 PASS），而且这个脚本**从未被
+  任何 job 调用**。现在它真造「素材目录不存在」的场景并断言退化不崩，且接进 CI 的 repo job
+  （只依赖 numpy/Pillow）。
+
+### 自检与体检
+
+- selfcheck **108 → 110 条**：新增第 109 条（stage 函数完整性，AST 静态核对）、第 110 条
+  （ffmpeg 解析优先级）。
+- 第 94 条（场景代码进内容指纹）追加「横竖屏 contentHash 必须不同」。
+- ci_check 仍 **18 项**，但第 7 项（体积）新增「至少检到一个文件」的断言。
+- CI 的 repo job 新增一步 scenes_hybrid 自检。
+- 文档口径同步：108 条 → 110 条（SKILL.md / README / README.en / marketplace-entry /
+  ci.yml / references 共 16 处），docs/compatibility.md 按 3.0.0 重新生成。
+
+### 已知未修（本轮审查发现、但不在本次改动范围）
+
+> 写在这里是为了不让「审查过了」变成下一轮的假绿。以下都有实测复现路径，按影响排序：
+
+- **竖屏逐类停留触顶（cap）只重排 start/end**，voice_start/voice_end/words_abs 仍停在
+  未封顶的偏移上：长竖屏片（如 60 段 × 3 s）会有一批字幕窗口反挂、旁白越界被静默丢弃。
+- **局部 stage 会覆盖交付报告**：内容指纹不一致时本轮账本只有几条，但报告结论仍写
+  「所有门禁本次都执行且通过」。
+- **--resume 在 segments/_plan.json 丢失时复用同名旧分块**（帧数不变，时长校验也过）。
+- **批量模式各片共用 out/QC-REPORT.md**，最后一份覆盖前面全部。
+- **G14 卡点门禁对 beat: 锚点的偏移一律 fail、对 bar: 却用 8 秒魔数容差**；
+  beat_data.json 也不校验是否对应当前 music.wav（换 BGM 不重跑 beats 会拿旧网格判 pass）。
+- **preflight 字形检查只扫 7 个字段**（漏 by / stats.label / series.label / steps.label /
+  sides.*），这些字段都会真的上屏。
+- **reviewkit 音轨偏移「坏值必须报错」有三处漏网**（两个帧键静默后者覆盖前者、
+  NaN/inf 通过、bool 当数字）。
+
+---
+
 ## 2.10.0 — 交接：镜头配方卡 + 剪辑清单 + 剪映草稿 + 素材授权
 
 > 这一版全是**交接物**：片子还是那样出，但"交给别人继续做"这件事被做成了可执行的东西。

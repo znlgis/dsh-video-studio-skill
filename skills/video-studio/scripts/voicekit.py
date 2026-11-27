@@ -832,9 +832,13 @@ def calibrate_voice(voice_id, cache_path=None, text=None):
     except Exception as e:               # noqa: BLE001 — 没装就降级，不拖垮主链
         base["reason"] = "没装 edge_tts（%s: %s）" % (type(e).__name__, e)
         return base
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        base["reason"] = "没找到 ffmpeg，没法把 mp3 解成 PCM 测 RMS"
+    # 与全仓其它模块同一口径：FILMKIT_FFMPEG > filmkit 探测结果 > PATH。
+    # 只认 shutil.which 会让"按文档用 FILMKIT_FFMPEG 指定 ffmpeg"的用户在这里被静默降级。
+    ffmpeg = ((os.environ.get("FILMKIT_FFMPEG") or "").strip()
+              or str(getattr(K, "FFMPEG", "") or "").strip()
+              or (shutil.which("ffmpeg") or ""))
+    if not ffmpeg or not os.path.exists(ffmpeg):
+        base["reason"] = "没找到 ffmpeg（FILMKIT_FFMPEG / filmkit.FFMPEG / PATH 都没有），没法把 mp3 解成 PCM 测 RMS"
         return base
 
     tmp = tempfile.mkdtemp(prefix="voicekit_cal_")

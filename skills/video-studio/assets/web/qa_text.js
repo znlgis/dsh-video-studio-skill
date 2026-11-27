@@ -73,9 +73,15 @@
       for (var i = 0; i < all.length; i++) {
         var q = all[i];
         var L = life.get(q.key);
-        if (!L) { L = { text: q.text, group: q.group, first: T, last: T, n: 0 }; life.set(q.key, L); }
+        if (!L) { L = { text: q.text, group: q.group, first: T, last: T, n: 0, run: 0, maxRun: 0, prev: null }; life.set(q.key, L); }
         L.last = T;
         L.n += 1;
+        // 连续段跟踪：「一闪而过」判的是**最长一段连续可见时长**。只数总点数会把
+        // 间隔一个采样点就算作连续（0.45s 也数成 3 点 × 0.2s = 0.6s，于是永远不报）。
+        if (L.prev !== null && T - L.prev > dt * 1.5) L.run = 0;
+        L.run += 1;
+        if (L.run > L.maxRun) L.maxRun = L.run;
+        L.prev = T;
         if (q.x0 < -6 || q.x1 > F.W + 6 || q.y0 < -6 || q.y1 > F.H + 6) {
           var k = nameOf(q);
           var o = off.get(k);
@@ -109,13 +115,16 @@
 
     var brief = [];
     life.forEach(function (L, key) {
-      /* 可见时长 = 被采到的点数 × 步长。不能再用 last - first + dt（首末跨度）：
-       * 同一个 key 如果在两段互不相连的时间各闪 0.1 s（比如 t=0 与 t=5.9 各一次），
-       * 跨度会把 0.2 s 的闪烁算成 6.1 s 的可见时长而漏报。连续出现时两种算法等价
-       * （点数 = 跨度/dt + 1），所以换成 n*dt 只影响"分散出现"这一类，判据更严格也
-       * 更符合文档写的"可见时长"。 */
-      var d = L.n * dt;
-      if (d < 0.6) brief.push({ at: r2(L.first), dur: r2(d), el: (L.group || key) + '「' + short(L.text) + '」' });
+      /* 可见时长取**最长一段连续可见**的时长，不是总采样点数 × 步长：
+       * 点数口径按采样间隔量化的结果偏大（真实 0.45–0.55 s 的闪烁只会被采到 3 个点，
+       * 3 × 0.2 = 0.6 s 恰好不小于阈值 → 永远报不出来，判据比文档的"< 0.6 s"松）。
+       * 连续出现时"点数 × 步长"必为 (段长 + 一个步长)，上限误差一个步长；用
+       * (maxRun - 1) × dt 是**下界**，与"可见时长 < BRIEF_S"同口径，不会把正常段落误报。
+       * 同时保留"分散多段"的防护：总可见时长（n*dt 上界）也过一遍，取更严者。
+       * 不用 last - first（首末跨度）：t=0 与 t=5.9 各闪 0.1 s 会被算成 6.1 s。 */
+      var runDur = Math.max(0, (L.maxRun - 1) * dt);
+      var d = Math.min(runDur, L.n * dt);
+      if (runDur < BRIEF_S) brief.push({ at: r2(L.first), dur: r2(runDur), el: (L.group || key) + '「' + short(L.text) + '」' });
     });
 
     var drawn = new Set(F.drawnKeys());

@@ -33,6 +33,11 @@ MAX_LAG_MS = 200    # 搜索上限：超过 200 ms 就不是编码偏移而是�
 MIN_SIM = 0.30      # 归一化互相关峰值低于它 -> 两边根本不是同一条声音，拒绝给结论
 
 
+# 退出码 2 = "测不了"（环境/媒资不满足），与 main() 的 0=测得/2=测不了 同口径。
+# 用整数而不是字符串：SystemExit("字符串") 的进程码是 1，会被当成"偏移不合格"。
+_UNMEASURABLE = 2
+
+
 def _ffmpeg() -> str:
     """复用技能里的 ffmpeg 解析逻辑（FILMKIT_FFMPEG 环境变量也认）。"""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -55,9 +60,11 @@ def decode_mono(path: str, ffmpeg: str, sr: int = SR) -> np.ndarray:
     p = subprocess.run(cmd, capture_output=True)
     if p.returncode != 0:
         msg = (p.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        raise SystemExit("解不出音轨（%s）：%s" % (path, msg[-1] if msg else "ffmpeg 失败"))
+        # 退出码 2 = "测不了"（与 main() 的 0/1/2 口径一致）。裸 SystemExit("字符串")
+        # 的进程码是 1，会被 CI 当成"偏移不合格"而不是"环境/媒资不可测"。
+        raise SystemExit(_UNMEASURABLE)
     if not p.stdout:
-        raise SystemExit("音轨是空的：%s" % path)
+        raise SystemExit(_UNMEASURABLE)
     return np.frombuffer(p.stdout, dtype=np.float32).copy()
 
 
@@ -116,11 +123,15 @@ def measure(video: str, audio: str, ffmpeg: str, fps: float = 30.0,
             frac = 0.5 * (l0 - l2) / denom
             frac = max(-0.5, min(0.5, frac))
     offset_ms = (best_lag + frac) * hop_ms
+    ok = bool(best >= MIN_SIM)
+    # 没测出来时**不能**给一个具体毫秒值：两段全静音时每个 lag 的 sim 都是 0.0，
+    # 第一轮就满足 `sim > best`，于是 best_lag 停在 -max_lag，回报 -200 ms 这种
+    # 看起来完全正常的结论，"ok=false + 一个具体偏移量"同时出现，下游很容易只读偏移。
     return {
-        "ok": bool(best >= MIN_SIM),
-        "offset_ms": round(offset_ms, 2),
-        "offset_frames": round(offset_ms / 1000.0 * float(fps), 3),
-        "offset_samples": int(round(offset_ms / 1000.0 * SR)),
+        "ok": ok,
+        "offset_ms": round(offset_ms, 2) if ok else None,
+        "offset_frames": round(offset_ms / 1000.0 * float(fps), 3) if ok else None,
+        "offset_samples": int(round(offset_ms / 1000.0 * SR)) if ok else None,
         "similarity": round(best, 3),
         "minSimilarity": MIN_SIM,
         "hopMs": hop_ms,

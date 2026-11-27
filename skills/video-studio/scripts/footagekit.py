@@ -250,13 +250,21 @@ def build_treatment_filter(treatment, video):
             raise SystemExit("treatment.crop 四段都必须能转成数字（收到 %r）" % crop) from None
         chain.append("crop=" + crop)
     scale = str(treatment.get("scale") or "").strip()
+    # contain 标记：不写 crop 时改用 ffmpeg 的 force_original_aspect_ratio=decrease，
+    # 由 ffmpeg 按**素材原始宽高比**缩到能放进输出画布的最大尺寸，再居中 pad 补边。
+    # 以前这里在"没有 crop"时把缩放宽高算成输出画布本身的宽高，等于强行拉伸：
+    # 4:3 档案片、竖屏手机素材、2.39:1 宽银幕全被拉扁变形，而 docstring 承诺"不拉伸"。
+    # 用 ffmpeg 原语而不是自己算：源宽高不必传进来（调用方没有它），也不会有取整误差。
+    contain = False
     if not scale:
-        # 没有显式 scale 时：按宽度缩放到输出画布宽，高度由宽高比决定（不拉伸）
-        cw = int(float(crop.split(":")[0])) if crop else vw
-        chh = int(float(crop.split(":")[1])) if crop else vh
-        if cw and chh:
-            # 只按宽度等比缩，高度由 crop 的宽高比反推（不拉伸）。
-            scale = "%d:%d" % (vw, max(2, int(round(vw * chh / cw))))
+        if crop:
+            # 有 crop：取景窗宽高比已知，按宽度缩、高度由比例反推，不拉伸。
+            cw = int(float(crop.split(":")[0]))
+            chh = int(float(crop.split(":")[1]))
+            if cw and chh:
+                scale = "%d:%d" % (vw, max(2, int(round(vw * chh / cw))))
+        else:
+            contain = True
     if scale:
         try:
             sw, sh = [int(float(x)) for x in scale.split(":")[:2]]
@@ -270,9 +278,14 @@ def build_treatment_filter(treatment, video):
         if sh % 2:
             sh += 1
         chain.append("scale=%d:%d:flags=lanczos" % (sw, sh))
-        pad_y = max(0, (vh - sh) // 2)
         color = str(treatment.get("letterbox_color") or "0x0b0c0e")
-        chain.append("pad=%d:%d:0:%d:color=%s" % (vw, vh, pad_y, color))
+        chain.append("pad=%d:%d:0:%d:color=%s" % (vw, vh, max(0, (vh - sh) // 2), color))
+    elif contain:
+        # 不写 crop 也不写 scale：contain（等比放进画布）+ 居中补边，绝不拉伸。
+        color = str(treatment.get("letterbox_color") or "0x0b0c0e")
+        chain.append("scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos"
+                     % (vw, vh))
+        chain.append("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s" % (vw, vh, color))
     color_eq = str(treatment.get("color") or "").strip()
     if color_eq:
         chain.append(color_eq)

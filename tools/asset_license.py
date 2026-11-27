@@ -206,6 +206,10 @@ def main(argv=None):
         print("[失败] film.json 读不了：%s" % e)
         return 2
     res = check_film(film, base_dir=os.path.dirname(os.path.abspath(a.film)))
+    # --json 的契约是"stdout 只有一份 JSON"：写盘提示、结论行一律走 stderr。
+    # 以前 --json 与 --ledger/--credits 同用时，stdout 会多出"台账: …"等行，任何按
+    # JSON 解析 stdout 的调用方直接 JSONDecodeError。
+    note = sys.stderr if a.json else sys.stdout
     if a.json:
         print(json.dumps(dict(ok=res["ok"], errors=res["errors"],
                               warnings=res["warnings"], n=len(res["entries"]),
@@ -227,7 +231,7 @@ def main(argv=None):
             os.makedirs(d, exist_ok=True)
         with open(a.credits, "w", encoding="utf-8") as fh:
             fh.write(txt)
-        print("署名文本:", a.credits, "(%d 字)" % len(txt))
+        print("署名文本:", a.credits, "(%d 字)" % len(txt), file=note)
     if a.ledger:
         md = ledger_markdown(res, film)
         d = os.path.dirname(os.path.abspath(a.ledger))
@@ -235,9 +239,9 @@ def main(argv=None):
             os.makedirs(d, exist_ok=True)
         with open(a.ledger, "w", encoding="utf-8") as fh:
             fh.write(md)
-        print("台账:", a.ledger)
+        print("台账:", a.ledger, file=note)
     if not res["ok"]:
-        print("[结论] 不可交付：外部素材授权有缺项（与 F5 同口径：没出处不交付）")
+        print("[结论] 不可交付：外部素材授权有缺项（与 F5 同口径：没出处不交付）", file=note)
         return 1
     return 0
 

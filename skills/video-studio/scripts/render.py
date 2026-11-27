@@ -947,7 +947,8 @@ def st_beats(script, work):
     return data
 
 
-# ---------------------------------------------------------------- 提示点def st_cues(script, work, tl, engine="pil"):
+# ---------------------------------------------------------------- 提示点
+def st_cues(script, work, tl, engine="pil"):
     """画面提示点 -> work/cues.json。
 
     三个来源按顺序合并（后写的覆盖同类型同时间的项不做去重，音效叠加是合理行为）：
@@ -3727,7 +3728,7 @@ def main():
         # 不并进 --stage all：评审包是"交付前的一次独立动作"，跑在 all 里会让
         # 它变成流程的一部分（那就不独立了），而且多数单 stage 复跑用不到帧图。
         _t0 = _stage_begin("review")
-        md = st_review(ensure_tl(), a.work, script, a.out, report_path=_report_path(a))
+        st_review(ensure_tl(), a.work, script, a.out, report_path=_report_path(a))
         _stage_end("review", _t0)
         rc = _finish_gates(a)
         return 1 if (rc or _LEDGER.fails()) else 0
@@ -3760,6 +3761,15 @@ def main():
               "没有成片 %s，先跑 --stage mux --out %s（qa 读的就是同一个 --out，两条命令的 --out 必须一致）"
               % (a.out, a.out))
         mod = load_scenes(strict=False) if engine == "pil" else None
+        # 单跑 --stage qa 时 script 里没有 _style（它是 style stage 注入的内存对象），
+        # 而 G13 的采集要真的重渲关键帧，scenes._plan() 会 fail-closed 抛错 → 整条门禁
+        # 静默降级成 skipped：同一条门禁在 --stage all 里查、单独跑 qa 时不查。
+        # 这里按需解析一次（幂等），失败不阻断 QA（G13 会自己记 skipped 并写清原因）。
+        if not isinstance(script.get("_style"), dict):
+            try:
+                script["_style"] = resolve_style(script, a.work)
+            except SystemExit as _e:
+                print("   [WARN] 没解析出 design（G13 版式门禁会记 skipped）：%s" % _e)
         _t0 = _stage_begin("qa")
         errs = st_qa(a.out, tl, a.work, scenes_mod=mod, script=script, vmaf_mode=a.vmaf)
         _stage_end("qa", _t0)

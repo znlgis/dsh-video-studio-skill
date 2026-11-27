@@ -7,7 +7,7 @@
 #                     素材预算与 hybrid 形态路由、G13 注册、包面清单完整）。
 #                     不需要 ffmpeg、字体、网络，任何平台都能跑，所以 Ubuntu + Windows 各跑一遍
 #                     （matrix 展开 = 2 个 runner）。
-#   skill          —— skills/video-studio/scripts/selfcheck.py：108 条针对真实缺陷的回归断言
+#   skill          —— skills/video-studio/scripts/selfcheck.py：110 条针对真实缺陷的回归断言
 #                     （数为准的是 CASES 列表，不是文档里的任何数字）。
 #                     需要 ffmpeg（含 libx264/aac/loudnorm）+ 中文字体；可选模块（sfxkit/scorekit/
 #                     webengine/qa_frames）缺失时自检会标 SKIP 而不是 FAIL，所以这里只装必需依赖。
@@ -84,6 +84,14 @@ jobs:
           # 污染工作树（打包卫生那一项靠 .gitignore/npm 规则兜，没必要靠）
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tools/ci_check.py -v
+      # hybrid 包装模板的三条铁律（留原件 / 返回副本 / 缓存键一致）以前只有一个独立
+      # 脚本在守，而它**从未被任何 job 调用**——脚本里第 6 条还是 check(..., True)
+      # 这种断言常量的假通过。现在第六条真造"素材目录不存在"的场景，并接入 CI。
+      # 只依赖 numpy/Pillow（repo job 已装），不需要 ffmpeg/字体/网络。
+      - name: 'selftest: scenes_hybrid（包装模板三条铁律）'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/scenes_hybrid_selftest.py
 
   skill:
     name: skill selfcheck (Linux)

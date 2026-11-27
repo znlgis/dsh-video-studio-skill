@@ -636,10 +636,15 @@ def loudness_curve(audio_path, win=0.1) -> list[dict]:
     if win <= 0:
         raise ValueError("win 必须 > 0（当前 %s）" % win)
     n_win = max(1, int(round(win * AUDIO_SR)))
-    p = subprocess.run(
-        [_ffmpeg(), "-v", "error", "-nostdin", "-i", str(audio_path),
-         "-vn", "-sn", "-dn", "-f", "f32le", "-ac", "1", "-ar", str(AUDIO_SR), "pipe:1"],
-        capture_output=True)
+    # 必须给超时：坏音频/网络盘卡住时 ffmpeg 不退出，--stage qa 会永久挂住。
+    # 同文件其它探测都带 timeout，这里是唯一漏网的一处。
+    try:
+        p = subprocess.run(
+            [_ffmpeg(), "-v", "error", "-nostdin", "-i", str(audio_path),
+             "-vn", "-sn", "-dn", "-f", "f32le", "-ac", "1", "-ar", str(AUDIO_SR), "pipe:1"],
+            capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise ValueError("响度曲线解码超时（300s）：%s" % audio_path) from None
     if p.returncode != 0 or not p.stdout:
         raise ValueError("音频解码失败（%s）：%s"
                          % (audio_path, (p.stderr or b"").decode("utf-8", "replace")[-300:]))

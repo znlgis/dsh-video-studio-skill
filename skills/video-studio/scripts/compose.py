@@ -461,7 +461,15 @@ def st_compose(footage, work, out, spec, args):
     if ap is not None and ap.exists():
         chain.append("[%s]ass=filename='%s',format=yuv420p[vout]" % (cur, ap.name))
         vf_cwd = str(ap.parent)
+    elif ap is not None:
+        # 声明了 subtitle 却找不到文件 = 契约错误，必须 exit 2（与"缺图层 png"同口径）。
+        # 以前这里静默走"不烧字幕"分支：成片照出、退出码 0、日志里一个字都没有——
+        # 用户在成片里找不到字幕，报告里也找不到原因。
+        log("  [契约错误] overlay.json 声明了 subtitle=%r，但 %s 不存在" % (sub_ass, ap))
+        raise SystemExit(2)
     else:
+        # 没声明 subtitle 是合法的"干净画面"（剪映素材盘 / 自行配字幕），明确说一声
+        log("  [subtitles] overlay.json 未声明 subtitle：本次不烧字幕")
         chain.append("[%s]format=yuv420p[vout]" % cur)
         vf_cwd = str(work)
     cmd = [K.FFMPEG, "-hide_banner", "-v", "error", "-y", "-i", str(silent)]

@@ -94,7 +94,7 @@ def scan(tl, scenes_mod, script, safe=None, sub_band=None, max_scenes=None):
     约束：必须**进程内**调用 scenes_mod（采集器是模块级全局），不能起子进程。
     """
     rep = {"errors": [], "warnings": [], "checked": 0, "skipped": [],
-           "boxes": 0}
+           "failed": [], "boxes": 0}
     if scenes_mod is None or not hasattr(scenes_mod, "text_qa_start"):
         rep["skipped"].append("scenes.py 不支持文字框采集（旧版/自写渲染器）：本片没查")
         return rep
@@ -119,7 +119,10 @@ def scan(tl, scenes_mod, script, safe=None, sub_band=None, max_scenes=None):
                                       int(round((float(s.get("start") or 0.0) + lt)
                                                 * float(tl.get("fps") or 30))))
             except Exception as e:                              # noqa: BLE001
-                rep["skipped"].append("%s: 采集帧渲染失败 %s" % (s.get("id"), e))
+                # 渲染失败**不是**"本段没文字"：它意味着这一段的压盖查不到。
+                # 单独记进 failed，由 gate_result 降级为 skipped——以前混进 skipped，
+                # 其他段查到 0 错就整条记 pass，"有段没查成"被当成"全片无压盖"。
+                rep["failed"].append("%s: 采集帧渲染失败 %s" % (s.get("id"), e))
                 scenes_mod.text_qa_take()
                 failed = True
                 break
@@ -163,6 +166,12 @@ def gate_result(rep, name="G13"):
         return dict(gate=name, status="skipped",
                     detail="没有可检查的场景（%s）"
                            % ("；".join(why[:2]) or "时间轴里没有段"))
+    if rep.get("failed"):
+        return dict(gate=name, status="skipped",
+                    detail="%d 段采集帧渲染失败，这些段的压盖无法证明（不能当 0 处压盖）：%s"
+                           % (len(rep["failed"]), "；".join(str(x) for x in rep["failed"][:2])),
+                    values={"scenes": checked, "boxes": boxes,
+                            "failed": [str(x) for x in rep["failed"][:10]]})
     if boxes == 0:
         return dict(gate=name, status="skipped",
                     detail="%d 段有文字但一个文字框都没采到（采集钩子失效或框全被裁掉，"

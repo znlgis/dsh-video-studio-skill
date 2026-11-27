@@ -144,7 +144,13 @@ def _portable_ffmpeg_candidates():
 
 
 def _hardcoded_ffmpeg_candidates():
-    """原有硬编码候选（WinGet Links / Unix 常见路径）。顺序保持原样，不新增 EVCapture 之类的意外构建。"""
+    """硬编码兜底候选（WinGet Links / Unix 常见路径）。只在 PATH 里找不到 ffmpeg 时才被用到。
+
+    为什么降到**最后**：PATH 是用户/环境声明的意图（CI 里把带 libvmaf 的静态构建
+    放进 /usr/local/bin 就是靠它）。以前这两条排在 PATH 前，于是在 CI 上永远先命中
+    /usr/bin/ffmpeg（apt 构建、不带 libvmaf），G11 全片 VMAF 门禁整年在 CI 上记 SKIP——
+    能力探测本身还是绿的，属于"配了但从不执行"。
+    """
     out = []
     local = os.environ.get("LOCALAPPDATA", "")
     user = os.environ.get("USERPROFILE", "")
@@ -158,7 +164,7 @@ def _hardcoded_ffmpeg_candidates():
 
 
 def _ffmpeg_candidates():
-    """按优先级返回 [(候选路径, 来源键)]：显式指定 -> 向上搜索 -> 硬编码 -> PATH。"""
+    """按优先级返回 [(候选路径, 来源键)]：显式指定 -> 向上搜索 -> PATH -> 硬编码兜底。"""
     cands, seen = [], set()
 
     def add(path, src):
@@ -176,9 +182,13 @@ def _ffmpeg_candidates():
     add(os.environ.get(_FFMPEG_ENV), "env")
     for p in _portable_ffmpeg_candidates():
         add(p, "portable")
+    # PATH 必须排在硬编码候选**之前**：硬编码的 /usr/bin/ffmpeg 在多数 Linux 上是不带
+    # libvmaf/ssim 的发行版构建，排在前面会让能力门禁（G11 全片 VMAF）永远走 SKIP 分支；
+    # 用户按文档装好带 libvmaf 的构建、或 CI 把静态构建放进 /usr/local/bin 之后依然用不上
+    # ——"装了却没生效"最难查。
+    add(shutil.which("ffmpeg"), "path")
     for p in _hardcoded_ffmpeg_candidates():
         add(p, "hardcoded")
-    add(shutil.which("ffmpeg"), "path")
     return cands
 
 

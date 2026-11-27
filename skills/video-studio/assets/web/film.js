@@ -144,8 +144,13 @@
     // 也认"在 film.js 之前直接写 window.DURATION = 秒数"的写法：render.py 的报错就是
     // 教用户改 window.DURATION（页面里的时长必须等于 timeline.total）。
     // engine.js 自己写的兜底值不算显式，否则模板永远锁死在 12 秒，加场景也不生效。
-    var pre = Number(global.DURATION);
-    if (isFinite(pre) && pre > 0 && pre !== Number(F.defaultDuration)) return pre;
+    // 只认「页面自己写的」DURATION：engine.js 的兜底值带 __DURATION_DEFAULTED__ 标记。
+    // 不能用"数值等于 defaultDuration"来判断——用户按报错把 window.DURATION 写成正好
+    // 12.000 时会被当成兜底值丢掉，于是报错照旧、怎么改都改不好。
+    if (global.__DURATION_DEFAULTED__ !== true) {
+      var pre = Number(global.DURATION);
+      if (isFinite(pre) && pre > 0) return pre;
+    }
     return F.timelineEnd();
   }
 

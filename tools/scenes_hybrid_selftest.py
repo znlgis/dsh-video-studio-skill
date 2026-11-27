@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -96,8 +97,27 @@ def main():
     except Exception as e:
         check("跨顺序不污染（铁律2/3）", False, "%s: %s" % (type(e).__name__, e))
 
-    check("无素材目录时退化不崩", True,
-          "（本机设了 MEDIA）" if getattr(mod, "MEDIA", "") else "")
+    # 以前这里是 check(..., True)，断言的是一个常量真值：永远 PASS，等于没测。
+    # 现在真造一个「素材目录不存在」的场景：模板必须静默退化为内置外观，而不是抛错
+    # （MEDIA 指错目录就崩是用户真实踩过的路径）。
+    try:
+        old_media = os.environ.get("VIDEO_STUDIO_HYBRID_MEDIA")
+        os.environ["VIDEO_STUDIO_HYBRID_MEDIA"] = os.path.join(tempfile.gettempdir(),
+                                                             "vs_no_such_media_dir_xyz")
+        mod2 = load(TPL, "scenes_hybrid_no_media")
+        script = build_script()
+        scene = {"id": "s01", "kind": "hook", "text": "x", "sub": "x",
+                 "scene_type": "statement", "dur": 3.0, "chapter": "c"}
+        frame = mod2.draw_frame(scene, 0.5, 3.0, 0.5, script, 15)
+        ok = frame is not None and getattr(frame, "size", None) == (1920, 1080)
+        check("无素材目录时退化不崩", ok, "frame=%r" % (getattr(frame, "size", None),))
+    except Exception as e:
+        check("无素材目录时退化不崩", False, "%s: %s" % (type(e).__name__, e))
+    finally:
+        if old_media is None:
+            os.environ.pop("VIDEO_STUDIO_HYBRID_MEDIA", None)
+        else:
+            os.environ["VIDEO_STUDIO_HYBRID_MEDIA"] = old_media
 
     print("-" * 66)
     if fails:

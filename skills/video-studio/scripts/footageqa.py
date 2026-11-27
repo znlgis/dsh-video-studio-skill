@@ -351,6 +351,18 @@ def f2_subtitle_bleed(foot, work, out, tl, edl, ctx):
                     detail="没有源声明 burned_subs（字幕带位置）；无法判定是否治理干净。"
                            "用 --stage probe 的建议值填进 sources[].burned_subs 后重跑",
                     values={"bright_suspicion": suspicion})
+    if checked < len(srcs):
+        # 部分声明 = 部分素材**根本没查**。以前只要有一个源声明就记 pass：5 个源里
+        # 4 个底部挂着烧录字幕，F2 照样是绿的（--strict-qa 也拦不住）。skipped 不是
+        # 通过，这条必须如实降级并点名没声明的源。
+        undeclared = sorted(sid for sid, s in srcs.items()
+                            if not _declared_band(s, "burned_subs"))
+        return dict(gate="F2", status="skipped",
+                    detail="只有 %d/%d 个源声明了 burned_subs；其余源（%s）等于没查，"
+                           "不能记通过。用 --stage probe 的建议值补齐后重跑"
+                           % (checked, len(srcs), "、".join(undeclared[:4])),
+                    values={"bright_suspicion": suspicion, "declared": checked,
+                            "sources": len(srcs), "undeclared": undeclared})
     return dict(gate="F2", status="pass",
                 detail="%d/%d 个源声明了烧录字幕带，且都在 crop 之外（可见区 y=%.0f..%.0f）"
                        % (checked, len(srcs), box[1], box[3]),
@@ -407,6 +419,16 @@ def f3_watermark(foot, work, out, tl, edl, ctx):
                     detail="没有源声明 watermark（水印框）；无法判定水印是否去掉。"
                            "用 --stage probe 的建议值填进 sources[].watermark 后重跑",
                     values={"visible_box": box})
+    if checked < len(srcs):
+        # 同 F2：部分声明 = 部分素材根本没查，不能记 pass（skipped ≠ 通过）。
+        undeclared = sorted(sid for sid, s in srcs.items()
+                            if not _declared_band(s, "watermark"))
+        return dict(gate="F3", status="skipped",
+                    detail="只有 %d/%d 个源声明了 watermark；其余源（%s）等于没查，"
+                           "不能记通过。用 --stage probe 的建议值补齐后重跑"
+                           % (checked, len(srcs), "、".join(undeclared[:4])),
+                    values={"visible_box": box, "declared": checked,
+                            "sources": len(srcs), "undeclared": undeclared})
     return dict(gate="F3", status="pass",
                 detail="%d/%d 个源声明了水印框，且都在 crop 之外（可见区 x=%.0f..%.0f y=%.0f..%.0f）"
                        % (checked, len(srcs), box[0], box[2], box[1], box[3]),

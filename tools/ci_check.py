@@ -555,8 +555,11 @@ def t_doc_refs():
 def t_size():
     big = []
     checked = 0
+    # 路径过滤必须用**相对路径**的 parts：用绝对路径时，GitHub Actions 的工作区是
+    # /home/runner/work/<repo>/<repo>，其中 "work" 就在绝对路径里，于是每个文件都被
+    # SIZE_SKIP_DIRS 过滤掉、checked 恒为 0——这条门禁在 Ubuntu runner 上是空检查却记 PASS。
     for p in [p for p in ROOT.rglob("*") if p.is_file()
-              and not (set(p.parts) & SIZE_SKIP_DIRS)
+              and not (set(p.relative_to(ROOT).parts) & SIZE_SKIP_DIRS)
               and not str(p.relative_to(ROOT)).startswith("tmp_scratch_")
               and p.suffix.lower() not in SIZE_SKIP_EXT]:
         checked += 1
@@ -564,6 +567,8 @@ def t_size():
         if n > MAX_FILE_BYTES:
             big.append("%s %.0f KB" % (p.relative_to(ROOT), n / 1024.0))
     assert not big, "；".join(big)
+    assert checked > 0, ("体积检查一个文件都没查到：路径过滤把整个仓库跳过了"
+                         "（absolute parts vs SIZE_SKIP_DIRS？）")
     # 文案必须与判定口径一致：旧文案写"所有文本文件"，实际却把 .jpg 也算进来，于是读者看到
     # "文本文件太大"却找不到大文本文件。"受检"= 跳过缓存目录与媒体后缀之后剩下的文件。
     return ("%d 个受检文本文件 < %.0f KB（媒体资产与缓存目录不计）"

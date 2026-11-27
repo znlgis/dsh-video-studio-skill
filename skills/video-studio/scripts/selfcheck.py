@@ -3736,7 +3736,30 @@ def t_scenes_in_content_hash():
     # 空路径仍记 missing（没有场景代码时别编一个指纹出来）
     lg3 = GT.GateLedger(work, script, scenes_path="")
     assert lg3.input_fingerprints()["scenes"] == "missing", "没有 scenes 时应记 missing"
-    return "scenes 内容进指纹且可失效；无 scenes 记 missing"
+    # 画幅档必须进指纹：横屏签过 release 的片，改 --layout portrait 重出后旧签核
+    # 不能继续显示"已签"（画布/安全区/字幕带/字号档全变了，是另一次交付）。
+    import importlib
+    def _hash_for(layout):
+        """按指定画幅重算内容指纹（layoutkit 在导入期定死 profile，必须清模块重导）。"""
+        for mod in ("gates", "layoutkit", "filmkit"):
+            sys.modules.pop(mod, None)
+        old = os.environ.get("VIDEO_STUDIO_LAYOUT")
+        os.environ["VIDEO_STUDIO_LAYOUT"] = layout
+        try:
+            importlib.import_module("gates")
+            return sys.modules["gates"].content_hash({"title": "t", "lines": []}, engine="pil")
+        finally:
+            if old is None:
+                os.environ.pop("VIDEO_STUDIO_LAYOUT", None)
+            else:
+                os.environ["VIDEO_STUDIO_LAYOUT"] = old
+            for mod in ("gates", "layoutkit", "filmkit"):
+                sys.modules.pop(mod, None)
+    h_land = _hash_for("landscape")
+    h_port = _hash_for("portrait")
+    if h_land == h_port:
+        raise AssertionError("横屏与竖屏的 contentHash 相同：换画幅后旧签核不会失效")
+    return "scenes 进指纹 / 无 scenes 记 missing / 横竖屏指纹不同"
 
 
 def t_g7_subtitle_tristate():
@@ -4458,7 +4481,102 @@ def t_cards_handoff():
             "%s 的重跑命令没带 editlist：%r" % (st, SW.RERUN_HINT.get(st))
     return "镜头卡 %d 张 / 授权台账 / 剪辑清单 / 剪映换算：口径齐全" % len(ids)
 
+def t_render_stage_integrity():
+    """render.py 的 stage 函数都真的存在，且每个 stage 都有分发分支（"注释吞掉 def" 回归）。
+
+    事故（v2.10.0，先由 CI 的 ruff 抓到）：`# ---- 提示点` 那行注释在编辑时吃掉了换行，
+    `def st_cues(script, work, tl, engine="pil"):` 于是变成注释的一部分——它的函数体
+    降级成 st_beats 里 `return` 之后的不可达代码。**模块照样 import 成功、ast.parse 通过、
+    108 条自检全绿**，但 `--stage cues` 一跑就是 NameError：自检里没有一条盯着"stage
+    函数还在不在"。这类"结构被吃掉"的损坏只能静态核对，所以这里不真跑渲染，只解析 AST。
+    """
+    import ast
+
+    p = os.path.join(HERE, "render.py")
+    assert os.path.exists(p), "缺 scripts/render.py"
+    with open(p, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    defs = {n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    calls = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.setdefault(node.func.id, []).append(node.lineno)
+    missing = sorted(n for n in calls if n.startswith("st_") and n not in defs)
+    assert not missing, (
+        "这些 stage 函数被调用但没有模块级定义（def 被注释/缩进吃掉？）：%s"
+        % "、".join("%s（第 %d 行调用）" % (n, calls[n][0]) for n in missing))
+    hollow = []
+    for name, fn in sorted(defs.items()):
+        if not name.startswith("st_"):
+            continue
+        body = [b for b in fn.body
+                if not (isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant)
+                        and isinstance(b.value.value, str))]
+        if not body:
+            hollow.append(name)
+    assert not hollow, "这些 stage 函数只有 docstring、没有实现：%s" % "、".join(hollow)
+    stages = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "STAGES" for t in node.targets):
+            if isinstance(node.value, (ast.Tuple, ast.List)):
+                stages = [e.value for e in node.value.elts
+                          if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            break
+    assert stages, "render.py 顶层找不到 STAGES = (...)"
+    dispatched = set()
+    with open(p, encoding="utf-8") as fh:
+        for line in fh.read().splitlines():
+            if line.startswith("    if ") and "stage" in line:
+                dispatched.update(re.findall(r'"([a-z]+)"', line))
+    lost = [s for s in stages if s != "all" and s not in dispatched]
+    assert not lost, "这些 stage 在 STAGES 里却没有分发分支（选了它什么都不做）：%s" % "、".join(lost)
+    return "stage 函数 %d 个全部有定义 / STAGES %d 项都有分发" % (
+        len([n for n in defs if n.startswith("st_")]), len(stages))
+
+
+def t_ffmpeg_priority_order():
+    """ffmpeg 解析优先级：显式指定 > 向上搜索 > PATH > 硬编码兜底。
+
+    事故：硬编码候选（/usr/bin/ffmpeg 等）排在 PATH **之前**，于是 CI 把带 libvmaf 的
+    静态构建放进 /usr/local/bin 之后，仍然先命中 apt 构建（不带 libvmaf）——G11 全片
+    VMAF 门禁在 CI 上整年记 SKIP，而能力探测、自检全绿："装了却没生效"最难查。
+    这里按**源码位置**核对顺序，而不是按本机解析结果：本机 PATH 与硬编码常常指向同一个
+    可执行文件，去重之后顺序根本看不出来。
+    """
+    import ast
+
+    p = os.path.join(HERE, "filmkit.py")
+    assert os.path.exists(p), "缺 scripts/filmkit.py"
+    with open(p, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = None
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef) and n.name == "_ffmpeg_candidates":
+            fn = n
+            break
+    assert fn is not None, "filmkit 里找不到 _ffmpeg_candidates()"
+    pos = {}
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "add"):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    pos.setdefault(arg.value, node.lineno)
+    need = ["env", "portable", "path", "hardcoded"]
+    absent = [k for k in need if k not in pos]
+    assert not absent, "ffmpeg 候选来源键缺了：%s（顺序无从核对）" % "、".join(absent)
+    order = sorted(need, key=lambda k: pos[k])
+    assert order == need, (
+        "ffmpeg 解析顺序变成 %s（要求 %s）：硬编码候选排到 PATH 前面，会让带 libvmaf 的"
+        "构建装了也用不上，G11 VMAF 门禁静默退回 SKIP"
+        % (" > ".join(order), " > ".join(need)))
+    return "解析顺序：%s" % " > ".join(order)
+
+
 CASES = [
+
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
     ("3  loudness 测真峰", t_true_peak),
@@ -4567,6 +4685,8 @@ CASES = [
     ("106 验收帧与音轨偏移（reviewkit / reviewpacket / audio offset）", t_review_and_offset),
     ("107 卡点与动效（beatgrid / beat 锚点 / motion presets / refscan）", t_beat_motion_refscan),
     ("108 镜头卡与交接（shotcards / asset_license / editlist / jianying）", t_cards_handoff),
+    ("109 render stage 函数完整（注释吞掉 def 的结构损坏）", t_render_stage_integrity),
+    ("110 ffmpeg 解析优先级（PATH 先于硬编码，VMAF 门禁真的能用上）", t_ffmpeg_priority_order),
 ]
 
 

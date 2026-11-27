@@ -564,6 +564,12 @@
   global.renderFrame = renderFrame;
   global.getCues = getCues;
   global.getEvents = getEvents;
-  if (typeof global.DURATION === 'undefined') global.DURATION = DEFAULT_DURATION;
+  if (typeof global.DURATION === 'undefined') {
+    global.DURATION = DEFAULT_DURATION;
+    // 标记「这是兜底值，不是页面声明的」：film.js 用它区分显式时长，不能靠"数值等于 12.0"
+    // 来判断——用户按 render.py 的报错把 window.DURATION 改成正好 12.000 时会被静默丢弃，
+    // 而报错文案教的正是「把页面里的 window.DURATION 改成 %.3f」。
+    global.__DURATION_DEFAULTED__ = true;
+  }
   global.ready = false;
 })(window);

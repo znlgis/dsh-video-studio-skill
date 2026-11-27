@@ -80,6 +80,21 @@ def web_asset_fingerprint(entry):
     return _sha1_text("\n".join(rows)), names
 
 
+def _layout_token():
+    """当前生效画幅档的指纹（layoutkit profile 的几何 + 字号档）。
+
+    为什么在这里惰性导入：gates.py 的约束是"纯标准库"，模块级 import layoutkit 会把
+    这个文件绑到渲染栈上（ci_check 的裸机器路径 / 单测都不需要那一整套）。导入失败时
+    退化成空串——那时的调用方也没有画幅概念（老 job），不该因此炸。
+    """
+    try:
+        import layoutkit as _LK
+        return "".join(str(x) for x in (_LK.PROFILE.get("key"), _LK.W, _LK.H,
+                                        _LK.SAFE, _LK.SUB_BAND, _LK.TYPE_SCALE))
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
 def content_hash(script=None, scenes_path="", script_path="", engine="pil", web_entry="",
                  work=""):
     """本次渲染的"内容身份"：剧本 + 场景代码 + 冻结设计 + 生成设计的引擎 + 引擎（web 时再加页面脚本）。
@@ -114,6 +129,11 @@ def content_hash(script=None, scenes_path="", script_path="", engine="pil", web_
         "script_file": _sha1_file(script_path) if script_path else "",
         "scenes": _sha1_file(scenes_path) if scenes_path else "",
         "engine": eng,
+        # 画幅档（横屏 16:9 / 竖屏 9:16）必须进指纹：画布尺寸、安全区、字幕带、字号档
+        # 全由 layoutkit profile 在导入期定死，同一份剧本在两种画幅下每一像素都不同。
+        # 不纳入的话：横屏签过 release 的片，改 --layout portrait 重出后旧签核仍显示"已签"，
+        # 等于人工验收被静默沿用到另一次交付上——正是"内容变了旧签核自动失效"的反例。
+        "layout": _layout_token(),
     }
     design_path = os.path.join(str(work), "design.json") if work else ""
     if design_path and os.path.exists(design_path):
