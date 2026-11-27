@@ -1,4 +1,4 @@
-## 3.0.0 — 全面审查：修 17 处真缺陷（含 2 处「门禁整年没真跑」）+ 断言 108 → 110
+## 3.0.0 — 全面审查：修 20 处真缺陷（含 3 处「门禁配了但从不执行」）+ 断言 108 → 110
 
 > 这一版没有新功能，只有一件事：**把「看着绿、其实没查」的地方补上**。
 > 3.0.0 是主版本号，理由不是接口破坏，而是**校验口径变严**：几处过去记 pass 的结论
@@ -91,6 +91,19 @@
 - CI 的 repo job 新增一步 scenes_hybrid 自检。
 - 文档口径同步：108 条 → 110 条（SKILL.md / README / README.en / marketplace-entry /
   ci.yml / references 共 16 处），docs/compatibility.md 按 3.0.0 重新生成。
+
+### 收尾阶段又抓到的三处（把 CI 真正跑绿的过程中暴露）
+
+- **selfcheck 第 54 条「4 处真值一致」实际只比了 3 处**：schema 路径多写了一级 `..`，
+  解析到仓库父目录、`os.path.exists` 为假，异常又被 `pass` 吞掉——于是
+  `schemas/film.schema.json` 的场景类型枚举**从没被校验过**。现在路径修正，且四处缺一即
+  FAIL（旧的 `len(got) < 3` 记 skip，等于「少一处也算过」）。
+- **filmcheck 把 `beat:2` / `bar:3` 当成场景 id**：合法卡点片被 `--strict` 判
+  `cue_id_missing` 而红（`filmkit.cue_time` 明明支持这两种锚点）。现在归为独立类型，
+  只校验写法。
+- **含 `-` 的场景 id 无法被 cue 引用**：schema 的 id pattern 明确允许 `-`，但两处解析都
+  按「第一个 +/−」切分——`shot-01` 被切成 `shot`，`shot-01+0.2` 直接 `float` 抛错。
+  现在 `filmcheck._cue_ref` 与 `filmkit.cue_time` 都改成按**已知 id 最长前缀**匹配。
 
 ### 已知未修（本轮审查发现、但不在本次改动范围）
 
