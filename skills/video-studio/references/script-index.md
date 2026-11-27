@@ -19,14 +19,17 @@
 | `scripts/grammar.py` | **场景语法**：按内容从 10 类构图里选 `type`，落 `work/storyboard.json`；`--help` 可查用法 |
 | `scripts/voicekit.py` | **旁白声线/语气计划**：裸 edge voice id + 实测响度补偿表 + 6 档 tone；`--list` 查音色表与语气档 |
 | `scripts/filmkit.py` | 生产内核：字体/字形自查/缓存排版/字幕安全区（读 `design.visual.subtitle`）/缓动/确定性随机/音频总线/**CueBus 提示点**/**立体声混音 mix_film**/TTS/时间轴/**hold 停留窗口**/FrameSink/合成/质检 |
-| `scripts/render.py` | 编排器：**14 个 stage**（`style`/`tts`/`layout`/`cues`/`score`/`sfx`/`audio`/`frames`/`mux`/`qa`/`stills`/`accept`/`explain`/`all`）、两种引擎（`--engine pil|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`）、`--batch` 批量、`--preview N` 前 N 秒试片、`--run-id` 运行标签、`--vmaf full|sample|off`、`--no-preflight`。**`--scenes` 缺省 = 剧本同目录 `scenes.py` → 技能内置 `assets/scenes.py`** |
+| `scripts/render.py` | 编排器：**17 个 stage**（`style`/`tts`/`layout`/`beats`/`cues`/`score`/`sfx`/`audio`/`frames`/`mux`/`qa`/`stills`/`review`/`editlist`/`jianying`/`accept`/`explain`/`all`）、两种引擎（`--engine pil|web`）、分块并行（`--jobs`）、断点续跑（`--resume`）、母版预览（`stills`）、`--batch` 批量、`--preview N` 前 N 秒试片、`--run-id` 运行标签、`--vmaf full|sample|off`、`--no-preflight`。**`--scenes` 缺省 = 剧本同目录 `scenes.py` → 技能内置 `assets/scenes.py`** |
 | `scripts/gates.py` | **门禁账本**：pass / fail / skipped 三档、`out/QC-REPORT.md` 渲染、人工签核（绑内容指纹）、原子写 |
+| `tools/asset_license.py` | **外部音频素材授权**：来源/授权/能否商用/是否署名；缺项即不可交付，可生成片尾 CREDITS 与台账 |
+| `tools/refscan.py` | **参考片逆向**：scene 切点 + 逐镜时长/动幅/亮度/饱和 + `sheet.png` + `REVERSE.md` 三列表（手法 / 参考片实现 / 要不要抄） |
+| `tools/audio_offset.py` | **音轨偏移实测**：交付 mp4 vs 混音母带做短时 RMS 包络互相关 + 抛物线插值，输出 `mux.audio_offset_ms` 建议值（测不出退 2，不瞎填） |
 | `scripts/stagewatch.py` | **阶段新鲜度**：每 stage 记录输入/输出指纹到 `work/manifest.json`；上游一改，下游报过时并给出最小重跑命令 |
 | `scripts/filmcheck.py` | **film.json 契约校验**：未知键提示「是不是想写 X」（以前静默忽略）、枚举与范围、跨字段（cue 引用的 id 必须存在）。`style` 键现在是 **inert 警告**（已废弃、不参与渲染），不会再误报「找不到 stylekit.py」 |
 | `scripts/layoutkit.py` | **画布/安全区单一真源**：横竖屏两套 profile（尺寸、正文区、字幕带、字号档）都在这里，scenes / filmkit / designkit 共用同一份定义（自检 #73 守住"只能有一个真源"） |
 | `scripts/critic.py` | **审美质检**：离线启发式 0-100 分（安全边距 / 明暗对比 / 色相分散 / 文字密度 / 重心平衡）+ `--vlm-cmd` 挂钩（prompt 走 stdin、stdout 收 JSON，本脚本不联网）。评 `proposals/rev*/<ID>/_sheet.png`；**不写 `proposal.json`**、不进 `--stage qa` 账本 |
 | `scripts/studio.py` | **薄门面**：`studio.py <子命令>` 转调 intake/propose/render/critic/check/lint/contract/explain；未知参数原样透传，退出码等于目标脚本 |
-| `scripts/selfcheck.py` | 回归自检：**105 条**针对真实缺陷的断言，不联网、约 10–25 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）/ 70 出片前问诊（固定 8 题，没答完首次提案必拦）/ 71 默认设计不画装饰细线（母题层/底纹/HUD 全关，按绘制调用断言）/ 72 前景不随镜头位移（1px 台阶回归）/ 91 hybrid 默认形态 / 92 素材预算与 F8 / 93 配色锚点与气质互斥（采样前点名）/ 94 场景代码进内容指纹 / 95 G7 字幕三态 / 96 G8 黑帧结构化 / 97 intake --check 只读** |
+| `scripts/selfcheck.py` | 回归自检：**108 条**针对真实缺陷的断言，不联网、约 10–25 秒出结论（可选模块缺失标 SKIP）。后半段的重点项：**59 逐 stage 可单独跑 / 60 brief 里的要求真的生效 / 61 字幕样式可定制（`visual.subtitle` 真的生效）/ 62 片内版式轮换（`layout_cycle`：换章即换骨架）/ 63 带约束的 brief 不会高概率采样失败 / 64 已移除 API 的 fail-closed（不许 NameError / 假绿 / 静默回落）/ 65 `design.audio` 的音量/音效参数真的落进 script / 66 片间去重台账（确认记账 / 提案避开 / 可关可查）/ 67 时长要求真的被接住（brief 里的「2 分钟 / 90 秒」→ duration_target：决定候选段落数 + 渲染对账，成片长度仍由实测旁白决定）/ 68 缩放取景的帧间稳定性（改回 NEAREST 直采立刻 fail）/ 69 ASR 掉分可定位（低召回必须给出 lost_top 与最差段落）/ 70 出片前问诊（固定 8 题，没答完首次提案必拦）/ 71 默认设计不画装饰细线（母题层/底纹/HUD 全关，按绘制调用断言）/ 72 前景不随镜头位移（1px 台阶回归）/ 91 hybrid 默认形态 / 92 素材预算与 F8 / 93 配色锚点与气质互斥（采样前点名）/ 94 场景代码进内容指纹 / 95 G7 字幕三态 / 96 G8 黑帧结构化 / 97 intake --check 只读** |
 | `scripts/footage.py` | **素材线一条龙**（10 个 stage）：`probe/fetch/transcribe/locate/tts/edl/cut/mix/assemble/qa`；契约是 `footage.json`（`schemas/footage.schema.json`），画面治理走 `treatment`，门禁是 F1–F8；素材预算与 F8 见 footage.md §2.1 |
 | `scripts/footagekit.py` | 素材线核心 I：`load_footage`（结构硬错误）/ `probe_file` / `fetch_all`（yt-dlp + 直链）/ `transcribe` / `locate` / `build_treatment_filter`（crop→scale→pad→color→fps，切镜与抽帧共用一份，避免"预览和成片不一样"） |
 | `scripts/footageedit.py` | 素材线核心 II：`build_edl` / `check_edl`（越界与总长）/ `cut_shots`（按镜切 + 抽原声）/ `mix_tracks`（旁白 + 环境层 + 配乐，采样级叠加）/ `write_ass` + `assemble`（ASS 字幕按 PlayResY=1080 排版） |
@@ -39,6 +42,12 @@
 | `scripts/scorekit.py` | **配乐合成原语**：和声/律动/吸气/自动电平/混音/响度测量/24-bit 落盘。它不提供曲风，只提供可复用的底层技术 |
 | `scripts/webengine.py` | **浏览器逐帧渲染**：Edge/Chromium + CDP 截图、分块并行、崩溃重开、cue 导出、文字质检 |
 | `scripts/qa_frames.py` | **帧级质检**：单帧闪烁/画面空窗/音画同步/亮度与响度曲线（JSON + PNG） |
+| `scripts/shotcards.py` | **镜头配方卡**：10 张按意图命名的参数组（构图/时长/字幕位/动效/音效+误用）；查卡、按意图检索、只填空值套用 |
+| `scripts/editlist.py` | **剪辑交接清单**：逐镜 in/out + 帧号 + 旁白 + 音效提示 -> `editlist.json` / `EDITLIST.md`（时间与成片逐帧一致） |
+| `scripts/jianying.py` | **剪映草稿导出**：秒->微秒整数、字号->画布高百分比；只挂干净画面+文本轨，缺 `pyJianYingDraft` 降级为 `draft_plan.json` |
+| `scripts/beatgrid.py` | **节拍网格**：三频段 STFT + onset + 自相关候选 + 等距最小二乘定 BPM/相位；产出 `beat_data.json`（拍/小节/命中/能量段落），纯 numpy |
+| `scripts/reviewkit.py` | **验收帧 + 音轨偏移**：每段 enter/settle 帧号算死写进 `timeline.review`；`mux.audio_offset_ms` 解析与总线平移（纯函数，无第三方依赖） |
+| `scripts/reviewpacket.py` | **独立终检评审包**：检查清单七组 22 条 + `packet.json` + `PACKET.md` 拼装（不抽帧不写盘，ci_check 断言清单不许缩水） |
 | `assets/scenes.py` | **技能内置渲染器**（`--scenes` 的默认回退）：10 类构图绘制器 + `draw_frame` + **`cues()` 提示点钩子示范**，含缓存排版与预烘焙背景的正确写法。要改画面就把它拷成你自己的 `scenes.py` 再改，或直接参考它写 |
 | `assets/film.json` | **测试夹具**（跑通全链 / 金帧 / 门禁回归用，**不是给用户抄的模板**；里面没有 `style` 字段，外观由 `work/design.json` 决定） |
 | `assets/design_fixture.json` | **金帧基准设计**（像素回归绑它，不绑任何内置风格） |
@@ -79,7 +88,7 @@
 |---|---|
 | 出片前把 8 个问题问完（含制作方式与产线推荐；hybrid 形态用 `--hybrid-form {3,1}` 显式指定，默认 3） | `scripts/intake.py` |
 | 出候选 / 冻结设计 / 换方向重出 / 手改设计后 `--adopt` 重绑指纹 | `scripts/propose.py` |
-| 排轴 / 渲染 / 混音 / 质检 / 批量 / 断点续跑 | `scripts/render.py`（14 个 stage） |
+| 排轴 / 渲染 / 混音 / 质检 / 批量 / 断点续跑 | `scripts/render.py`（17 个 stage） |
 | 评候选静帧"好不好看"（离线打分 + 可选 VLM） | `scripts/critic.py` |
 | 记不住入口时 | `scripts/studio.py <子命令>`（薄门面） |
 | 设计 DSL / 预览 / 场景语法 / 声线 / 排版内核 | `designkit.py` `previewkit.py` `grammar.py` `voicekit.py` `filmkit.py` |
@@ -91,7 +100,7 @@
 | 素材线核心：取材 / 剪辑 / 专属门禁（`footageqa.py` 的 F1–F9；`footagekit.source_budget` 素材预算） | `footagekit.py` `footageedit.py` `footageqa.py` |
 | **hybrid 形态 3 合成**（素材打底 + 小面积叠加 + 强制响度归一） | `scripts/compose.py` |
 | **hybrid 风格对齐**（素材画像 -> 图文段配色/画幅；素材本身不上色） | `scripts/matchstyle.py` |
-| 回归自检（105 条断言） | `selfcheck.py` |
+| 回归自检（108 条断言） | `selfcheck.py` |
 
 内置资产：`assets/scenes.py`（默认渲染器；要改画面就拷成自己的 `scenes.py`）、
 `assets/film.json`（测试夹具，不是模板）、`assets/design_fixture.json`（金帧基准）、

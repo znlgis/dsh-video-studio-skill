@@ -168,13 +168,25 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage sfx 
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage audio    # 只混音（旁白+配乐+音效，旁白优先）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage frames   # 只渲染帧（--engine pil|web，--jobs N 分块并行）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage mux      # 只合成（视频流 copy，两遍 loudnorm）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage beats    # 只测节拍 -> work/beat_data.json（卡点片才需要；无音乐时写 ok=false 占位）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa       # 只质检（只读输入，写 work/qa/；另按 §7.0 写 out/QC-REPORT.md 与 work/gates.json）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage stills   # 只渲母版静帧 + 联系表
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage editlist # 只出剪辑交接清单（editlist.json / EDITLIST.md）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage jianying # 只出剪映草稿计划（缺 pyJianYingDraft 时降级并说明）
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --no-subs        # 不烧字幕出「干净画面」plate（给剪映导出用）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage accept --gate stills   # 人工签核一道闸（写 work/signoff.json）
 python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage explain  # 只报"哪些阶段过时、为什么、该跑什么"，不跑任何 stage
 ```
 
-`--stage all` 的完整顺序：`style → tts → layout → cues → score → sfx → audio → frames → mux → qa`。
+`--stage all` 的完整顺序：`style → tts → layout → beats → cues → score → sfx → audio → frames → mux → qa → editlist`。
+
+> `beats` 必须排在 `cues` 前（cue 的 `beat:` 锚点要靠网格解析）；`editlist` 排在 `qa` 后
+> （它要把 `cues.json` 的音效落点写进表，早于 cues 会得到一份「音效列全是 —」的错表）。
+> `review` / `jianying` **刻意不在 all 里**：前者是交付前的独立动作，后者要 `--no-subs`
+> 出来的干净画面——塞进 all 只会每次都降级。
+
+> `beats` 排在 `cues` 之前：cue 写 `beat:12` 这种锚点时要靠网格解析。`--stage all` 里
+> 它分析的是 `work/music.wav`（还没生成时 cues 会自己补算一次，卡点片一条命令即可跑完）。
 **任何一步出问题都会在该步停下**，不会带着坏输入继续往下跑。
 
 **开渲前先算成本**（可选；`estimate.py` 是仓库工具，按 `<REPO>` 调用）：

@@ -32,6 +32,7 @@ description: 做中文视频的两条生产线：(A) 素材剪辑 footage——�
 11. **偏移全靠指纹绑死**：签核绑内容指纹（剧本 + `scenes.py` + 设计），改任一即失效；分块渲染按绝对起始帧命名并显式查缺口，改内容后 `--resume` 会拒绝复用旧分块。
 12. **交付前必须跑质检 + 亲眼看 3 张静帧**（`read_image`）："能出图"不等于"没问题"。`skipped` 不等于通过，报告里要说明为什么没跑。
 13. **默认 PIL 引擎**（`engine: pil`）：依赖少、确定性强。要"粒子形变/实时着色器质感"才上浏览器（`--engine web`，需 playwright + Chromium），换引擎要重做画面。
+14. **交付前跑一次独立终检**（`--stage review`）：生成评审包（每段 enter/settle 两帧 + `PACKET.md` + 门禁摘要），派**干净上下文**的 subagent 逐条给「✓/✗/无法验证」+ 帧号证据。制作者自查有确认偏差，"我以为我做了"的部分只有独立评审抓得到；评审包生成 ≠ 评审完成。
 
 ## 五步上手（零拷贝：不拷脚本，不拷模板）
 
@@ -60,7 +61,7 @@ JSON
 #    画风/配乐/声线/节奏全部由 design 决定，film.json 里**没有** style 字段可写。
 python <SKILL_DIR>/scripts/filmcheck.py film.json          # 契约校验（可选，几秒）
 
-# 2) 先自检一次环境（可选；105 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
+# 2) 先自检一次环境（可选；108 条回归护栏，约 10–25 秒，不联网；缺可选模块会标 SKIP）
 python <SKILL_DIR>/scripts/selfcheck.py
 
 # 3) 【铁律】先问诊（8 题一次问完），再出方案——同一个 brief 每次都不一样，必须让用户看过
@@ -161,7 +162,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa -
 - **error 档**（出现即 red）：分辨率/帧率不符交付规格、音轨缺失、时长差 ≥0.5 s、真峰 > -1.0 dBTP、锐度比 < 0.85、单帧闪烁 >0、画面空窗、音画同步超差、字幕条数 ≠ 剧本句数、G0 渲前预检 error、G10 词级异常、G11 VMAF<92、G12 字符召回<0.72。
 - **warning 档**：采样率非 48 kHz、响度偏离 -16±1、真峰余量不足、锐度比 0.85–0.92、长黑帧/长静音、字幕安全区告警、缺字形、画面静止 >6 s、**门禁没执行**（最重要——它说明"看起来通过"其实没查）。
 - **音画同步门禁在 PIL 路线默认可能没在查**：要么给 cue 写 `visual_at`（画面上事件真正发生的绝对秒数），要么设 `QA_REQUIRE_SYNC=1` 把"没查"升级成 error。看到 `sync: []` 先确认是真同步还是根本没查。
-- **门禁矩阵、G0/G10/G11/G12/G13 判据、交付凭据 `out/QC-REPORT.md`、阶段新鲜度**：见 [references/delivery-gates.md](references/delivery-gates.md)；
+- **门禁矩阵、G0/G10/G11/G12/G13/G14 + R1 判据、交付凭据 `out/QC-REPORT.md`、阶段新鲜度**：见 [references/delivery-gates.md](references/delivery-gates.md)；
   帧级深检怎么读 `work/qa/deep.json`、闪烁/空窗/同步的判定与反例：见 [references/frame-qa.md](references/frame-qa.md)；方法论 G0–G8 与可复制代码见 [references/quality-gates.md](references/quality-gates.md)。
 
 ### 交付话术（不许自我宣称"做好了"）
@@ -169,6 +170,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa -
 交付时必须能贴出：`ffprobe` 的时长/分辨率/码率；`ebur128` 的积分响度**与真峰**（两个数）；编码锐度比（≥0.85，并说明参考帧来自场景函数重渲）；
 联系表路径 + "已用 read_image 亲眼确认"的**具体观察**；字幕条目数 = 剧本句数；`selfcheck.py` 的 PASS 计数；
 帧级深检三个数（单帧闪烁 / 画面空窗 / 音画同步超差）；新门禁 G10/G11/G12 的实测值，`skipped` 项必须逐项说明为什么没跑。
+独立终检也要贴：`work/review/PACKET.md` 路径 + R1 的帧数（应 = 2×段数）+ 评审结论（哪些是阻断项、哪些「无法验证」及缺什么证据）。**改完必须重评**——改了画面不重评，等于拿旧结论交付新片。
 
 > 不要口头复述数字：`out/QC-REPORT.md` 是机器生成的交付凭据，照抄报告里的"实测值"。完整示例与口径见 [references/quality-gates.md](references/quality-gates.md)。
 > 自查口令：如果一条门禁从来没失败过，先确认它是不是根本测不到。
@@ -193,6 +195,11 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa -
 | 帧级质检报错但看不懂 / 怀疑闪烁或同步 | [frame-qa.md](references/frame-qa.md) | 单帧闪烁判据（含"回到原位"第三道闸）、画面空窗、音画同步、`deep.json` 怎么读、诊断 PNG、已知限制 |
 | 要查某道门禁的判据来源 / 阈值 / 关闭方式 | [delivery-gates.md](references/delivery-gates.md) | G0 渲前预检、G11 VMAF/SSIM、G12 ASR 回读的判据与实测数据 |
 | 要跑方法论门禁 / 交付清单 / 锐度比怎么算 | [quality-gates.md](references/quality-gates.md) | 方法论 G0–G8 全部门禁、可复制代码、编码质量实测依据、三层质检交付话术 |
+| 判"好不好看"没依据 / 返工原因说不清 | [aesthetic-rules.md](references/aesthetic-rules.md) | 判例式审美准则 R/Q/S/C/P：每条 = 规则 + 真实返工判例 + 自检问句；编号只追加不重排，可故意违反但必须记档 |
+| 某段不知道多长/字幕放哪/配什么音效 | [shot-cards.md](references/shot-cards.md) | 10 张镜头配方卡：构图 / 长度区间 / 字幕位 / 动效 / 音效 + 每张的误用说明；`scripts/shotcards.py` 可查卡并只填空值 |
+| 要交给人在剪映里改 / 用了外部素材 | [export-handoff.md](references/export-handoff.md) | `--stage editlist` 逐镜剪辑表、`--stage jianying` 草稿（缺依赖降级为计划）、`tools/asset_license.py` 授权台账与片尾署名 |
+| 要做音乐卡点 / 动作语言不统一 | [beat-sync.md](references/beat-sync.md) | `--stage beats` 测 BPM 网格（纯 numpy）、cue 写 `beat:12`/`bar:3`、动效预设按 (energy,tone) 成套、G14 卡点门禁、`tools/refscan.py` 参考片逆向三列表 |
+| 交付前要独立终检 / 评审怎么不流于形式 | [final-review.md](references/final-review.md) | `--stage review` 评审包（每镜 enter/settle 两帧 + packet.json + PACKET.md）怎么读、干净上下文评审者的输出格式、缺证据一律「无法验证」 |
 | 字幕要按词折行 / cue 打到某个词 / 词级时间戳异常 | [word-timeline.md](references/word-timeline.md) | 词级契约、句时长为何仍是权威、词锚点写法与退化路径、四个真实坑 |
 | 改了某个字段，不知道要重跑什么 | [change-impact.md](references/change-impact.md) | 改动影响表（text/sub/hold/design/scenes 各要重跑什么）、`--stage explain` 与 stagewatch |
 | 遇到怪问题（抖动/音轨断/字幕丢/越跑越慢） | [pitfalls.md](references/pitfalls.md) | 20 条最佳实践 + 17 条反模式 + 5 个 bug 复盘、§8 故障速查表 |
@@ -200,7 +207,7 @@ python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa -
 | 想查某个脚本的完整参数与坑位 | [script-index.md](references/script-index.md) | 每个脚本的作用、参数、契约（`§10 脚本资产` 的详细版） |
 | 竖屏（9:16）怎么出 / 亚像素推镜为什么不采用 | [portrait-and-motion.md](references/portrait-and-motion.md) | 竖屏现状与版式骨架、动感评估结论与验收判据 |
 
-**脚本清单（速查）**：出片 `scripts/render.py`（14 个 stage）/ 提案 `scripts/propose.py` / 问诊 `scripts/intake.py` /
+**脚本清单（速查）**：出片 `scripts/render.py`（17 个 stage）/ 提案 `scripts/propose.py` / 问诊 `scripts/intake.py` /
 素材线 `scripts/footage.py` / hybrid 合成 `scripts/compose.py` / 风格对齐 `scripts/matchstyle.py` / 评候选 `scripts/critic.py` /
 记不住入口时 `scripts/studio.py <子命令>`（薄门面）。完整表见 [references/script-index.md](references/script-index.md)。
 

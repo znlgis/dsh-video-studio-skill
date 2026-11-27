@@ -11,6 +11,7 @@
 |---|---|---|---|---|
 | `scripts/preflight.py` | `G0` | `frames` 之前（任何 stage 开渲前） | < 1 s | `--no-preflight`（留痕，不算通过） |
 | `scripts/qavmaf.py` | `G11` | `qa` 收尾，全片逐帧 | 29 s 片 **14.2 s**（同机负载高时 28.8 s） | `--vmaf off` / `"qa": {"vmaf": {"mode": "off"}}` |
+| `scripts/beatgrid.py` | `G14` | `qa` 收尾（只读 beat_data.json + cues.json） | 不跑 ffmpeg，毫秒级 | 没音乐 → `skipped` |
 | `scripts/qaasr.py` | `G12` | `qa` 收尾，转写成片音轨 | 29 s 片 **8.7 s**（faster-whisper small / CPU） | `"qa": {"asr": {"enabled": false}}` |
 
 ---
@@ -243,6 +244,59 @@ python qaasr.py film.mp4 --timeline ... --asr-json <已有 ASR 结果.json>
 
 ---
 
+## 3.5 R1：独立终检评审包（`--stage review`）
+
+门的不是画面，是**评审有没有真发生**。制作方自检有确认偏差，最常漏的是「我以为我做了」那部分，
+所以交付前要把成片、逐镜关键帧、机器门禁摘要、一份可逐条打勾的清单打包，交给干净上下文的评审者。
+
+```bash
+python <SKILL_DIR>/scripts/render.py --script film.json --work work --out out/film.mp4 --stage review
+# 产物：
+#   work/review/PACKET.md        评审者唯一入口（清单 + 输出格式 + 门禁现状）
+#   work/review/packet.json      机器可读清单（内容指纹 / 段数 / 帧来源 / 门禁摘要）
+#   work/review/frames/          每段 enter / settle 各一张（帧号来自 timeline.review，layout 阶段算死）
+#   work/review/_sheet.png       联系表（每行一段，左 enter 右 settle）
+```
+
+- **帧从成片抽**，不是重渲：评审要看的是"交付出去的那一版"。成片缺失直接拒绝，不降级成重渲。
+- **帧号只有一个来源**：`timeline.review.marks`（`--stage layout` 写入，hold 之后算，所以短段/竖屏逐类停留都跟着对）。
+- R1 判据：**0 张帧 = fail**；少于 2×段数 = fail（缺证据等于评审失明）；齐了记 pass，但仍注明
+  「要人/评审 agent 看过才算过」——生成评审包不等于完成评审。
+- 评审者必须按 `PACKET.md` 的格式逐条回 `✓ / ✗ / 无法验证`，✗ 与「无法验证」都要给帧号或文件名。
+  **说"整体感觉不错"等于没评。**
+
+## 3.6 G14：卡点网格（--stage qa）
+
+### 3.6.1 为什么单独一条
+
+卡点错位**不会让画面糊、也不会让响度不对**——它只是"看着不对"。G9 深检量闪烁/空窗，
+G11 量编码损失，G12 量旁白是否对得上，没有一条能回答"这个音效真的落在鼓点上了吗"。
+而它恰恰是卡点片最容易翻车的点：BPM 手改过、BGM 换过、剪辑重排过，
+work/beat_data.json 还是上一版，音效就整片偏半拍。
+
+### 3.6.2 判据
+
+| 情况 | 结论 |
+| --- | --- |
+| 没有音乐，也没有网格 | skipped：非卡点片（**不假装通过**） |
+| 有音乐但 work/beat_data.json 不存在 | fail：先跑 --stage beats |
+| 网格 ok=false | fail：有音乐却定不了拍（氛围乐/纯人声属正常，但那就不该做逐拍卡点） |
+| residualMs > 30 | fail：等距不成立，卡点必然漂 |
+| beat: / bar: cue 离最近拍 > 1 帧（33ms @30fps） | fail：列出前几条与偏差毫秒 |
+| 以上都没有 | pass：报 BPM / 拍数 / 残差 / 核对了几条节拍 cue |
+
+为什么容差是 1 帧：抢拍/拖拍是合法表演手段，但超过一帧就不是表演而是没卡上。
+
+### 3.6.3 自己验一遍
+
+    python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage beats
+    # 看 BPM / T / 首拍 / 残差；残差 >15ms 会打 WARN
+    python <SKILL_DIR>/scripts/render.py --script film.json --work work --stage qa
+    # out/QC-REPORT.md 里找 G14 那一行
+
+> skipped 不等于通过：非卡点片的 skipped 要在交付说明里写明"本片没做卡点"；
+> 卡点片报 skipped 说明音乐没读到，属于配置漏项，不是"不需要"。
+
 ## 4. 三道门禁一起关掉会怎样
 
 `skipped` 是**合法的**（例如线上机器没装 faster-whisper、或 web 引擎路线），
@@ -261,7 +315,7 @@ python qaasr.py film.mp4 --timeline ... --asr-json <已有 ASR 结果.json>
 
 ```bash
 python render.py ... --stage qa     # 只读质检：分辨率/音轨/时长/响度/真峰/锐度比/黑帧/字幕条数 + 帧级深检
-python selfcheck.py                 # 技能自身回归（105 条针对真实缺陷的断言）
+python selfcheck.py                 # 技能自身回归（108 条针对真实缺陷的断言）
 python qa_frames.py out/film.mp4 --cues work/cues.json   # 单独跑帧级深检，出 JSON + 图
 # qa / all 收尾会自动写 out/QC-REPORT.md（机器可读交付结论）
 #       并落 work/gates.json（三档 gate matrix）与 work/cost.jsonl（实测耗时台账）

@@ -255,6 +255,12 @@ _BAD_HUE = 5.0
 # 情绪 -> BPM / 层门限。注意这里**没有"情绪 -> 曲风"的映射**：
 # 把情绪映射到一套配乐风格表，等于把"配乐模板"伪装成参数。
 # 配乐由 musicgen 现场编排，情绪只决定 BPM 与织体门限，不指向任何现成风格。
+_MOOD_ENERGY = {
+    "calm": "calm", "reflective": "calm",
+    "hopeful": "steady", "steady": "steady",
+    "driving": "driving", "tense": "driving", "uplifting": "driving",
+}
+
 _MOOD_BPM = {
     "calm": 78, "reflective": 86, "hopeful": 92, "steady": 104,
     "driving": 124, "tense": 98, "uplifting": 118,
@@ -333,12 +339,49 @@ _TEXTURE_BY_MOTIF = {
 _DENSITIES = (0.55, 0.70, 0.85, 1.00)
 # 默认不推镜（push=0）：慢速亚像素位移在 1x 光栅上必然表现为 1px 台阶，
 # 实测 push=0.14 的 4 秒段每秒跳 12 次（见 scenes._view）。要推镜请手改 design。
+# 动效预设：把「气质 + 情绪」翻译成一组**互相配套**的动效参数。
+#
+# 为什么需要这张表：ease / enter / push / breathe 四个值原来各自独立哈希采样，
+# 于是会出现「outBack 弹跳 + 0.3Hz 极慢呼吸 + 无推镜」这种自相矛盾的组合——
+# 单看每个参数都在合法范围内，合起来却不像同一个片子的动作语言。
+# 这张表把它们绑成六套"动作口音"，按 (energy, tone) 选一套，再在套内做小抖动。
+#
+# energy: calm < steady < driving（由 brief 的节奏词/时长/情绪推）
+# tone  : light（纸感克制）/ bright（活泼有精神）/ dark（发布会技术向）
+MOTION_PRESETS = {
+    ("calm", "light"):    dict(ease="out3",   enter=(0.30, 0.70), push=0.0, breathe_hz=0.30),
+    ("calm", "bright"):   dict(ease="inOut3", enter=(0.35, 0.80), push=0.0, breathe_hz=0.40),
+    ("calm", "dark"):     dict(ease="out5",   enter=(0.30, 0.75), push=0.0, breathe_hz=0.30),
+    ("steady", "light"):  dict(ease="out3",   enter=(0.40, 0.85), push=0.0, breathe_hz=0.50),
+    ("steady", "bright"): dict(ease="outBack", enter=(0.45, 0.95), push=0.0, breathe_hz=0.60),
+    ("steady", "dark"):   dict(ease="out5",   enter=(0.35, 0.85), push=0.0, breathe_hz=0.50),
+    ("driving", "light"): dict(ease="out3",   enter=(0.25, 0.65), push=0.0, breathe_hz=0.90),
+    ("driving", "bright"): dict(ease="outBack", enter=(0.20, 0.60), push=0.0, breathe_hz=1.05),
+    ("driving", "dark"):  dict(ease="out5",   enter=(0.25, 0.70), push=0.0, breathe_hz=0.90),
+}
+_ENERGY_KEYS = ("calm", "steady", "driving")
+
+
+def motion_for(energy, tone, jitter=0.0):
+    """(energy, tone) -> 动效参数四元组。jitter 只在**套内**做微调，不越出这套口音。
+
+    为什么不直接随机：同一个片子里每段动作口径要一致；跨片子才该有差别。
+    抖动只动 breathe_hz（±15%）与 enter 的终点（±0.05），幅度小到不改变观感。
+    """
+    key = (energy if energy in _ENERGY_KEYS else "steady",
+           tone if tone in _TONES else _TONE_BRIGHT)
+    base = dict(MOTION_PRESETS.get(key) or MOTION_PRESETS[("steady", _TONE_BRIGHT)])
+    if jitter:
+        base["breathe_hz"] = round(float(base["breathe_hz"]) * (1.0 + jitter), 3)
+        e0, e1 = base["enter"]
+        base["enter"] = (round(e0, 3), round(min(1.0, max(e0 + 0.05, e1 + jitter)), 3))
+    return base
+
+# 推镜只有一个合法值 0：默认设计不做全程推镜（要做就在 design.json 里显式写 push）。
+# breathe_hz / enter 的取值池已并入 MOTION_PRESETS（按 (energy, tone) 成套给，见 motion_for）。
 _PUSHES = (0.0,)
 # 默认母题池：只有素净（不画装饰细线）。其余母题必须由 brief 点名或手改 design 才会出现。
 _DEFAULT_MOTIFS = ("plain",)
-_BREATHES = (0.30, 0.40, 0.50, 0.60, 0.75, 0.90, 1.05)
-_ENTERS = ((0.35, 0.75), (0.40, 0.90), (0.45, 0.85), (0.50, 1.00),
-           (0.55, 1.00), (0.60, 1.10), (0.70, 1.20))
 _XS = (-150, -90, -60, -30, 0, 30, 60, 90, 150)
 _YS = (-90, -60, -30, 0, 30, 60, 90)
 _INSETS = (0, 20, 40, 60)
@@ -2104,7 +2147,6 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
     motif = motifs[(h("motif") + 3 * index) % len(motifs)]
     transes = tuple(dom.get("transition") or TRANSITIONS)
     trans = transes[(h("transition") + 5 * index) % len(transes)]
-    ease = EASES[(h("ease") + index) % len(EASES)]
     number = NUMBERS[(h("number") + 3 * index) % len(NUMBERS)]
     moods = tuple(dom.get("mood") or MOODS)
     mood = moods[(h("mood") + 3 * index) % len(moods)]
@@ -2161,9 +2203,16 @@ def _make_design(brief, index, seed, attempt, domain=None, unmatched=(), used_hu
     palette, hue = _pg["palette"], _pg["family"][0]
 
     density = _DENSITIES[(h("density") + index) % len(_DENSITIES)]
-    push = _PUSHES[(h("push") + index) % len(_PUSHES)]
-    breathe = _BREATHES[(h("breathe") + index) % len(_BREATHES)]
-    enter = list(_ENTERS[(h("enter") + index) % len(_ENTERS)])
+    # 动效不再四个参数各自随机：按 (energy, tone) 取一套配套口音，再在套内微抖。
+    # energy 由 mood 推（driving/tense/uplifting = 驱动型，calm/reflective = 静），
+    # 与配乐 BPM、pacing 用的是同一个 mood，所以声音与动作同向变。
+    _energy = _MOOD_ENERGY.get(mood, "steady")
+    _jitter = ((h("mjit") % 21) - 10) / 100.0
+    _mo = motion_for(_energy, tone, _jitter)
+    ease = _mo["ease"]
+    enter = list(_mo["enter"])
+    push = _mo["push"]
+    breathe = _mo["breathe_hz"]
     x = _XS[(h("bx") + index) % len(_XS)]
     y = _YS[(h("by") + index) % len(_YS)]
     inset = _INSETS[(h("inset") + index) % len(_INSETS)]

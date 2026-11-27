@@ -17,7 +17,7 @@ Agent 看不见画面、听不见声音，所以**验收必须脚本化 + 静帧
 > | G4 成片门禁（容器/时长/锐度/字幕/黑帧） | `G4` 容器 · `G5` 响度 · `G6` 锐度比 · `G7` 字幕条数 · `G8` 黑帧 | 账本把 G4 拆成 5 行 |
 > | G7 时间层门禁（闪烁/空窗/同步） | `G9` 帧级深检 | **同名不同义**：账本 G9 才是时间层 |
 > | G8 页面层门禁（web 文字重叠/出画） | web 引擎 qa_text 结果 | 只有 `--engine web` 才有 |
-> | — | `G10` 词级时间戳 · `G11` VMAF/SSIM · `G12` ASR 回读 · `G13` 版式文字冲突 | 详见 [delivery-gates.md](delivery-gates.md)、[word-timeline.md](word-timeline.md) 与 `SKILL.md` §7 |
+> | — | `G10` 词级时间戳 · `G11` VMAF/SSIM · `G12` ASR 回读 · `G13` 版式文字冲突 · `G14` 卡点网格 · `R1` 独立终检评审包 | 详见 [delivery-gates.md](delivery-gates.md)、[word-timeline.md](word-timeline.md) 与 `SKILL.md` §7 |
 > | — | `S13` 跨设计剪影可区分（**离线检查，不进账本**） | 不是账本 id：`tools/silhouette_qa.py` 渲合成剧本比设计骨架，由 CI 与 selfcheck 第 55 条守判据 |
 >
 > 一句话记法：**本页 G0–G8 是"查什么"，账本 G0 + G4–G13 是"哪一行判"**；`S13` 是离线检查编号，
@@ -248,7 +248,7 @@ python webengine.py textqa ./web/index.html --step 0.2
 自检：python selfcheck.py -> PASS <实测条数> / FAIL 0 / SKIP 0
 ```
 
-`<实测条数>` 照 selfcheck.py 的真实输出填（当前 **105 条**），**不要抄示例里的旧数字**：
+`<实测条数>` 照 selfcheck.py 的真实输出填（当前 **108 条**），**不要抄示例里的旧数字**：
 这一行写死过两个过时值（先是 70、后来 85），而 selfcheck.CASES 早已不是那个数——
 死数字正是文档漂移的源头。仓库里总数口径的唯一真源是 `selfcheck.CASES`；
 `python tools/ci_check.py` 第 14 项会自动比对 SKILL.md / README.md / 分发页文案，
@@ -320,8 +320,8 @@ SKIP 必须写成 0 或逐项说明原因：SKIP != 通过。
 >       字幕黑底白字不压正文，大字边距均匀，无空洞帧。
 > ```
 >
-> 两处总数别从示例里抄：发版前跑一遍把真实值填进去。真源是 `selfcheck.CASES`（当前 105 条断言）
+> 两处总数别从示例里抄：发版前跑一遍把真实值填进去。真源是 `selfcheck.CASES`（当前 108 条断言）
 > 与 `tools/ci_check.py` 的 `CI_CHECK_COUNT`（当前 18 项）；`tools/ci_check.py` 第 14 项会自动比对
-> 文档里的总数句式（「105 条断言 / 自检 105 条」这类），写错就红——所以示例里不再写死第二个总数。
+> 文档里的总数句式（「108 条断言 / 自检 108 条」这类），写错就红——所以示例里不再写死第二个总数。
 
 > 自查口令：如果一条门禁从来没失败过，先确认它是不是根本测不到。

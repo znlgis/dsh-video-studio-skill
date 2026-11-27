@@ -15,6 +15,7 @@
     mux     合成（视频流 copy，两遍 loudnorm）
     qa      质检 + 抽帧 + 联系表 + 帧级深检（闪烁/空窗/音画同步）
     stills  只渲染若干关键帧做母版预览（不生成视频）
+    review  独立终检评审包 -> work/review/（每镜 enter/settle 两张帧 + PACKET.md + 门禁摘要）
     accept  人工签核一道闸（--gate style|stills|facts|release），写 work/signoff.json
     explain 打印"现在哪些 stage 是旧的、为什么、该跑什么"（--explain-stale 的入口）
 
@@ -80,7 +81,8 @@ import gates as GT
 import stagewatch as SW
 
 STAGES = ("style", "tts", "layout", "cues", "score", "sfx", "audio", "frames",
-          "mux", "qa", "stills", "accept", "explain", "all")
+          "mux", "qa", "beats", "stills", "review", "editlist", "jianying",
+          "accept", "explain", "all")
 
 # _render_range 每帧都要主题：按 script 对象缓存一次，避免每帧重新解析（几百毫秒的浪费）
 _THEME_CACHE = {}
@@ -699,6 +701,18 @@ def st_layout(script, work, lines=None):
             tl["storyboard"] = {"type_counts": sb["type_counts"]}
     # ---- 竖屏逐类停留：必须在 plan_scenes 之后（要读 scene_type）、落盘之前 ----
     tl = _apply_type_hold(tl, script, plan)
+    # ---- 每镜固定验收帧：时间轴定稿的**最后一刻**算，写进 timeline.review ----
+    # 为什么放在这里（hold 之后）：段长被逐类停留改过，帧号必须按最终时长算；
+    # 放前面会让 chart 段这类被加过停留的段抽出"已经把话说完了"的尾部帧。
+    # 为什么写进 timeline 而不是另立文件：评审包、回归、人工复核要读的是**同一份**
+    # 帧号，"这次抽哪帧"不能有第二个来源。
+    try:
+        import reviewkit as RK
+        tl["review"] = RK.review_marks(tl)
+        print("   验收帧: 每段 enter/settle 共 %d 张（timeline.review）"
+              % tl["review"]["expect_frames"])
+    except Exception as e:                              # noqa: BLE001
+        print("   [WARN] 验收帧没算出来（阶段仍继续，--stage review 会因此报错）：%s" % e)
     json.dump(tl, open(os.path.join(work, "timeline.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     n_srt = K.write_srt(tl["scenes"], os.path.join(work, "sub.srt"))
@@ -857,8 +871,83 @@ def _apply_type_hold(tl, script, plan):
     return tl
 
 
-# ---------------------------------------------------------------- 提示点
-def st_cues(script, work, tl, engine="pil"):
+# ---------------------------------------------------------------- 节拍网格
+def _music_path(script, work):
+    """卡点分析对象：优先 film.json 指定的外部 BGM，其次 score 现场合成的 work/music.wav。
+
+    为什么允许后者：本技能的配乐是参数化现场编排的，很多片子根本没有"源文件"——
+    它由 --stage score 生成。只认 audio.music.file 会让卡点功能对自家配乐完全失效。
+    """
+    audio = script.get("audio") or {}
+    music = audio.get("music") or {}
+    cand = [music.get("file"), music.get("path"), audio.get("file"),
+            os.path.join(work, "music.wav")]
+    for c in cand:
+        if c and os.path.exists(str(c)):
+            return str(c)
+    return ""
+
+
+def _beat_payload(script, work, *, verbose=True):
+    """读/算 beat_data：有 work/beat_data.json 就读它，没有就用音乐现算并写盘。
+
+    单真源：cues 与 beats stage 都走这里，所以"什么算节拍网格"只有一处定义。
+    算不出来返回 ok=false 的占位（不抛异常），让下游报错说人话。
+    """
+    import beatgrid as BG
+    out = os.path.join(work, "beat_data.json")
+    if os.path.exists(out):
+        try:
+            with open(out, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and "beats" in data:
+                return data
+        except Exception:                                       # noqa: BLE001
+            pass
+    music = (script.get("audio") or {}).get("music") or {}
+    fps = int(script.get("fps") or 30)
+    path = _music_path(script, work)
+    if not path:
+        return dict(version=1, source="", sr=0, fps=fps, bpm=0.0, t0=0.0, T=0.0,
+                    residualMs=0.0, confidence=0.0, beats=[], bars=[], hits=[],
+                    rms=[], sections=[], ok=False,
+                    why="没有音乐文件（audio.music.file 与 work/music.wav 都不存在）")
+    hint = music.get("bpm")
+    try:
+        hint = float(hint) if hint else None
+    except (TypeError, ValueError):
+        hint = None
+    data = BG.analyze_file(path, fps=fps, bpm_hint=hint)
+    try:
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+    if verbose and not data.get("ok"):
+        print("   [WARN] 没测出节拍：%s" % data.get("why"))
+    return data
+
+
+def st_beats(script, work):
+    """音乐 -> work/beat_data.json（BPM / 网格 / 命中 / 能量段落）。
+
+    只有卡点片需要它。没有音乐文件时**不报错**：写一份 ok=false 的占位，
+    下游 beat:/bar: 锚点会因此报"先跑 --stage beats"，而不是静默错位。
+    """
+    print("== Beats")
+    data = _beat_payload(script, work)
+    if data.get("ok"):
+        beat0 = (data.get("beats") or [0])[0]
+        print("   %s BPM（T=%.4fs，首拍 %.3fs，残差 %.1fms，置信 %.2f，%d 拍 / %d 小节）"
+              % (data["bpm"], data["T"], beat0, data["residualMs"],
+                 data["confidence"], len(data["beats"]), len(data["bars"])))
+        if data["residualMs"] > 15.0:
+            print("   [WARN] 网格残差 %.1fms 偏大（>15ms）：可能不是等距节拍音乐，卡点会偏"
+                  % data["residualMs"])
+    return data
+
+
+# ---------------------------------------------------------------- 提示点def st_cues(script, work, tl, engine="pil"):
     """画面提示点 -> work/cues.json。
 
     三个来源按顺序合并（后写的覆盖同类型同时间的项不做去重，音效叠加是合理行为）：
@@ -867,7 +956,19 @@ def st_cues(script, work, tl, engine="pil"):
       3. web 引擎：页面的 window.getCues()（提示点跟着动画代码走，改动画不用改 JSON）
     """
     print("== Cues")
-    bus = K.CueBus(tl["scenes"], tl["total"])
+    # 节拍网格（可选）：只有卡点片才需要。走 _beat_payload 而不是直接读文件：
+    # --stage all 里 cues 排在 score 之前，那时 music.wav 还没生成；让 cues 自己触发
+    # 一次分析，卡点片才能一条命令跑完。写不出网格就传 None，用 beat:/bar: 锚点的
+    # 人会收到明确报错，而不是音效齐刷刷落在 0 秒。
+    beat_data = _beat_payload(script, work, verbose=False)
+    if beat_data.get("ok"):
+        print("   节拍网格: %s BPM（%d 拍，首拍 %.2fs，残差 %.1fms）"
+              % (beat_data.get("bpm"), len(beat_data.get("beats") or []),
+                 float((beat_data.get("beats") or [0])[0]),
+                 float(beat_data.get("residualMs") or 0)))
+    else:
+        beat_data = None
+    bus = K.CueBus(tl["scenes"], tl["total"], beat_data=beat_data)
     sfx_cfg = script.get("sfx") or {}
     skipped = []
 
@@ -1316,6 +1417,25 @@ def st_audio(tl, work, script):
                          # 这是"画面/素材电平再离谱也不许盖住旁白"的最后一道闸；0 = 关。
                          guard_snr_db=float(mus.get("guard_snr_db", 12.0)),
                          guard_cap_db=float(mus.get("guard_cap_db", 30.0)))
+    # ---- 输出音轨偏移补偿（默认 0 = 一个采样都不动，既有成片零变化）----
+    # AAC 编码器会在音轨头留 priming 帧，mux 出的 mp4 里音频相对视频墙钟有一个
+    # 系统性偏移；不补这一项，"音画同步"门禁会稳定地偏向同一侧，然后被误判成
+    # cues 打错。补偿量由探针实测（tools/audio_offset.py）给出，写进 film.json。
+    # 语义：**正值 = 音频听起来晚了，把它整体提前**（人耳口径，与探针输出一致）。
+    _off_s = 0.0
+    try:
+        import reviewkit as RK
+        _off_s = float(RK.offset_seconds_from_script(script, tl.get("fps")))
+        if _off_s:
+            _n = RK.offset_samples(_off_s, K.SR)
+            samples = RK.shift_signal(samples, -_n)
+            print("   音轨偏移: 提前 %.0f ms（%d 采样点，抵消 AAC 编码延迟）"
+                  % (_off_s * 1000.0, _n))
+        else:
+            print("   音轨偏移: 不补偿（film.json 没写 mux.audio_offset_ms；"
+                  "怀疑音画不同步先跑 tools/audio_offset.py 实测）")
+    except Exception as e:                              # noqa: BLE001
+        print("   [WARN] 音轨偏移没生效（按 0 处理）：%s" % e)
     out = os.path.join(work, "audio.wav")
     peak = K.wav_write(out, samples)
     print("   audio.wav %.2fs  峰值 %.3f  声道 %d" % (K.wav_dur(out), peak, 2))
@@ -1430,9 +1550,13 @@ def _render_range(tl, mod, script, f0, f1, out_path, crf, preset, progress=True)
         if id(script) != _THEME_CACHE.get("k"):
             _THEME_CACHE.update(k=id(script), th=th)
         _hold = script.get("sub_max_hold")
-        frame = K.draw_subtitle(frame, K.sub_at(scenes, t, _hold), theme=th,
-                                words=K.sub_words_at(scenes, t, _hold),
-                                **_sub_kw(script))
+        # _no_subs：剪映导出要"干净画面"（烧进画面的字幕在剪辑软件里抠不掉）。
+        # 用 script 上的内部标记而不是加参数：这条链上 _render_range 有 5 个调用方
+        # （分块/续渲/单帧快照/QA 参考帧），加参数要改一圈；标记只改一处。
+        if not script.get("_no_subs"):
+            frame = K.draw_subtitle(frame, K.sub_at(scenes, t, _hold), theme=th,
+                                    words=K.sub_words_at(scenes, t, _hold),
+                                    **_sub_kw(script))
         fade = 1.0
         if t < 0.5:
             fade *= K.ease_out(t / 0.5)
@@ -2186,9 +2310,12 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
                 fr = scenes_mod.draw_frame(s, sec - s["start"], s["dur"], sec, ref_script,
                                            int(round(sec * tl["fps"])))
                 _hold = ref_script.get("sub_max_hold")
-                fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, _hold), theme=th,
-                                     words=K.sub_words_at(tl["scenes"], sec, _hold),
-                                     **_sub_kw(ref_script))
+                # 与 _render_range 同一判据：plate 模式下参考帧也不能画字幕，
+                # 否则锐度比是拿「有字幕的参考帧」比「无字幕的成片」，会被字幕边缘拉偏。
+                if not ref_script.get("_no_subs"):
+                    fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], sec, _hold), theme=th,
+                                         words=K.sub_words_at(tl["scenes"], sec, _hold),
+                                         **_sub_kw(ref_script))
                 refs.append((k, fr))
             except Exception as e:      # noqa: BLE001
                 print("   [WARN] 参考帧渲染失败:", e)
@@ -2262,6 +2389,7 @@ def st_qa(film, tl, work, scenes_mod=None, script=None, vmaf_mode=""):
         # 全片 VMAF/SSIM 放在最后跑：它最贵（约 1.2× 实时），前面有 fail 时可省下这十分钟。
 
         _qa_text_layout_gate(lg, tl, work, scenes_mod, script)
+        _qa_beat_gate(lg, tl, work, script)
         _qa_vmaf_gate(lg, film, tl, work, scenes_mod, script, mode=vmaf_mode)
         # ASR 回读最便宜（模板片 6 s），放最后跑：前面已经 fail 的片没必要再花这 6 秒。
         _qa_asr_gate(lg, film, work, script, tl, cfg=((script or {}).get("qa") or {}))
@@ -2294,6 +2422,284 @@ def _qa_deep(film, work, tl, script):
 
 
 # ---------------------------------------------------------------- 母版预览
+def st_review(tl, work, script, out_mp4, report_path=""):
+    """独立终检评审包：--stage review -> work/review/（PACKET.md / packet.json / 帧 / 联系表）。
+
+    为什么从**成片**抽帧而不是重渲：重渲出来的是"引擎还能画成这样"，评审要看的是
+    "交付出去的那一版长什么样"。两者在缩放（lanczos）、编码、混合音频上都可能不同。
+    所以只有在成片缺失时才降级，并在包里明确标 frameSource=render（或直接拒绝）。
+
+    产物：
+      work/review/frames/<段号>_<enter|settle>.png   逐镜两张
+      work/review/_sheet.png                          联系表（每行一段，左 enter 右 settle）
+      work/review/packet.json                         机器可读清单（含指纹、门禁摘要）
+      work/review/PACKET.md                           评审者入口（清单 + 输出格式）
+    """
+    print("== Review packet")
+    import reviewkit as RK
+    import reviewpacket as RP
+    fps = int(tl.get("fps") or 30)
+    if not os.path.exists(out_mp4):
+        raise SystemExit("[review] 没有成片 %s：评审包必须对着**交付的那一版**生成。\n"
+                         "  先跑 --stage mux --out %s（review 读的就是同一个 --out）。"
+                         % (out_mp4, out_mp4))
+    marks = ((tl.get("review") or {}).get("marks") if isinstance(tl.get("review"), dict) else None)
+    if not marks:
+        marks = RK.review_marks(tl)["marks"]
+        print("   [note] timeline 里没有 review 块（旧时间轴），本次按 scenes 现算；"
+              "重跑 --stage layout 会把它写进 timeline.json")
+
+    outdir = os.path.join(work, "review")
+    fdir = os.path.join(outdir, "frames")
+    os.makedirs(fdir, exist_ok=True)
+    made, missing = [], []
+    for i, m in enumerate(marks):
+        sid = str(m.get("id") or ("s%02d" % i))
+        sid_safe = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in sid)
+        for kind in ("enter", "settle"):
+            sec = float(m.get(kind + "_s") if m.get(kind + "_s") is not None
+                        else (m.get(kind, 0) / float(fps)))
+            p = os.path.join(fdir, "%02d_%s_%s_%05.2fs.png" % (i, sid_safe, kind, sec))
+            if os.path.exists(p):
+                made.append(p)
+                continue
+            # -ss 放在 -i 之前 = 快速定位（关键帧 + 解码到目标帧），比解码全片快得多。
+            # -frames:v 1 只要一帧；-y 覆盖旧图（帧号变了要重出）。
+            cmd = [K.FFMPEG, "-y", "-v", "error", "-ss", "%.4f" % sec, "-i", str(out_mp4),
+                   "-frames:v", "1", p]
+            try:
+                r = subprocess.run(cmd, capture_output=True)
+            except Exception as e:                          # noqa: BLE001
+                missing.append("%s %s: %s" % (sid, kind, e))
+                continue
+            if r.returncode != 0 or not os.path.exists(p):
+                err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                missing.append("%s %s: %s" % (sid, kind, (err[-1] if err else "ffmpeg 失败")))
+                continue
+            made.append(p)
+    total_want = len(marks) * 2
+    print("   逐镜验收帧: %d/%d 张 -> %s" % (len(made), total_want, fdir))
+    if missing:
+        print("   [WARN] 这些帧没抽出来（评审包里会少证据）：")
+        for x in missing[:6]:
+            print("      -", x)
+
+    sheet = None
+    if made:
+        cols = 2 if len(made) <= 8 else 4
+        sheet = K.contact_sheet(made, os.path.join(outdir, "_sheet.png"),
+                                cols=cols, thumb_w=420)
+        print("   联系表:", sheet)
+
+    # ---- 门禁摘要：从 work/gates.json 读，而不是让评审去猜 ----
+    gsum = {}
+    gj = os.path.join(work, "gates.json")
+    try:
+        gjd = json.load(open(gj, encoding="utf-8")) if os.path.exists(gj) else {}
+    except Exception as e:                                  # noqa: BLE001
+        gjd = {}
+        print("   [WARN] gates.json 读不了（门禁摘要会缺）：%s" % e)
+    items = [x for x in (gjd.get("items") or []) if isinstance(x, dict)]
+    if items:
+        cnt = {"pass": 0, "fail": 0, "skipped": 0}
+        for x in items:
+            st = str(x.get("status") or "")
+            if st in cnt:
+                cnt[st] += 1
+        gsum = {"pass": cnt["pass"], "fail": cnt["fail"], "skipped": cnt["skipped"],
+                "failItems": ["%s %s" % (x.get("id"), x.get("detail") or "")
+                              for x in items if x.get("status") == "fail"],
+                "skipItems": ["%s %s" % (x.get("id"), x.get("detail") or "")
+                              for x in items if x.get("status") == "skipped"]}
+    else:
+        print("   [note] 没有 gates.json：评审包里的门禁摘要会缺（先跑 --stage qa）")
+
+    # 报告路径由调用方用 _report_path() 算好传进来：那个函数是**唯一**的落点来源，
+    # 这里再拼一次就让"报告落在 --out 旁边"这条承诺有两个实现（selfcheck 第 40 条盯着）。
+    rep = report_path or ""
+    manifest = RP.packet_manifest(
+        title=str(script.get("title") or ""),
+        content_hash=(_LEDGER.content_hash if _LEDGER is not None else ""),
+        duration_s=float(tl.get("total") or 0.0),
+        fps=fps, frames=int(tl.get("frames") or 0),
+        frame_source="mp4", marks=marks, gates_summary=gsum,
+        artifacts=[os.path.relpath(x, outdir) if os.path.isabs(x) else x for x in made][:40],
+        generated_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    pj = os.path.join(outdir, "packet.json")
+    with open(pj, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=1)
+    md = os.path.join(outdir, "PACKET.md")
+    with open(md, "w", encoding="utf-8") as fh:
+        fh.write(RP.packet_markdown(
+            manifest,
+            report_path=(os.path.relpath(rep, outdir) if os.path.exists(rep) else ""),
+            sheet_path=(os.path.relpath(sheet, outdir) if sheet else ""),
+            frames_dir="frames"))
+    print("   评审包:", md)
+    print("   清单  :", pj)
+    # 这里不能用 ✓/✗：Windows 控制台代码页是 GBK，print 会 UnicodeEncodeError 直接把
+    # 整个 stage 打崩（帧和清单都写好了，退出码却是异常）。终端输出只用 ASCII 安全字符。
+    print("   下一步: 派一个**干净上下文**的 subagent，只给它 %s 与上面的清单；"
+          "要求逐条给 通过/不通过/无法验证 + 帧号证据。" % outdir)
+
+    # ---- 记账：R1 = 评审包是否完整生成（缺帧就是 fail，不是 warning）----
+    lg = _gate()
+    if lg is not None:
+        if not made:
+            lg.fail("R1", "独立终检评审包", "0 张逐镜帧抽出来（成片可能损坏或不是视频）")
+        elif len(made) < total_want:
+            lg.fail("R1", "独立终检评审包",
+                    "%d/%d 张（缺 %d 张，评审会缺证据）" % (len(made), total_want,
+                                                          total_want - len(made)))
+        else:
+            lg.ok("R1", "独立终检评审包",
+                  "%d 段 x2 帧 + 清单 + 门禁摘要已产出（**要人/评审 agent 看过才算过**）"
+                  % len(marks))
+    return md
+
+
+def _qa_beat_gate(lg, tl, work, script):
+    """G14 节拍网格：卡点片的 BPM 稳定度与 cue 落点是否真的贴在拍上。
+
+    为什么单独一条：卡点错位不会让画面糊、也不会让响度不对——它只是"看着不对"，
+    任何既有门禁都量不到。而它恰恰是卡点片最容易翻车的点：BGM 换了、剪辑重排了、
+    bpm 手改过，beat_data.json 还是上一版，音效就整片偏半拍。
+
+    三档口径：
+      * 没有音乐 / 没有卡点锚点  -> skipped（不假装通过）
+      * 网格算不出来(ok=false)   -> fail（有音乐却定不了拍，卡点片不可能对）
+      * 网格有、但残差 > 30ms    -> fail（"等距"不成立，卡点必然漂）
+      * 网格有、cue 有 beat 锚点 -> 复算每个 cue 与最近拍的距离，> 1 帧记问题
+    """
+    has_music = bool((_music_path(script or {}, work)))
+    data = None
+    bp = os.path.join(work, "beat_data.json")
+    if os.path.exists(bp):
+        try:
+            with open(bp, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:                                       # noqa: BLE001
+            data = None
+    if not has_music and not (data or {}).get("beats"):
+        lg.skip("G14", "节拍网格（卡点片 BPM/落点）", "没有音乐、也没有节拍网格：非卡点片")
+        return
+    if not data:
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "有音乐但 work/beat_data.json 不存在（先跑 --stage beats）")
+        return
+    if not data.get("ok"):
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "没测出等距节拍：%s" % (data.get("why") or "未知"))
+        return
+    fps = float(tl.get("fps") or 30)
+    resid = float(data.get("residualMs") or 0.0)
+    if resid > 30.0:
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "网格残差 %.1fms > 30ms（等距不成立，卡点会漂）" % resid)
+        return
+    # cue 落点复算：只有写了 beat:/bar: 锚点的才需要对账
+    cues_p = os.path.join(work, "cues.json")
+    bad, offgrid, nbeat = [], [], 0
+    if os.path.exists(cues_p):
+        try:
+            with open(cues_p, encoding="utf-8") as fh:
+                cj = json.load(fh)
+            beats = [float(b) for b in (data.get("beats") or [])]
+            for c in cj.get("cues") or []:
+                at = str(c.get("at") or "")
+                if not (at.startswith("beat:") or at.startswith("bar:")):
+                    continue
+                nbeat += 1
+                t = float(c.get("t") or 0.0)
+                if not beats:
+                    continue
+                if at.startswith("bar:"):
+                    T = float(data.get("T") or 0.0)
+                    t0 = float(data.get("t0") or 0.0)
+                    if T <= 0:
+                        continue
+                    # 小节锚点带偏移时，偏差就是它自己声明的偏移量
+                    num = at[4:].split("+")[0].split("-")[0]
+                    try:
+                        base = t0 + float(num) * 4.0 * T
+                    except ValueError:
+                        bad.append(at)
+                        continue
+                    if abs(t - base) > 8.0:
+                        bad.append(at)
+                    continue
+                nearest = min(beats, key=lambda b: abs(b - t))
+                if abs(nearest - t) > 1.0 / fps:
+                    offgrid.append("%s 偏 %.0fms" % (at, (t - nearest) * 1000))
+        except Exception as e:                                  # noqa: BLE001
+            bad.append("cues.json 读不了：%s" % e)
+    if bad:
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "%d 条节拍锚点落不到网格上：%s" % (len(bad), "、".join(bad[:4])))
+        return
+    if offgrid:
+        lg.fail("G14", "节拍网格（卡点片 BPM/落点）",
+                "%d 条 cue 离最近拍超过 1 帧：%s" % (len(offgrid), "、".join(offgrid[:4])))
+        return
+    lg.ok("G14", "节拍网格（卡点片 BPM/落点）",
+          "%.2f BPM，%d 拍，残差 %.1fms；%d 条节拍 cue 全部在 1 帧内"
+          % (float(data.get("bpm") or 0), len(data.get("beats") or []), resid, nbeat))
+
+def st_editlist(script, work, out_mp4=""):
+    """剪辑交接清单 -> work/editlist.json + work/EDITLIST.md。
+
+    只读 timeline/cues，不重渲。给要进剪辑软件再改一轮的人用：照表一刀刀剪，
+    顺序与成片逐帧一致；对不上是表错了而不是成片错了（所以它也进交付证据）。
+    """
+    print("== Editlist")
+    import editlist as EL
+    jp, mp = EL.write(work, out_mp4=out_mp4,
+                      title=str((script or {}).get("title") or ""))
+    try:
+        with open(jp, encoding="utf-8") as fh:
+            n = len(json.load(fh).get("shots") or [])
+    except Exception:                                      # noqa: BLE001
+        n = 0
+    print("   镜头 %d 个 -> %s" % (n, mp))
+    return jp
+
+
+def st_jianying(work, plate="", outdir=""):
+    """剪映草稿导出（依赖可选；缺依赖降级为 draft_plan.json，并明确说明）。
+
+    不收 script：草稿内容全由 timeline + design.json 的字号决定，剧本不参与；
+    收一个用不到的参数会让调用方以为改剧本能影响草稿。
+    """
+    print("== JianYing")
+    import jianying as JY
+    tl_p = os.path.join(work, "timeline.json")
+    with open(tl_p, encoding="utf-8") as fh:
+        tl = json.load(fh)
+    size = 46
+    dp = os.path.join(work, "design.json")
+    try:
+        with open(dp, encoding="utf-8") as fh:
+            size = int((((json.load(fh).get("visual") or {}).get("subtitle") or {})
+                        .get("size")) or 46)
+    except Exception:                                      # noqa: BLE001
+        pass
+    vq = tl.get("video") or {}
+    canvas = (int(vq.get("out_w") or 1920), int(vq.get("out_h") or 1080))
+    plan = JY.build_plan(tl, plate_path=plate, subtitle_size=size,
+                         canvas=canvas, fps=int(tl.get("fps") or 30))
+    target = outdir or os.path.join(work, "jianying")
+    pj = JY.write_plan(plan, target)
+    ok, msg = JY.export_draft(plan, target)
+    print("   计划 %s（字幕 %d 条，%dpx -> %.4f 画布高）"
+          % (pj, len(plan["texts"]), size, plan["subtitle_size_ratio"]))
+    if ok:
+        print("   剪映草稿:", msg)
+    else:
+        print("   [降级] 没写草稿：%s" % msg)
+        print("          中间产物照出（draft_plan.json），装上依赖重跑即可：pip install pyJianYingDraft")
+    return pj
+
 def st_stills(tl, work, scenes_mod, script, specs=None):
     """只渲染若干关键帧 -> out/stills/*.png + 联系表。母版阶段必跑。
 
@@ -2329,10 +2735,11 @@ def st_stills(tl, work, scenes_mod, script, specs=None):
             raise RuntimeError("场景 %s 在 t=%.2fs 返回 %dx%d，期望 %dx%d（stills 与 FrameSink 一样严格）"
                                % (sid, tg, fr.size[0], fr.size[1], K.W, K.H))
         _hold = script.get("sub_max_hold")
-        fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, _hold),
-                             theme=_theme_for(script),
-                             words=K.sub_words_at(tl["scenes"], tg, _hold),
-                             **_sub_kw(script))
+        if not script.get("_no_subs"):
+            fr = K.draw_subtitle(fr, K.sub_at(tl["scenes"], tg, _hold),
+                                 theme=_theme_for(script),
+                                 words=K.sub_words_at(tl["scenes"], tg, _hold),
+                                 **_sub_kw(script))
         p = os.path.join(outdir, "%s_%05.1f.png" % (sid, float(lt)))
         fr.save(p)
         made.append(p)
@@ -2398,7 +2805,7 @@ def _report_path(a):
 # 会写交付账本（work/gates.json + QC-REPORT.md）的阶段。中间产物阶段
 # （tts/layout/cues/score/sfx/audio）只做自己的事，不去覆盖上一轮完整跑出来的
 # 交付报告——否则 `--stage layout` 一次就会把「全片通过」的报告改写成「未判定」。
-_PERSIST_STAGES = ("style", "frames", "mux", "qa", "stills", "all", "accept")
+_PERSIST_STAGES = ("style", "frames", "mux", "qa", "stills", "review", "all", "accept")
 
 
 def _finish_gates(a, persist=True):
@@ -2761,6 +3168,10 @@ def main():
     ap.add_argument("--engine", default="", choices=("", "pil", "web"),
                     help="渲染引擎：pil=逐帧 Pillow（默认）；web=无头浏览器（需 webengine.py + 页面）")
     ap.add_argument("--jobs", type=int, default=1, help="分块并行渲染进程数（frames 阶段）")
+    ap.add_argument("--plate", default="",
+                    help="干净画面 mp4（无字幕无音效）；--stage jianying 用它当素材盘")
+    ap.add_argument("--no-subs", action="store_true",
+                    help="不烧字幕（出干净画面 plate，给 --stage jianying 用）；字幕仍写进 sub.srt/sub.ass")
     ap.add_argument("--layout", default="", choices=("", "landscape", "portrait"),
                     help="画布布局：landscape=1920x1080（默认）；portrait=1080x1920（**实验性**，"
                          "版式骨架与 compare/process/chart 的构图内部都已竖屏原生，"
@@ -2850,6 +3261,11 @@ def main():
         raise SystemExit("engine 只能是 pil 或 web，收到 %r" % engine)
     script["_engine"] = engine
     script["_scenes"] = _resolve_scenes(a.scenes, a.script)
+    if a.no_subs:
+        # 干净画面：帧上不烧字幕。字幕文件照写（--stage layout 已产出 sub.srt/sub.ass），
+        # 所以这一版成片仍然"有字幕但不烧进画面"——它正是剪映要的 plate。
+        script["_no_subs"] = True
+        print("[no-subs] 本次不烧字幕：产出的是干净画面（给 --stage jianying 当 plate）")
 
     # ---- 门禁账本 ----
     global _LEDGER
@@ -2882,8 +3298,11 @@ def main():
 
     # 本次命令行**计划要跑**的 stage 集合：--stage all 展开成 10 个，单 stage 就是它自己。
     # 用途见 stagewatch.check 的 pending：本阶段马上要用新输入重算，那种"输入变了"不是过时。
-    _ALL_ORDER = ("style", "tts", "layout", "cues", "score", "sfx", "audio",
-                  "frames", "mux", "qa")
+    # --stage all 的真实顺序（与下面 dispatch 的先后一致）：beats 必须排在 cues 前
+    # （cue 的 beat: 锚点要靠网格解析），editlist 排在 qa 后（要读 cues.json 的音效落点）。
+    # jianying 不在里面：它是出口（要 --no-subs 的干净画面），不是出片必经。
+    _ALL_ORDER = ("style", "tts", "layout", "beats", "cues", "score", "sfx", "audio",
+                  "frames", "mux", "qa", "editlist")
 
     def _planned(stage_name):
         if stage_name == "all":
@@ -3238,6 +3657,10 @@ def main():
         _need(os.path.exists(tts_p), "没有 tts.json，先跑 --stage tts")
         tl = st_layout(script, a.work)
         _stage_end("layout", _t0)
+    if stage in ("all", "beats"):
+        _t0 = _stage_begin("beats")
+        st_beats(script, a.work)
+        _stage_end("beats", _t0)
     if stage in ("all", "cues"):
         tl = tl if stage == "all" else ensure_tl()
         _t0 = _stage_begin("cues")
@@ -3297,6 +3720,35 @@ def main():
         # 0 张静帧 = fail 门禁：无条件 return 0 的话，`--stills 写错 id` 会
         # "全部跳过 + 退出码 0"，CI 看不出根本没出图。
         rc = _finish_gates(a)
+        return 1 if (rc or _LEDGER.fails()) else 0
+
+    if stage == "review":
+        # 独立终检包：只读成片 + timeline + 门禁账本，不重渲、不改任何既有产物。
+        # 不并进 --stage all：评审包是"交付前的一次独立动作"，跑在 all 里会让
+        # 它变成流程的一部分（那就不独立了），而且多数单 stage 复跑用不到帧图。
+        _t0 = _stage_begin("review")
+        md = st_review(ensure_tl(), a.work, script, a.out, report_path=_report_path(a))
+        _stage_end("review", _t0)
+        rc = _finish_gates(a)
+        return 1 if (rc or _LEDGER.fails()) else 0
+
+    if stage == "jianying":
+        # 剪映导出**刻意不进 --stage all**：它要一份「干净画面」plate（--no-subs 出来的），
+        # 而 all 出的是带字幕的成片。把它塞进 all 只会每次都降级、还容易让人以为
+        # "跑完 all 就有草稿了"。它是出口，不是出片必经环节。
+        ensure_tl()
+        _t0 = _stage_begin("jianying")
+        st_jianying(a.work, plate=a.plate)
+        _stage_end("jianying", _t0)
+        rc = _finish_gates(a, persist=False)
+        return 1 if (rc or _LEDGER.fails()) else 0
+
+    if stage == "editlist":
+        ensure_tl()
+        _t0 = _stage_begin("editlist")
+        st_editlist(script, a.work, out_mp4=a.out)
+        _stage_end("editlist", _t0)
+        rc = _finish_gates(a, persist=False)
         return 1 if (rc or _LEDGER.fails()) else 0
 
     if stage == "qa":
@@ -3367,6 +3819,12 @@ def main():
                 if errs or rc:
                     print("\n[质检未过] 成片已生成但没有通过门禁，按上面 [FAIL] 逐条修。")
                     return 1
+                # editlist 排在 qa 之后：它要把 cues.json 的音效落点一起写进表，
+                # 放到 cues 之前会得到一份「音效列全是 —」的错表（实测过）。
+                # 它只读产物、不改任何东西，所以不影响上面的门禁结论。
+                _t0 = _stage_begin("editlist")
+                st_editlist(script, a.work, out_mp4=a.out)
+                _stage_end("editlist", _t0)
                 return 0
     # 所有 stage 统一收尾：落 gates.json + QC-REPORT.md，并按门禁结果给退出码。
     # 只有 style/frames/mux/qa 这几条分支自己调 _finish_gates 时，其余

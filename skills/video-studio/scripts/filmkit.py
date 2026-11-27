@@ -983,7 +983,7 @@ CUE_BASE_DB = {
 }
 
 
-def cue_time(at, scenes=None, total=None):
+def cue_time(at, scenes=None, total=None, beat_data=None):
     """把提示点的 at 解析成成片绝对秒。
 
     支持四种写法（CONTRACT.md §4.1）：
@@ -1005,6 +1005,45 @@ def cue_time(at, scenes=None, total=None):
         return round(float(s), 3)
     except ValueError:
         pass
+    # 节拍锚点（BGM 卡点片专用）：beat:12 / beat:12+0.05 / beat:-1（最后一拍）
+    # 与 bar:3 / bar:3.5（小节，可小数）。网格来自 work/beat_data.json。
+    # 为什么值得单开一种锚点：卡点片上"第 12 拍"才是人说话的语汇，写成 abs:6.05
+    # 在换 BPM 或重排轴之后全错，而且没人看得出它原本是哪一拍。
+    if s.startswith("beat:") or s.startswith("bar:"):
+        if not beat_data:
+            raise ValueError(
+                "cue at=%r：需要节拍网格，但 work/beat_data.json 不存在"
+                "（先跑 --stage beats，或改用 abs:秒）" % at)
+        head, _sep, tail = s.partition(":")
+        off = 0.0
+        m = re.match(r"^\s*(-?[0-9]+(?:\.[0-9]+)?)\s*([+-][0-9.]*)?\s*$", tail)
+        if not m:
+            raise ValueError("cue at=%r：%s 后面要跟数字（如 %s:12 或 %s:3.5+0.1）"
+                             % (at, head, head, head))
+        try:
+            idx = float(m.group(1))
+        except ValueError:
+            raise ValueError("cue at=%r：%s 的序号不是数字" % (at, head)) from None
+        if m.group(2):
+            try:
+                off = float(m.group(2))
+            except ValueError:
+                off = 0.0
+        beats = beat_data.get("beats") or []
+        if not beats:
+            raise ValueError("cue at=%r：节拍网格是空的（--stage beats 没测出拍）" % at)
+        if head == "bar":
+            if not beat_data.get("T"):
+                raise ValueError("cue at=%r：beat_data 缺 T，无法按小节定位" % at)
+            base = float(beat_data.get("t0") or 0.0) + float(idx) * 4.0 * float(beat_data["T"])
+            return round(base + off, 3)
+        i = int(idx)
+        neg = i < 0
+        i = i + len(beats) if neg else i
+        if i < 0 or i >= len(beats):
+            raise ValueError("cue at=%r：只有 %d 拍（%s:%s 越界）"
+                             % (at, len(beats), head, m.group(1)))
+        return round(float(beats[i]) + off, 3)
     # 词锚点：<id>:w<N>[+/-<offset>]
     if ":w" in s:
         head, _sep, tail = s.partition(":w")
@@ -1074,18 +1113,26 @@ class CueBus:
     浏览器引擎则由页面 window.getCues() 导出同 schema 的 JSON（CONTRACT.md §4.2）。
     """
 
-    def __init__(self, scenes=None, total=None):
+    def __init__(self, scenes=None, total=None, beat_data=None):
         self.scenes = scenes or []
         self.total = None if total is None else float(total)
+        # 节拍网格：给了才支持 beat:/bar: 锚点；不给时写这两种锚点会明确报错
+        # （不静默退化成 0 秒——那样音效会齐刷刷堆在片头，还很难看出原因）。
+        self.beat_data = beat_data or None
         self.items = []
         self._drop_warned = set()   # 已告警过的丢弃项：同一实例只报一次（见 resolved）
 
     # -- 登记 --
     def add(self, at, type, **params):
-        t = cue_time(at, self.scenes, self.total)
+        t = cue_time(at, self.scenes, self.total, beat_data=self.beat_data)
         kind = CUE_ALIASES.get(str(type), str(type))
         row = dict(params)
+        # at 落盘：它是这条 cue 的**声明锚点**（beat:12 / l03:w2 / abs:6.4）。
+        # G14 靠它区分"卡点锚点"与"旁白对齐锚点"——前者必须贴网格，后者本来就不该贴。
+        # 丢了 at 就只能拿 t 反推，而反推不出意图（同一个 t 可能是 beat:12，也可能是 abs:6.05）。
         row.update(t=round(t, 3), type=kind)
+        if "at" not in row:
+            row["at"] = str(at)
         if "src" not in row:
             row["src"] = "pil"
         self.items.append(row)

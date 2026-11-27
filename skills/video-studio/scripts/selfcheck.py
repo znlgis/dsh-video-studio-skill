@@ -97,6 +97,7 @@ import hashlib
 import json
 import pathlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -4105,6 +4106,358 @@ def t_safe_clamp_landscape():
     return "横屏越界钳位生效（SAFE 内像素不动）"
 
 
+def t_review_and_offset():
+    """验收帧与音轨偏移（reviewkit / reviewpacket / tools/audio_offset）。
+
+    这两块都是"交付凭据"的地基，坏掉的时候不会报错、只会悄悄给出错的帧号和错的
+    偏移方向——所以必须钉住：帧号单调、夹在段内、极短段不崩；清单组数与条目数不许
+    缩水（删条目就是删验收）；偏移解析三种写法都认、坏值必须报错；信号平移长度不变。
+    """
+    import re
+    import reviewkit as RK
+    import reviewpacket as RP
+
+    # ---- 1) 验收帧：正常段 / 极短段 / 0 长段 ----
+    m = RK.review_frames_for_scene(0.0, 3.0, 30, 0)
+    assert 0 < m["enter"] < m["settle"] < 90, m
+    assert m == RK.review_frames_for_scene(0.0, 3.0, 30, 0), "同样的输入必须给同样的帧号"
+
+    tiny = RK.review_frames_for_scene(1.0, 1.05, 30, 1)      # 1.5 帧的段
+    assert tiny["enter"] <= tiny["settle"] <= 31, tiny
+    zero = RK.review_frames_for_scene(2.0, 2.0, 30, 2)       # 0 长段不许崩
+    assert zero["enter"] <= zero["settle"], zero
+
+    tl = {"fps": 25, "scenes": [{"id": "a", "start": 0.0, "end": 2.0},
+                                {"id": "b", "start": 2.0, "end": 5.5}]}
+    marks = RK.review_marks(tl)
+    assert marks["expect_frames"] == 4 and len(marks["marks"]) == 2, marks
+    for rec in marks["marks"]:
+        assert 0 <= rec["enter"] <= rec["settle"], rec
+
+    # ---- 2) 评审包清单不许缩水 ----
+    assert RP.group_ids() == ["P", "B", "V", "S", "D", "A", "Q"], RP.group_ids()
+    assert RP.item_count() >= 22, "检查项被删到 %d 条：删条目等于删验收" % RP.item_count()
+    cl = RP.checklist_markdown()
+    for token in ("审查清单", "无法验证", "P1", "Q3"):
+        assert token in cl, "清单里缺 %r" % token
+
+    pk = RP.packet_manifest(title="t", content_hash="abc", duration_s=3.25, fps=30,
+                            frames=98, frame_source="mp4", marks=marks["marks"],
+                            gates_summary={"pass": 3, "fail": 0, "skipped": 1})
+    assert pk["shotCount"] == 2 and pk["reviewFrameCount"] == 4, pk
+    md = RP.packet_markdown(pk, report_path="out/QC-REPORT.md")
+    for token in ("独立终检包", "门禁现状", "输出格式", "无法验证"):
+        assert token in md, "评审包入口缺 %r" % token
+    assert "成片 mp4 抽帧" in md, "frameSource=mp4 时没说清帧来自成片"
+
+    # ---- 3) 音轨偏移：三种写法 + 坏值必须报错 ----
+    assert abs(RK.offset_seconds_from_script({"mux": {"audio_offset_ms": 42.0}}) - 0.042) < 1e-9
+    got = RK.offset_seconds_from_script({"mux": {"audio_offset_frames": 1.5}}, fps=30)
+    assert abs(got - 0.05) < 1e-9, got
+    got = RK.offset_seconds_from_script({"audio": {"out_offset_frames": -3}}, fps=30)
+    assert abs(got + 0.1) < 1e-9, got
+    assert RK.offset_seconds_from_script({}) == 0.0
+    for bad in ({"mux": {"audio_offset_ms": "abc"}},
+                {"mux": {"audio_offset_ms": 1, "audio_offset_frames": 1}}):
+        try:
+            RK.offset_seconds_from_script(bad)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("坏值 %r 没报错（会静默按 0 处理）" % (bad,))
+    assert RK.offset_samples(0.0427, 48000) == 2050
+
+    # ---- 4) 信号平移：长度不变、0 不复制、方向正确 ----
+    import numpy as np
+    x = np.arange(10, dtype=np.float32)
+    assert RK.shift_signal(x, 0) is x, "samples=0 时不该复制（大数组会白拷一份）"
+    late = RK.shift_signal(x, 3)
+    assert len(late) == len(x) and late[0] == 0 and late[3] == 0.0 and late[4] == 1.0, late
+    early = RK.shift_signal(x, -3)
+    assert len(early) == len(x) and early[0] == 3.0 and early[-1] == 0.0, early
+
+    # ---- 5) 偏移实测工具：符号与"测不出"都要守住 ----
+    # tools/ 在仓库根下（scripts/ 往上两级），selfcheck 只把自己目录加进了 sys.path，
+    # 所以这里显式补一次；补不到就 SKIP（装成插件但没带 tools/ 的场景不该判 FAIL）。
+    _tools = os.path.normpath(os.path.join(HERE, "..", "..", "tools"))
+    if not os.path.exists(os.path.join(_tools, "audio_offset.py")):
+        return "帧号/清单/偏移解析全过；tools/audio_offset.py 不在，实测工具未检查"
+    if _tools not in sys.path:
+        sys.path.insert(0, _tools)
+    import audio_offset as AO                               # noqa: PLC0415
+    assert re.search(r"正值", (AO.__doc__ or "")) or "正值" in (AO.__doc__ or ""), \
+        "audio_offset 没写清符号约定（正值 = 音频晚）"
+    for name in ("envelope", "measure", "decode_mono"):
+        assert callable(getattr(AO, name, None)), "audio_offset 缺 %s()" % name
+    env = AO.envelope(np.ones(48000, dtype=np.float32))
+    assert len(env) == 50, "4 秒 / 20ms 步长应得 50 个包络点，实际 %d" % len(env)
+    return "帧号单调且夹在段内；清单 7 组 %d 项；偏移三写法 + 坏值；平移不复制" % \
+        RP.item_count()
+
+
+def t_beat_motion_refscan():
+    """卡点/动效/参考片：节拍网格、beat 锚点、动效预设、refscan 工具。"""
+    import numpy as np
+
+    import beatgrid as BG
+
+    # --- 合成 click track：120 BPM，每 4 拍一个强拍（kick） ---
+    sr = 48000
+    T = 0.5
+    dur = 10.0
+    n = int(sr * dur)
+    x = np.zeros(n)
+    t = 0.0
+    k = 0
+    while t < dur - 0.1:
+        i = int(t * sr)
+        ln = int(0.02 * sr)
+        if i + ln < n:
+            tt = np.arange(ln) / sr
+            env = np.exp(-tt / 0.004)
+            f = 120.0 if k % 4 == 0 else 800.0
+            x[i:i + ln] += env * np.sin(2 * np.pi * f * tt)
+        t += T
+        k += 1
+    d = BG.analyze_samples(x, sr, fps=30)
+    assert d["ok"] is True, "合成 click track 应该测得出节拍：%r" % (d.get("why"),)
+    assert abs(d["bpm"] - 120.0) < 0.5, "BPM 偏差过大：%.3f" % d["bpm"]
+    assert d["residualMs"] < 15.0, "网格残差应 <15ms：%.2f" % d["residualMs"]
+    assert len(d["beats"]) >= 18, "10s@120BPM 应有 >=18 拍，实测 %d" % len(d["beats"])
+    # 确定性：纯函数，同输入必须同输出（否则帧号/锚点会漂）
+    d2 = BG.analyze_samples(x, sr, fps=30)
+    assert d2["beats"] == d["beats"] and d2["bpm"] == d["bpm"], "beatgrid 不确定"
+    # 静音必须明确判 ok=false，而不是硬凑一个 BPM
+    dz = BG.analyze_samples(np.zeros(sr * 6), sr, fps=30)
+    assert dz["ok"] is False and dz.get("why"), "静音应 ok=false 且给原因"
+
+    # --- beat:/bar: 锚点 ---
+    import filmkit as K
+    assert K.cue_time("beat:0", beat_data=d) == round(d["beats"][0], 3)
+    assert K.cue_time("beat:8", beat_data=d) == round(d["beats"][8], 3)
+    assert K.cue_time("beat:-1", beat_data=d) == round(d["beats"][-1], 3)
+    assert abs(K.cue_time("beat:2+0.1", beat_data=d) - round(d["beats"][2] + 0.1, 3)) < 1e-6
+    bar1 = round(float(d["t0"]) + 4.0 * float(d["T"]), 3)
+    assert abs(K.cue_time("bar:1", beat_data=d) - bar1) < 1e-6, "bar:1 应对齐 t0+4T"
+    for bad in ("beat:9999", "beat:x"):
+        try:
+            K.cue_time(bad, beat_data=d)
+            raise AssertionError("坏锚点 %r 应该报错" % bad)
+        except ValueError:
+            pass
+    try:
+        K.cue_time("beat:3")
+        raise AssertionError("没有节拍网格时 beat: 锚点应报错，不能静默落 0 秒")
+    except ValueError:
+        pass
+    # cues.json 必须落盘 at 原串（G14 靠它区分卡点锚点与旁白锚点）
+    bus = K.CueBus([dict(id="l01", start=0.0, end=10.0)], total=10.0, beat_data=d)
+    bus.add("beat:4", "impact")
+    rows = bus.resolved()
+    assert rows and rows[0].get("at") == "beat:4", "cue 行必须落盘 at 原串：%r" % (rows,)
+
+    # --- 动效预设：成套 + 确定 + 覆盖 ---
+    import designkit as DK
+    for energy in ("calm", "steady", "driving"):
+        for tone in DK._TONES:
+            m = DK.motion_for(energy, tone)
+            assert set(m) == {"ease", "enter", "push", "breathe_hz"}, "预设字段不全：%r" % (m,)
+            assert m["ease"] in DK.EASES, "ease 不在枚举里：%r" % (m["ease"],)
+            assert 0.0 <= m["enter"][0] < m["enter"][1] <= 1.0, "enter 必须递增且在 0-1"
+            assert m["breathe_hz"] > 0, "breathe_hz 必须为正"
+    # 同一 (energy,tone) 必须同结果；不同 energy 应有差别（口径要跟得上节奏）
+    assert DK.motion_for("calm", "light") == DK.motion_for("calm", "light")
+    assert (DK.motion_for("calm", "bright")["breathe_hz"]
+            != DK.motion_for("driving", "bright")["breathe_hz"]), "快慢片的呼吸频率应不同"
+    # 采样出的 design 必须仍然过校验（预设换了，schema 不能因此不接受）
+    ds = DK.sample_designs({"topic": "流程演示", "duration_target": 40}, n=2, seed=11)
+    for one in ds:
+        DK.validate_design(one)
+
+    # --- refscan 工具：能 import、能自己描述口径（不真跑 ffmpeg，CI 无素材） ---
+    root = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
+    rp = os.path.join(root, "tools", "refscan.py")
+    if not os.path.exists(rp):
+        return "SKIP: 没有 tools/refscan.py"
+    src = open(rp, encoding="utf-8").read()
+    for token in ("scene_cuts", "motion_score", "REVERSE.md", "手法", "取舍"):
+        assert token in src, "refscan.py 缺要素 %r" % token
+    return "节拍网格/锚点/动效预设/refscan：口径齐全"
+
+def t_cards_handoff():
+    """镜头卡 / 授权台账 / 剪辑清单 / 剪映换算：四条交接口径。"""
+    import numpy as np
+
+    import beatgrid as BG
+    import designkit as DK
+    import grammar as G
+    import shotcards as SC
+    import sfxkit as S
+
+    # --- 镜头卡：编号稳定 + 指向真实枚举 ---
+    ids = SC.ids()
+    assert len(ids) >= 8, "镜头卡至少 8 张，实测 %d" % len(ids)
+    assert len(ids) == len(set(ids)), "卡号重复：%r" % (ids,)
+    for c in SC.CARDS:
+        assert c["kind"] in G.SCENE_TYPES, "%s 构图 %r 不在 grammar.SCENE_TYPES" % (c["id"], c["kind"])
+        assert c["ease"] in DK.EASES, "%s 缓动 %r 不在 designkit.EASES" % (c["id"], c["ease"])
+        assert len(c["dur"]) == 3 and 0 < c["dur"][0] <= c["dur"][1] <= c["dur"][2], \
+            "%s 时长区间不合法：%r" % (c["id"], c["dur"])
+        for _t, name in c["sfx"]:
+            assert name in S.REGISTRY, "%s 音效 %r 不在 sfxkit.REGISTRY" % (c["id"], name)
+        assert c.get("avoid"), "%s 缺误用说明（判例式要求写清这么做过会怎样）" % c["id"]
+    # apply 只填没写过的键（不覆盖手写值）
+    tgt = {"type": "list", "text": "x"}
+    res = SC.apply("C06", tgt)
+    assert tgt["type"] == "list", "apply 覆盖了手写的 type"
+    # 卡里的时长是建议值，不能回写进 scene dict：min_dur 属于 design.pacing.*，
+    # 写成 lines[] 的键 filmcheck 会报未知字段（真踩过）。
+    assert "min_dur" not in tgt, "apply 把非 lines 字段写进了 scene：%r" % (tgt,)
+    assert res["advice"]["dur_suggest"] == SC.get("C06")["dur"][1], \
+        "建议时长应通过 advice 返回"
+    fresh = {}
+    res2 = SC.apply("C06", fresh)
+    assert fresh.get("type") == "statement" and res2["wrote"] == ["type"], \
+        "空 scene 应只补 type：%r / %r" % (fresh, res2)
+    assert SC.for_intent(["开场"])[0] == "C01", "意图检索应命中开场卡"
+    assert SC.get("C99") is None, "不存在的卡号应返回 None"
+
+    # --- 授权台账：认不出 = 不可交付；NC 不可商用 ---
+    root = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
+    al_p = os.path.join(root, "tools", "asset_license.py")
+    if not os.path.exists(al_p):
+        return "SKIP: 没有 tools/asset_license.py"
+    sys.path.insert(0, os.path.join(root, "tools"))
+    import asset_license as AL
+
+    assert AL.norm_license("cc-by-4.0") == "CC-BY-4.0", "授权名归一失败"
+    assert AL.norm_license(" CC0-1.0 ") == "CC0-1.0"
+    ok = {"path": "a.wav", "title": "t", "author": "a", "source": "https://x/",
+          "license": "CC-BY-4.0"}
+    errs, _warns = AL.check_entry(ok)
+    assert not errs, "合规条目不该报错：%r" % (errs,)
+    assert AL.needs_credit(ok) is True, "CC-BY 必须署名"
+    assert AL.needs_credit(dict(ok, license="CC0-1.0")) is False, "CC0 不需要署名"
+    assert AL.can_commercial(dict(ok, license="CC-BY-NC-4.0")) is False, "NC 不可商用"
+    # NC 却声明可商用 -> 必须报错
+    errs, _w = AL.check_entry(dict(ok, license="CC-BY-NC-4.0", commercial=True))
+    assert errs, "NC 授权声明 commercial=true 应报错"
+    # 不认识的授权 -> 报错（不默认放行）
+    errs, _w = AL.check_entry(dict(ok, license="weird-1.0"))
+    assert errs, "未知授权应报错"
+    # 缺作者 -> 报错
+    errs, _w = AL.check_entry({k: v for k, v in ok.items() if k != "author"})
+    assert errs, "缺 author 应报错"
+    empty = AL.check_film({"title": "x"})
+    assert empty["ok"] and not empty["entries"], "没有 assets.audio 应视为无外部素材且 pass"
+    # 相对 path 必须按 film.json 所在目录解析，不能按 cwd：
+    # 从仓库根跑工具是常态，按 cwd 会把每条素材都误报成「文件不存在」。
+    import tempfile as _tf
+    _d = _tf.mkdtemp()
+    os.makedirs(os.path.join(_d, "assets"), exist_ok=True)
+    _w = os.path.join(_d, "assets", "a.wav")
+    with open(_w, "wb") as _fh:
+        _fh.write(b"RIFF")
+    _rel = {"path": "assets/a.wav", "title": "t", "author": "a",
+            "source": "https://x/", "license": "CC0-1.0"}
+    _r = AL.check_film({"title": "片", "assets": {"audio": [_rel]}}, base_dir=_d)
+    assert _r["ok"] and not [w for w in _r["warnings"] if "不存在" in w], \
+        "相对 path 应按 film.json 目录解析：%r" % (_r["warnings"],)
+    _r2 = AL.check_film({"title": "片", "assets": {"audio": [_rel]}}, base_dir=os.path.join(_d, "nope"))
+    assert [w for w in _r2["warnings"] if "不存在" in w], "真缺文件时必须告警"
+
+    res = AL.check_film({"title": "片", "assets": {"audio": [ok]}})
+    assert res["ok"] and len(res["needs_credit"]) == 1
+    assert "素材署名" in AL.credits_text(res, {"title": "片"})
+
+    # --- 剪辑清单：时间与帧号自洽 ---
+    import editlist as EL
+    tl = {"fps": 30, "total": 4.0, "scenes": [
+        {"id": "l01", "start": 0.0, "end": 2.0, "dur": 2.0, "text": "甲"},
+        {"id": "l02", "start": 2.0, "end": 4.0, "dur": 2.0, "text": "乙"}]}
+    el = EL.build(tl, {"cues": [{"t": 1.0, "type": "impact", "at": "beat:2"}]})
+    assert len(el["shots"]) == 2
+    s0 = el["shots"][0]
+    assert s0["in_s"] == 0.0 and s0["out_s"] == 2.0 and s0["dur"] == 2.0
+    assert s0["in_frame"] == 0 and s0["out_frame"] == 60, "帧号换算不对：%r" % (s0,)
+    assert len(s0["cues"]) == 1 and s0["cues"][0]["local"] == 1.0, "cue 归属算错"
+    assert not el["shots"][1]["cues"], "第二段不该有 cue"
+    md = EL.markdown(el, "片")
+    assert "| # | id |" in md and "in 含、out 不含" in md
+
+    # --- 剪映换算：微秒整数 + 字号是画布高百分比 ---
+    import jianying as JY
+    assert JY.us(1.2345) == 1234500, "秒->微秒换算错"
+    assert JY.us(0.0) == 0
+    s, d = JY.us_range(1.2, 0.5)
+    assert (s, d) == (1200000, 500000), "区间换算错：%r" % ((s, d),)
+    s2, d2 = JY.us_range(2.0, 0.0)
+    assert d2 >= 1, "零长区间必须夹到至少 1 微秒（剪映不接受 0 长片段）"
+    assert JY.subtitle_size_ratio(46, 1080) == round(46 / 1080.0, 5)
+    assert JY.subtitle_size_ratio(46, 0) == 0.0, "画布高为 0 时必须给 0 而不是 ZeroDivision"
+    plan = JY.build_plan(tl, plate_path="", subtitle_size=46, canvas=(1920, 1080))
+    assert plan["timebase"] == 1000000
+    assert len(plan["texts"]) == 2
+    assert plan["texts"][1]["start_us"] == 2000000, "第二条字幕起点换算错"
+    # plate 不存在时 export_draft 必须**降级**而不是抛异常或假装成功
+    ok2, msg = JY.export_draft(plan, os.path.join(HERE, "_never_used"))
+    assert ok2 is False and msg, "没有 plate 时应降级并给原因"
+    # --- 回归：--stage all 的顺序必须真按依赖排（bug：editlist 曾排在 cues 之前）---
+    rp_src = open(os.path.join(HERE, "render.py"), encoding="utf-8").read()
+    all_order = re.search(r"_ALL_ORDER = \(([^)]+)\)", rp_src)
+    assert all_order, "render.py 里找不到 _ALL_ORDER"
+    order = [x.strip().strip(chr(34) + chr(39)) for x in all_order.group(1).split(",")]
+    assert "beats" in order and order.index("beats") < order.index("cues"), \
+        "beats 必须排在 cues 前（beat: 锚点要靠网格解析）：%r" % (order,)
+    assert "editlist" in order and order.index("editlist") > order.index("qa"), \
+        "editlist 必须排在 qa 后（要读 cues.json 的音效落点）：%r" % (order,)
+    assert "jianying" not in order, \
+        "jianying 不该进 --stage all（它要 --no-subs 的干净画面）：%r" % (order,)
+    assert "review" not in order, "review 不该进 --stage all（独立终检是交付前的一次动作）"
+    # 段落切分**不依赖节拍**：氛围乐/纯人声没有鼓点，但"哪里起来了"照样要能给。
+    # 旧实现把 sections 只在「测出节拍」的分支里算，于是无鼓点音乐的 sections 永远是空。
+    _sr = 48000
+    _rs = np.random.RandomState(3)
+    _x = _rs.randn(_sr * 12) * 0.02
+    _x[int(5 * _sr):int(8 * _sr)] *= 6.0
+    _d = BG.analyze_samples(_x, _sr, fps=30)
+    assert _d["sections"], "有明确能量起伏时应切出段落（与是否测出节拍无关）"
+    assert any(s["kind"] == "climax" for s in _d["sections"]), \
+        "6 倍能量的段应被标成 climax：%r" % (_d["sections"],)
+    assert _d["rms"], "能量曲线必须一直有"
+    _z = BG.analyze_samples(np.zeros(_sr * 6), _sr, fps=30)
+    assert _z["ok"] is False and _z.get("why"), "静音应 ok=false"
+    # --- refscan：截断后 cuts 必须跟着截（否则 json 里「N 切点/M 镜头」对不上）---
+    rp2 = os.path.join(root, "tools", "refscan.py")
+    if os.path.exists(rp2):
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_refscan_probe", rp2)
+        _rf = _ilu.module_from_spec(_spec)
+        try:
+            _spec.loader.exec_module(_rf)
+            _shots = [{"i": i} for i in range(1, 6)]      # 5 镜头 -> 4 切点
+            _cuts = [1.0, 2.0, 3.0, 4.0]
+            _s, _c, _d = _rf.truncate(_shots, _cuts, 2)
+            assert len(_s) == 2 and len(_c) == 1, \
+                "截到 2 镜头应只留 1 切点：shots=%d cuts=%d" % (len(_s), len(_c))
+            assert _d == 3, "应报告丢掉的镜头数，实测 %r" % (_d,)
+            _s2, _c2, _d2 = _rf.truncate(_shots, _cuts, 0)
+            assert len(_s2) == 5 and len(_c2) == 4 and _d2 == 0, "max_shots=0 表示不截"
+            _s3, _c3, _ = _rf.truncate(_shots, _cuts, 99)
+            assert len(_s3) == 5 and len(_c3) == 4, "上限大于镜头数时不许改数据"
+        except ImportError:
+            pass                                          # 缺 PIL 等可选依赖就跳过这段
+    # --- 阶段守卫自洽：STAGE_IO 里每个 stage 都要有 RERUN_HINT（否则 explain 会说"过时"但不给命令）---
+    import stagewatch as SW
+    missing_hint = [s for s in SW.STAGE_IO if s not in SW.RERUN_HINT]
+    assert not missing_hint, "这些 stage 过时后没有重跑命令：%r" % (missing_hint,)
+    # editlist 依赖 cues.json 的音效落点：改了 cues / layout / tts，它必须一起重跑，
+    # 否则交付出去的剪辑表音效列是旧的（实测过：表说"无音效"，成片里有）。
+    for st in ("cues", "layout", "tts", "style", "qa"):
+        assert "editlist" in SW.RERUN_HINT.get(st, ""), \
+            "%s 的重跑命令没带 editlist：%r" % (st, SW.RERUN_HINT.get(st))
+    return "镜头卡 %d 张 / 授权台账 / 剪辑清单 / 剪映换算：口径齐全" % len(ids)
+
 CASES = [
     ("1  TTS 缓存校验文本", t_cache_key),
     ("2  sub_window 覆盖长句", t_sub_window),
@@ -4211,6 +4564,9 @@ CASES = [
     ("103 voice mode=wav 可转计划（原 KeyError 'map'）", t_wav_voice_plan),
     ("104 lines[].persona 已废弃必须显式报错", t_persona_is_removed),
     ("105 横屏文字越出 SAFE 必须被钳回（G13 假失败回归）", t_safe_clamp_landscape),
+    ("106 验收帧与音轨偏移（reviewkit / reviewpacket / audio offset）", t_review_and_offset),
+    ("107 卡点与动效（beatgrid / beat 锚点 / motion presets / refscan）", t_beat_motion_refscan),
+    ("108 镜头卡与交接（shotcards / asset_license / editlist / jianying）", t_cards_handoff),
 ]
 
 

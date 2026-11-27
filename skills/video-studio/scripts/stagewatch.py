@@ -59,6 +59,14 @@ STAGE_IO = {
                     outputs=["cues.json"]),
     "score":   dict(sources=["script"], inputs=["timeline.json", "style.json"],
                     outputs=["music.wav", "score.json"]),
+    # beats 的分析对象是 audio.music.file 或 work/music.wav（score 的产物）。
+    # 把 music.wav 记成 input：重跑 score 后旧网格就是过时的（BGM 换了卡点必偏），
+    # 这正是 explain 该提醒的。外部 BGM 不在这里（它是工程里的文件，不在 work/）。
+    "beats":   dict(sources=["script"], inputs=["music.wav"], outputs=["beat_data.json"]),
+    "editlist": dict(sources=["script"], inputs=["timeline.json", "cues.json"],
+                     outputs=["editlist.json", "EDITLIST.md"]),
+    "jianying": dict(sources=["script"], inputs=["timeline.json"],
+                     outputs=["jianying/draft_plan.json"]),
     "sfx":     dict(sources=["script"], inputs=["cues.json"], outputs=["sfx.wav"]),
     "audio":   dict(sources=["script"],
                     inputs=["tts.json", "timeline.json", "music.wav", "sfx.wav"],
@@ -81,22 +89,32 @@ STAGE_IO = {
                     outputs=["qa/sheet.png", "qa/deep.json"]),
     "stills":  dict(sources=["script", "scenes"], inputs=["timeline.json", "style.json"],
                     outputs=[]),
+    # review 的产物落在 work/review/ 下（不是单个文件），指纹记目录里的入口文件：
+    # PACKET.md 变了 = 评审包重出了，人也该重新看。tracking 成片由调用方传 --out，
+    # 进不来 STAGE_IO（和 mux 同一个理由），靠 inputs 里的 timeline/silent/audio 近似。
+    "review":  dict(sources=["script", "scenes"],
+                    inputs=["timeline.json", "audio.wav", "gates.json"],
+                    outputs=["review/packet.json", "review/PACKET.md"]),
 }
 STAGE_ORDER = tuple(STAGE_IO)
 
 # 每个 stage 过时后的"最小重跑命令"提示（只提示本 stage + 必要的下游）
 RERUN_HINT = {
-    "style":   "python render.py --stage style tts layout cues score sfx audio frames mux qa",
-    "tts":     "python render.py --stage tts layout cues sfx audio frames mux qa",
-    "layout":  "python render.py --stage layout cues score sfx audio frames mux qa",
-    "cues":    "python render.py --stage cues sfx audio frames mux qa",
+    "style":   "python render.py --stage style tts layout cues score sfx audio frames mux qa editlist",
+    "tts":     "python render.py --stage tts layout cues sfx audio frames mux qa editlist",
+    "layout":  "python render.py --stage layout cues score sfx audio frames mux qa editlist",
+    "cues":    "python render.py --stage cues sfx audio frames mux qa editlist   （editlist 的音效列来自 cues.json）",
     "score":   "python render.py --stage score audio mux qa",
     "sfx":     "python render.py --stage sfx audio mux qa",
     "audio":   "python render.py --stage audio mux qa",
     "frames":  "python render.py --stage frames mux qa  （分块缓存会被指纹拒绝，需 rm -rf work/segments）",
     "mux":     "python render.py --stage mux qa",
-    "qa":      "python render.py --stage qa",
+    "qa":      "python render.py --stage qa editlist",
+    "beats":   "python render.py --stage beats cues sfx audio frames mux qa",
+    "editlist": "python render.py --stage editlist",
+    "jianying": "python render.py --stage jianying",
     "stills":  "python render.py --stage stills",
+    "review":  "python render.py --stage review",
 }
 
 

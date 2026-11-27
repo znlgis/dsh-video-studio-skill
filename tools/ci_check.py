@@ -54,10 +54,15 @@ REFS = SKILL / "references"
 
 # 技能允许的三方依赖（与 README「环境前提」一一对应；加东西必须先改文档）
 ALLOWED_THIRD_PARTY = {"numpy", "PIL", "cv2", "scipy", "edge_tts", "playwright",
+                       # 剪映草稿导出（可选依赖；缺了 jianying.py 降级为 draft_plan.json）
+                       "pyJianYingDraft",
                        # ASR 回读门禁（可选，缺了 qaasr 自动降级到 ffmpeg whisper / skipped）
                        "faster_whisper"}
 # 同目录同级模块（拷走整个目录后仍能互相 import）
 LOCAL_MODULES = {"filmkit", "sfxkit", "scorekit", "webengine", "qa_frames", "render", "selfcheck",
+                 # 独立终检（评审包）、验收帧/音轨偏移、节拍网格：纯函数模块，不引第三方
+                 "reviewkit", "reviewpacket", "audio_offset", "beatgrid",
+                 "shotcards", "editlist", "jianying", "asset_license",
                  "qatext",
                  "stylekit", "voicekit", "scenes", "scenes_demo",
                  # 门禁账本 / 交付报告 / 签核、阶段新鲜度守卫、film.json 契约校验器
@@ -239,6 +244,21 @@ def t_json():
     bad_badges = [b for b in badges if b != ver]
     assert not bad_badges, ("README 徽章版本 %s 与 package.json version %s 不一致"
                             % ("/".join(bad_badges), ver))
+    # 英文入口页（README.en.md）的徽章与互链也必须跟得上：
+    # 只查中文版会让英文页静默停在旧版本——用户按英文页判断"这版有没有某个功能"，
+    # 一旦漂移就是错误信息，比内部文档漂移更直接伤到人。
+    readme_en = ROOT / "README.en.md"
+    assert readme_en.is_file(), "缺 README.en.md（多语言入口页；中文版为主，英文版必须存在）"
+    en_text = readme_en.read_text(encoding="utf-8")
+    en_badges = re.findall(r"badge/version-(\d+\.\d+\.\d+)-", en_text)
+    assert en_badges, "README.en.md 里找不到 version 徽章"
+    assert all(b == ver for b in en_badges), (
+        "README.en.md 徽章版本 %s 与 package.json version %s 不一致"
+        % ("/".join(b for b in en_badges if b != ver), ver))
+    # 互相链接：两页都要能从对方跳过去，且中文版要声明"英文版是摘要、中文版为准"，
+    # 否则读者可能以为两版等价、照着英文页的删节内容行事。
+    assert "README.en.md" in readme, "README.md 里没有指向 README.en.md 的语言切换链接"
+    assert "README.md" in en_text, "README.en.md 里没有指回 README.md 的链接"
     # CHANGELOG 的第一条标题也必须是当前版本：以前只查 README 徽章，于是"发了新版本但
     # CHANGELOG 顶部还是上一版"没人发现（真发生过）。
     changelog = ROOT / "CHANGELOG.md"
@@ -450,7 +470,9 @@ def t_pack():
 
 # ---------------------------------------------------------------- 6 文档引用
 def t_doc_refs():
-    md_files = [SKILL / "SKILL.md", ROOT / "README.md"] + sorted(REFS.glob("*.md"))
+    # README.en.md 也扫：英文页里的路径/链接同样会腐烂，而它最容易被人忽略
+    md_files = ([SKILL / "SKILL.md", ROOT / "README.md", ROOT / "README.en.md"]
+                + sorted(REFS.glob("*.md")))
     missing = []
     for md in md_files:
         if not md.is_file():
@@ -840,7 +862,8 @@ def t_cli_flags():
     命令之前的 `--flag` 归该脚本；只要求这个开关字符串在脚本源码里出现过（注册、help、
     常量都算）。实测全仓 308 处引用 0 误报；正文里举例提到别的脚本开关不会误伤。
     """
-    docs = [SKILL / "SKILL.md", ROOT / "README.md"] + sorted(REFS.glob("*.md"))
+    docs = ([SKILL / "SKILL.md", ROOT / "README.md", ROOT / "README.en.md"]
+            + sorted(REFS.glob("*.md")))
     cmd_re = re.compile(r"python[0-9.]*\s+(?:<SKILL_DIR>/|<REPO>/)?(?:skills/video-studio/|scripts/)?([a-z_]+)\.py")
     flag_re = re.compile(r"(?<!\w)(--[a-z][a-z0-9-]*)")
     bad = []
@@ -965,7 +988,8 @@ def t_case_count():
 
     # 分发页文案也算"文档"：marketplace-entry.json 曾写着"自检 69 条、仓库体检 12 项"，
     # 而 CASES 已经是 72 —— 用户看到的简介与仓库真实状态不一致，比内部文档漂移更伤。
-    docs = [SKILL / "SKILL.md", ROOT / "README.md", ROOT / ".github" / "workflows" / "ci.yml",
+    docs = [SKILL / "SKILL.md", ROOT / "README.md", ROOT / "README.en.md",
+            ROOT / ".github" / "workflows" / "ci.yml",
             ROOT / "marketplace-entry.json"]
     docs += sorted((ROOT / "locale").glob("*.json"))
     # references/ 是 Agent 真正按需加载的说明书，studio.py 的 check 子命令描述也写死过条数：
