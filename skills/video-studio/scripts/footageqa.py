@@ -260,6 +260,46 @@ def _declared_band(src, key):
     return None
 
 
+def _load_sources_info(work):
+    """读 work/sources.json（probe 结果）。读不到就返回空 dict —— 调用方自己决定降级。"""
+    import json as _json
+    p = Path(str(work)) / "sources.json"
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = _json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _visible_box_for_source(foot, src, info=None):
+    """单个源的"最终可见区"：有 crop 用 crop；没 crop 就是**整帧**（源自己的宽高）。
+
+    原来 F2/F3 在没写 treatment.crop 时整条记 skipped —— 但"没裁过"恰恰是最常见的情况，
+    于是这两条门禁对全幅无裁切的片子永远补不上（实测本会话就是如此）。没裁切时可见区
+    就是源分辨率整幅：只要声明了字幕带/水印框，它们必然可见 => 应判 fail，而不是 skipped。
+    源宽高优先取 probe 记录（work/sources.json），拿不到就退回 crop 框/None（无法判定）。
+    """
+    box = _visible_box(foot)
+    if box is not None:
+        return box
+    rec = (info or {}).get(str(src.get("id"))) or {}
+    w = rec.get("width"); h = rec.get("height")
+    if not (w and h):                      # 老版 sources.json 没有顶层宽高：退回 video[0]
+        v0 = (rec.get("video") or [{}])[0] if rec.get("video") else {}
+        w, h = v0.get("w"), v0.get("h")
+    if w and h:
+        return (0, 0, int(w), int(h))
+    # 最后一条路：直接 ffprobe 这个源文件（sources.json 可能是旧版）
+    try:
+        pr = footagekit.probe_file(footagekit.source_path(foot, src))
+        if pr.get("width") and pr.get("height"):
+            return (0, 0, int(pr["width"]), int(pr["height"]))
+    except Exception:                      # noqa: BLE001 —— 探不到就按"无法判定"处理
+        pass
+    return None
+
+
 def _overlaps(box, band, key):
     """声明区域是否与可见区相交（相交=没治理干净）。"""
     if not box or not band:
@@ -293,10 +333,12 @@ def f2_subtitle_bleed(foot, work, out, tl, edl, ctx):
     门禁必须能明确回答"该裁的地方裁了没有"，而这个答案只有几何知道。
     同时仍会输出可疑度指标（底部亮像素占比）作为人工复核线索，但不参与判定。
     """
-    box = _visible_box(foot)
+    frame_box = _visible_box(foot)
+    info = _load_sources_info(work)
     srcs = footagekit.source_map(foot)
     problems, bad_decl, checked = [], [], 0
     for sid, s in srcs.items():
+        box = _visible_box_for_source(foot, s, info)
         band = _declared_band(s, "burned_subs")
         if not band:
             if s.get("burned_subs"):
@@ -333,12 +375,19 @@ def f2_subtitle_bleed(foot, work, out, tl, edl, ctx):
             suspicion = round(max(vals), 4)
     if problems:
         return dict(gate="F2", status="fail", detail="；".join(problems[:3]),
-                    values={"problems": problems, "visible_box": box,
+                    values={"problems": problems, "visible_box": frame_box,
                             "bright_suspicion": suspicion})
-    if box is None:
+    if not checked:
+        # 顺序有意义：先看"有没有声明"。没声明时最该提示的是补 burned_subs，
+        # 而不是叫人补 crop（那是两种完全不同的修法）。
         return dict(gate="F2", status="skipped",
-                    detail="没有 treatment.crop（可见区未知）；无法判定字幕带是否被裁掉。"
-                           "补上 crop 后重跑",
+                    detail="没有源声明 burned_subs（字幕带位置）；无法判定是否治理干净。"
+                           "用 --stage probe 的建议值填进 sources[].burned_subs 后重跑",
+                    values={"bright_suspicion": suspicion})
+    if frame_box is None:
+        return dict(gate="F2", status="skipped",
+                    detail="既没有 treatment.crop，work/sources.json 也没有源宽高："
+                           "无法判定字幕带是否被裁掉。先跑 --stage probe，或补 treatment.crop",
                     values={"bright_suspicion": suspicion})
     if bad_decl:
         return dict(gate="F2", status="fail",
@@ -346,11 +395,6 @@ def f2_subtitle_bleed(foot, work, out, tl, edl, ctx):
                            "（需要 {y0,y1} 且 y1>y0，或 [y0,y1]）"
                            % "、".join(bad_decl[:4]),
                     values={"bad_declaration": bad_decl, "visible_box": box})
-    if not checked:
-        return dict(gate="F2", status="skipped",
-                    detail="没有源声明 burned_subs（字幕带位置）；无法判定是否治理干净。"
-                           "用 --stage probe 的建议值填进 sources[].burned_subs 后重跑",
-                    values={"bright_suspicion": suspicion})
     if checked < len(srcs):
         # 部分声明 = 部分素材**根本没查**。以前只要有一个源声明就记 pass：5 个源里
         # 4 个底部挂着烧录字幕，F2 照样是绿的（--strict-qa 也拦不住）。skipped 不是
@@ -379,10 +423,14 @@ def f3_watermark(foot, work, out, tl, edl, ctx):
     （实测：真实素材上正反例的静度指标 0.47 vs 1.07，重叠且方向不稳定）。
     所以这里同样要求源声明水印框 sources[].watermark，然后判"它还在不在可见区里"。
     """
-    box = _visible_box(foot)
+    frame_box = _visible_box(foot)
+    info = _load_sources_info(work)
     srcs = footagekit.source_map(foot)
     problems, bad_decl, checked = [], [], 0
+    last_box = frame_box
     for sid, s in srcs.items():
+        box = _visible_box_for_source(foot, s, info)
+        last_box = box
         band = _declared_band(s, "watermark")
         if not band:
             if s.get("watermark"):
@@ -390,7 +438,7 @@ def f3_watermark(foot, work, out, tl, edl, ctx):
             continue
         checked += 1
         if box is None:
-            continue                    # 可见区未知：交给下面的 skipped 分支
+            continue                    # 可见区未知（probe 里没有宽高）：交给下面的 skipped 分支
         rec = _overlaps(box, band, "watermark")
         if rec is None:
             bad_decl.append(sid)        # 声明区间非法（w/h<=0 / 非数字）
@@ -402,11 +450,11 @@ def f3_watermark(foot, work, out, tl, edl, ctx):
                                box[0], box[2], box[1], box[3]))
     if problems:
         return dict(gate="F3", status="fail", detail="；".join(problems[:3]),
-                    values={"problems": problems, "visible_box": box})
-    if box is None:
+                    values={"problems": problems, "visible_box": last_box})
+    if last_box is None:
         return dict(gate="F3", status="skipped",
-                    detail="没有 treatment.crop（可见区未知）；无法判定水印是否被裁掉。"
-                           "补上 crop 后重跑",
+                    detail="可见区未知（没有 treatment.crop，work/sources.json 里也没有源宽高）："
+                           "判定不了水印是否被裁掉。先跑 --stage probe，或补 treatment.crop",
                     values={"visible_box": None})
     if bad_decl:
         return dict(gate="F3", status="fail",
@@ -502,9 +550,17 @@ def f5_provenance(foot, work, out, tl, edl, ctx):
         return dict(gate="F5", status="fail",
                     detail="缺出处：%s" % "、".join(missing[:4]),
                     values={"missing": missing})
+    # 口径说明：这里数的是 footage.json 的 sources 记录数（可能包含没被 EDL 用到的备选源）；
+    # 成片真正用了几个源看 F8 的 distinct。两个数不相等是正常的，但不能都笼统叫"源"。
+    n_decl = len(foot.get("sources") or [])
+    used = None
+    try:
+        used = len(footagekit.source_usage(edl if isinstance(edl, dict) else {})["per_source"])
+    except Exception:            # noqa: BLE001 —— 没有 EDL 时只报声明数
+        used = None
     return dict(gate="F5", status="pass",
-                detail="%d 个源都有 license_note，且有片尾出处卡"
-                       % len(foot.get("sources") or []),
+                detail="%d 条 sources 记录都有 license_note（成片实际用到 %s 个，见 F8），且有片尾出处卡"
+                       % (n_decl, used if used is not None else "?"),
                 values={"credit": credit})
 
 
@@ -934,7 +990,11 @@ def run_all(foot, work, out, tl, edl, strict=False):
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     rep = write_report(out, results, extra, ctx)
     n_fail = sum(1 for r in results if r["status"] == "fail")
-    log("  QC 报告 -> %s（FAIL %d）" % (rep, n_fail))
-    if strict and n_fail:
-        raise SystemExit("素材线门禁有 %d 项 fail（--strict-qa）" % n_fail)
+    n_skip = sum(1 for r in results if r["status"] == "skipped")
+    log("  QC 报告 -> %s（FAIL %d / SKIPPED %d）" % (rep, n_fail, n_skip))
+    if strict and (n_fail or n_skip):
+        # 与 render.py 的 --strict-gates 对齐：strict 下 skipped 也算失败。
+        # 否则"门禁没跑"在交付前永远拦不住（本会话 F2/F3 就是这样被跳过的）。
+        raise SystemExit("素材线门禁 fail %d 项 / skipped %d 项（--strict-qa：skipped 也算失败）"
+                         % (n_fail, n_skip))
     return payload

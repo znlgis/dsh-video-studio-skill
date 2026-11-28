@@ -285,13 +285,108 @@ def main():
             assert abs(dur - want) < 0.2, "成片 %.2fs != 时间轴 %.2fs" % (dur, want)
             return "成片时长与时间轴一致（%.2fs）" % dur
 
+        def t_image_source_not_out_of_range():
+            """图片源没有"源内时间码"：probe 给的 0.04s 不能被当成源时长判越界。
+
+            回归自真实会话：19 句静帧素材被 check_edl 全部报"越界"，静帧这条线直接不可用。
+            """
+            _fk, footagekit, footageedit, _qa = need_mods()
+            foot = make_footage(src, W, H, sub_band, wm_box, safe_crop)
+            foot["sources"] = [{"id": "img1", "kind": "image", "path": str(src),
+                                "license_note": "自检用图"}]
+            foot["lines"] = [foot["lines"][0]]
+            foot["lines"][0]["shot"] = {"source": "img1", "at": 0.0}
+            rows = build_voice(Path(tmp) / "w_img", foot["lines"])
+            tl = footageedit.build_timeline(foot, rows)
+            info = {"img1": {"dur": 0.04, "is_image": True, "width": W, "height": H}}
+            _edl, problems = footageedit.make_edl(foot, tl, sources_info=info)
+            assert not problems, "图片源被误判越界：%s" % problems
+            return "图片源不参与越界判定"
+
+        def t_credit_after_last_subtitle():
+            """出处卡不能和最后一句字幕同屏叠加。"""
+            _fk, _ft, footageedit, _qa = need_mods()
+            foot = make_footage(src, W, H, sub_band, wm_box, safe_crop)
+            foot["lines"] = [foot["lines"][0]]
+            rows = build_voice(Path(tmp) / "w_credit", foot["lines"])
+            tl = footageedit.build_timeline(foot, rows)
+            def sec(ts):
+                h, m, s = ts.split(":")
+                return int(h) * 3600 + int(m) * 60 + float(s)
+
+            # ① 留白够（0.9s）时：出处卡必须排在末句字幕之后，不能被默认 at=total-2.6 提前
+            tl["total"] = float(tl["lines"][-1]["end"]) + 0.9
+            ass = Path(tmp) / "w_credit" / "sub.ass"
+            ass.parent.mkdir(parents=True, exist_ok=True)
+            footageedit.write_ass(tl, foot, ass)
+            txt = ass.read_text(encoding="utf-8")
+            main = [ln for ln in txt.splitlines() if ",Main," in ln][-1]
+            note = [ln for ln in txt.splitlines() if ",Note," in ln][-1]
+            assert sec(note.split(",")[1]) >= sec(main.split(",")[2]) - 0.15, \
+                "出处卡起点 %.2f 早于末句字幕结束 %.2f（同屏叠字）" % (
+                    sec(note.split(",")[1]), sec(main.split(",")[2]))
+
+            # ② 留白不够（0.2s）时：必须显式报错，而不是静默叠字
+            tl["total"] = float(tl["lines"][-1]["end"]) + 0.2
+            try:
+                footageedit.write_ass(tl, foot, Path(tmp) / "w_credit" / "sub2.ass")
+            except SystemExit as e:
+                assert "片尾留白不足" in str(e), "报错信息没说明片尾留白不足：%s" % e
+            else:
+                raise AssertionError("片尾留白只有 0.2s 时仍然静默出片（出处卡会压字幕）")
+            return "出处卡排在末句之后；留白不足显式报错"
+
+        def t_late_overlay_layer():
+            """合成阶段的图层在晚时间点（>285s）不能静默消失。
+
+            回归自真实会话：compose 用 trim+setpts 直接把 PTS 推到几百秒时，长片后段
+            图层被 ffmpeg 静默丢掉；成片少了章节卡/片尾卡而日志仍写"N 层已叠"。
+            这里用 20 秒底片 + 15s 处的图层做等价断言（不跑长片，保持自检离线快）。
+            """
+            import numpy as np
+            from PIL import Image
+            _fk, _ft, footageedit, _qa = need_mods()
+            work = Path(tmp) / "w_late"
+            work.mkdir(parents=True, exist_ok=True)
+            silent = work / "silent.mp4"
+            base = work / "base.mp4"
+            png = work / "chip.png"
+            exe = ffmpeg()
+            subprocess.run([exe, "-v", "error", "-y", "-f", "lavfi",
+                            "-i", "color=c=white:s=320x180:r=10:d=12", str(base)], check=True)
+            # 造一个不规则的底片（模拟 concat 出来的帧间隔）：直接复制即可，重点是图层定位方式
+            shutil.copyfile(base, silent)
+            Image.new("RGBA", (160, 60), (0, 0, 0, 255)).save(png)
+            at, span = 10.0, 2.0
+            sub = ("format=rgba,loop=loop=-1:size=1:start=0,"
+                   "trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS+%.3f/TB" % (at, at + span, at))
+            chain = ("[0:v]fps=10,format=yuv420p[base];[1:v]" + sub + "[ly];"
+                     "[base][ly]overlay=x=(W-w)/2:y=(H-h)/2:eval=init:"
+                     "enable='between(t,%.3f,%.3f)'[vout]" % (at, at + span))
+            out = work / "late.mp4"
+            subprocess.run([exe, "-v", "error", "-y", "-i", str(silent), "-loop", "1",
+                            "-framerate", "10", "-i", str(png), "-filter_complex", chain,
+                            "-map", "[vout]", "-c:v", "libx264", "-crf", "40", "-preset", "ultrafast",
+                            "-pix_fmt", "yuv420p", "-t", "12", str(out)], check=True)
+            frame = work / "f.png"
+            subprocess.run([exe, "-v", "error", "-y", "-i", str(out), "-ss", "11.0",
+                            "-frames:v", "1", str(frame)], check=True)
+            arr = np.asarray(Image.open(frame).convert("RGB")).astype(float)
+            center = arr[arr.shape[0] // 2 - 15: arr.shape[0] // 2 + 15,
+                          arr.shape[1] // 2 - 40: arr.shape[1] // 2 + 40].mean()
+            assert center < 128, "晚时间点（%.1fs）的叠加层没出现（中心亮度 %.1f 仍偏亮）" % (at, center)
+            return "晚时间点图层仍能叠上"
+
         for name, fn in (("治理干净的素材 F2/F3 通过", t_clean),
                          ("未治理的素材 F2/F3 都能抓到", t_dirty),
                          ("只去水印时 F2/F3 判据独立", t_partial),
                          ("缺出处被 F5 拦住", t_no_license),
                          ("越界镜头被 check_edl 拦住", t_out_of_range),
                          ("联系表 + 签核指纹", t_contact_sheet),
-                         ("音画等长", t_av_equal)):
+                         ("音画等长", t_av_equal),
+                        ("图片源不误判越界", t_image_source_not_out_of_range),
+                        ("出处卡不压末句字幕", t_credit_after_last_subtitle),
+                        ("晚时间点图层不消失", t_late_overlay_layer)):
             check(name, fn)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

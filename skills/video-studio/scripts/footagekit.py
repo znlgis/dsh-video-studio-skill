@@ -168,7 +168,11 @@ def probe_file(path):
         raise SystemExit("素材不可识别（ffprobe 读不出任何音视频流）：%s\n"
                          "  常见原因：下载得到错误页 / 文件被截断 / 0 字节。"
                          "先用 ffprobe 验真再重下" % p)
+    # 宽高单独提到顶层：F2/F3 判"没写 crop 时的可见区"要用它（源整帧），
+    # 埋在 video[0] 里调用方还得自己兼容各种结构。
+    v0 = vs[0] if vs else {}
     return {"path": str(p), "dur": round(dur, 3), "video": vs, "audio": aus,
+            "width": int(v0.get("w") or 0), "height": int(v0.get("h") or 0),
             "has_audio": bool(aus), "is_image": is_image,
             "is_audio_only": bool(aus) and not vs,
             "size": int(fmt.get("size") or 0)}

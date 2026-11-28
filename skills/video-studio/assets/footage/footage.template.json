@@ -23,7 +23,7 @@
   "voice": "zh-CN-YunyangNeural",
   "rate": "-6%",
   "env_gain": 0.12,
-  "music_gain": 0.1,
+  "music_gain": 0.05,
   "music": {
    "bpm": 92,
    "key": "Dm",

@@ -1,6 +1,6 @@
 # @dsh-gis/dsh-video-studio-skill
 
-![version](https://img.shields.io/badge/version-3.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-3.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 **[中文](README.md) | [English](README.en.md)**（英文版是入口摘要，细节以中文版为准）
 

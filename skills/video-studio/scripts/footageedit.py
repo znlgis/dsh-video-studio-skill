@@ -143,8 +143,13 @@ def check_edl(edl, footage, sources_info=None):
             problems.append("[%s] source=%r 不存在" % (s["id"], sid))
             continue
         rec = info.get(sid) or {}
+        # 图片源没有"源内时间码"语义：probe 给它的 dur 是单帧的 0.04s，而 cut 是 -loop 1
+        # 铺满本镜。按 dur 判越界会让**每一张静帧**都报越界（实测：png 源 + 3s 镜头
+        # -> "at=0.0 + len=3.0 > 源时长 0.04"），静帧素材直接不可用。
+        # footage.md 里写的就是"图片源不参与越界"，这里与文档/F1 的未知时长分支对齐。
+        is_image = bool(rec.get("is_image")) or Path(str(srcs[sid].get("path") or "")).suffix.lower() in footagekit.IMAGE_EXT
         dur = rec.get("dur")
-        if dur:
+        if dur and not is_image:
             if s["at"] + s["len"] > float(dur) + 0.05:
                 problems.append("[%s] 越界：at=%s + len=%s > 源时长 %s（会切到不存在的画面）"
                                 % (s["id"], s["at"], s["len"], dur))
@@ -302,7 +307,7 @@ def decode_audio(path, sr=SR):
 
 
 def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
-    """三条总线叠加：旁白（voice_gain=1.0）/ 素材原声（env_gain≈0.12）/ 配乐（music_gain≈0.10）。
+    """三条总线叠加：旁白（voice_gain=1.0）/ 素材原声（env_gain≈0.12）/ 配乐（music_gain≈0.05）。
 
     总长取 timeline.total 而不是各轨自然长度：视频按时间轴拼，音频必须同长。
     """
@@ -311,9 +316,13 @@ def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
     work = Path(work)
     total = float(timeline["total"])
     n = int(round(total * SR))
-    bus = np.zeros((n + SR, 2), dtype=np.float32)
+    # 三条总线分开建：旁白 / 环境 / 配乐。分开是为了能对"非人声轨"做侧链 ducking，
+    # 最后再相加 —— 全都往一个 bus 里加就没法只压配乐了。
+    bus = np.zeros((n + SR, 2), dtype=np.float32)          # 旁白
+    env_bus = np.zeros((n + SR, 2), dtype=np.float32)      # 素材原声
+    music_bus = np.zeros((n + SR, 2), dtype=np.float32)    # 配乐
 
-    def add(path, at, gain, loop=False, *, required=True, label=""):
+    def add(path, at, gain, loop=False, *, required=True, label="", dest=None):
         # 缺失的音轨必须炸：静默 return 等于"这条轨整条消失"，而 QC 只看音画等长
         # （等长比的是总线长度，丢一条轨看不出来）。audio=None 表示"这个源本来就没有
         # 音轨"（图片 / 分段下载只给视频流），由调用方显式传 None，不算缺失。
@@ -327,32 +336,66 @@ def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
             raise SystemExit("[mix] 缺音轨 %s（%s）：不会静默丢轨，先补文件或重跑对应阶段"
                              % (p, label or "必需轨"))
         a = decode_audio(p) * float(gain)
+        tgt = bus if dest is None else dest
         i0 = int(round(max(0.0, at) * SR))
         if loop and a.shape[0]:
-            while i0 < bus.shape[0]:
-                j = min(bus.shape[0], i0 + a.shape[0])
-                bus[i0:j] += a[:j - i0]
+            while i0 < tgt.shape[0]:
+                j = min(tgt.shape[0], i0 + a.shape[0])
+                tgt[i0:j] += a[:j - i0]
                 i0 += a.shape[0]
             return
-        j = min(bus.shape[0], i0 + a.shape[0])
+        j = min(tgt.shape[0], i0 + a.shape[0])
         if j > i0:
-            bus[i0:j] += a[:j - i0]
+            tgt[i0:j] += a[:j - i0]
 
     rows = {r["id"]: r for r in timeline["lines"]}
     for r in tts_rows:
         add(work / "tts" / (str(r["id"]) + ".mp3"),
             rows[str(r["id"])]["start"], float(audio.get("voice_gain", 1.0)),
             label="旁白 %s（先跑 --stage tts）" % r["id"])
+    # 旁白侧链包络：先把"有人声的时间段"记成 0/1 掩码，后面给配乐 / 环境层做 ducking。
+    # 文档（SKILL.md「声音三层」/ audio.md §13.2.1）承诺"人声处再压 6 dB"，素材线原先
+    # 没有实现，只能靠把 BGM 整体压小 —— 那等于全片都闷。
+    voice_db = float(audio.get("voice_duck_db", 6.0))
+    duck_mask = None
+    if voice_db > 0:
+        duck_mask = np.zeros(bus.shape[0], dtype=np.float32)
+        for r in tts_rows:
+            row = rows.get(str(r["id"])) or {}
+            s = int(round(max(0.0, float(row.get("start") or 0.0)) * SR))
+            e = int(round(min(total, float(row.get("end") or 0.0)) * SR))
+            if e > s:
+                duck_mask[s:min(e, duck_mask.shape[0])] = 1.0
+        # 30ms 起落，避免硬切换出咔哒声
+        ramp = max(1, int(0.03 * SR))
+        kern = np.ones(ramp, dtype=np.float32) / ramp
+        duck_mask = np.convolve(duck_mask, kern, mode="same")
+        duck_gain = 10.0 ** (-voice_db / 20.0)
+        log("  [mix] 旁白侧链：人声处压 %.1f dB（%d 句）" % (voice_db, len(tts_rows)))
+
+    def duck(x):
+        """按旁白包络压低一条轨（返回新的数组，不改原对象）。"""
+        if duck_mask is None:
+            return x
+        m = duck_mask[: x.shape[0]]
+        if m.shape[0] < x.shape[0]:
+            m = np.pad(m, (0, x.shape[0] - m.shape[0]), mode="edge")
+        g = (1.0 - m * (1.0 - duck_gain))[:, None]
+        return x * g
+
     env_gain = float(audio.get("env_gain", 0.12))
     if env_gain > 0:
         for c in cut_rows:
-            add(c.get("audio"), rows[c["id"]]["shot_start"], env_gain,
+            add(c.get("audio"), rows[c["id"]]["shot_start"], env_gain, dest=env_bus,
                 label="镜头 %s 的原声（先跑 --stage cut）" % c["id"])
-    music_gain = float(audio.get("music_gain", 0.10))
+    # 默认 0.05（≈ -26 dB）：F6 要求"旁白比间隙高 >=12 dB"，而 BGM 自身约 -9.4 dBFS，
+    # 用旧默认 0.10 时理论差只有 9.4 dB —— 按文档默认值配出来的片子过不了自家门禁
+    # （本会话实测 6.0 dB，降到 0.034 才 13.9 dB）。0.05 在旁白偏轻时仍留余量。
+    music_gain = float(audio.get("music_gain", 0.05))
     if music_gain > 0:
         mf = audio.get("music_file")
         if mf:
-            add(mf, 0.0, music_gain, loop=True,
+            add(mf, 0.0, music_gain, loop=True, dest=music_bus,
                 label="audio.music_file（footage.json 指定的配乐）")
         else:
             mpath = work / "music.wav"
@@ -365,7 +408,15 @@ def mix_tracks(tts_rows, timeline, cut_rows, footage, work):
                 filmkit.wav_write(str(mpath), samples)
                 log("  [music] %s（%s BPM / %s）"
                     % (mpath.name, rep.get("bpm"), rep.get("key") or rep.get("scale")))
-            add(mpath, 0.0, music_gain, loop=True)
+            add(mpath, 0.0, music_gain, loop=True, dest=music_bus)
+
+    # 侧链：人声段把环境层与配乐压 duck_gain 倍，间隙恢复（30ms 起落，避免咔哒声）。
+    # 这条是 SKILL.md「声音三层」与 audio.md §13.2.1 承诺过的行为，之前素材线没实现。
+    if duck_mask is not None and voice_db > 0:
+        bus = bus + duck(env_bus) + duck(music_bus)
+        log("  [mix] 侧链已应用：人声段配乐/环境 -%.1f dB" % voice_db)
+    else:
+        bus = bus + env_bus + music_bus
 
     peak = float(np.abs(bus).max()) if bus.size else 0.0
     log("  [mix] 叠加峰值 %.3f" % peak)
@@ -521,8 +572,29 @@ def write_ass(timeline, footage, path):
         if clines is None:
             clines = _wrap(ct, _font(14, "reg", family), safe_w) if _K else [ct]
             note_size = 14
-        c_start = float(credit.get("at") or max(0.0, timeline["total"] - 2.6))
-        c_end = float(credit.get("end") or max(c_start + 1.2, timeline["total"] - 0.4))
+        # 出处卡必须排在**最后一句字幕之后**：原来默认 at=total-2.6，若最后一句还没说完
+        # （末句 end 常到 total-0.8）就会和署名同屏叠字（实测重叠 1.8s）。
+        # 用户显式写了 at 也一律夹到末句结束之后 —— 叠字是硬错误，不该靠人记得算。
+        last_end = max([float(r["end"]) for r in timeline["lines"]] or [0.0])
+        total_t = float(timeline["total"] or 0.0)
+        # 末句字幕会渲染到 end+0.15（见上面 Main 的写盘），所以出处卡最早从那里开始；
+        # 若片尾留白不够（最后一句几乎顶到片尾），就把出处卡挤进最后的尾巴上，
+        # 但**绝不允许早于字幕结束** —— 叠字是硬错误，宁可署名显示时间短。
+        floor = last_end + 0.20
+        c_start = max(float(credit.get("at") or max(0.0, total_t - 2.6)), floor)
+        c_end = float(credit.get("end") or max(c_start + 1.2, total_t - 0.15))
+        c_end = max(c_end, c_start + 0.5)
+        if c_start >= total_t - 0.55:
+            # 片尾连 0.5s 留白都不够：出处卡只能和最后一句字幕同屏 —— 这是叠字，是硬错误。
+            # 不静默压缩（那样等于用"看起来出片了"掩盖交付缺陷），直接报错并给最小修法。
+            raise SystemExit(
+                "[subs] 片尾留白不足：最后一句字幕 %.2fs 结束，片长 %.2fs，中间只剩 %.2fs，"
+                "放不下片尾出处卡。\n"
+                "  修法（任选）：把 pacing.outro 加到 %.1f；或给最后一句加 hold；"
+                "或缩短最后一句 sub。\n"
+                "  也可以写 credit.at 明确指定位置，但必须落在 %.2fs 之后。"
+                % (last_end + 0.15, total_t, max(0.0, total_t - last_end - 0.15),
+                   0.8, last_end + 0.2))
         ev.append("Dialogue: 0,%s,%s,Note,,0,0,0,,%s"
                   % (_ts(c_start), _ts(c_end), NL.join(clines)))
 

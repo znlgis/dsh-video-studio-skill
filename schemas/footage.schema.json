@@ -229,7 +229,14 @@
     "music_gain": {
      "type": "number",
      "minimum": 0,
-     "maximum": 1
+     "maximum": 1,
+     "description": "配乐总线增益；默认 0.05（0.10 会让 F6 的旁白/间隙 ≥12 dB 过不去，见 references/footage.md §5）"
+    },
+    "voice_duck_db": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 24,
+     "description": "旁白侧链深度（dB）：有人声时把配乐与环境层压低这么多；默认 6，0 = 关闭侧链"
     },
     "music_file": {
      "type": "string"

@@ -62,7 +62,7 @@
   "audio": {
     "voice": "zh-CN-YunyangNeural", "rate": "-6%",
     "env_gain": 0.12,                       // 素材原声（环境层）
-    "music_gain": 0.10,
+    "music_gain": 0.05,          // 0.10 会让 F6（旁白/间隙 ≥12 dB）过不去，见 §5
     "music": {"bpm": 92, "key": "Dm", "scale": "minor", "mood": "steady", "seed": 11}
   },
   "subtitle": {"size": 46, "margin_v": 38},
@@ -251,17 +251,20 @@ treatment 一次定义、全片复用：
 
 ```bash
 python footage.py --footage footage.json --stage qa          # 出 out/QC-REPORT-footage.md
-python footage.py ... --stage qa --strict-qa                 # fail 即失败（交付前建议开）
+python footage.py ... --stage qa --strict-qa                 # fail 或 skipped 都算失败（交付前建议开）
+#   ⚠ --strict-qa 与 render.py 的 --strict-gates 同口径：skipped 也算失败。
+#   素材线新增帧级深检（qa_frames）：跑完会多一行 [deep] 闪烁/空窗/error 统计，
+#   报告 payload 里多一个 deep 字段；不想跑可设 FOOTAGE_SKIP_DEEP=1。
 ```
 
 | 门禁 | 查什么 | 判据 | skipped 什么时候出现 |
 |---|---|---|---|
 | **F1** | 镜头越界 / EDL 合法性 | at+len ≤ 源时长；镜头总长与时间轴差 ≤0.6s；图片源不参与越界（它的"时长"由 EDL 决定） | 没有 EDL；**或没有 sources.json / 源没探到 dur**（越界判定根本没执行 -> skipped 并写明"先跑 probe"，绝不记 pass） |
-| **F2** | 原字幕残留 | burned_subs 与 crop 后可见区**几何相交** | 源没声明 burned_subs；**声明了但解析不出合法区间（y1≤y0 / w·h≤0 / 非数字）= fail**（不是 skipped） |
-| **F3** | 水印残留 | watermark 与可见区几何相交 | 同上：没声明才 skipped，声明了但非法是 fail |
+| **F2** | 原字幕残留 | burned_subs 与 crop 后可见区**几何相交**；**没写 crop 时可见区 = 源整帧**（没裁过就全都能看见） | 源没声明 burned_subs；**声明了但解析不出合法区间（y1≤y0 / w·h≤0 / 非数字）= fail**（不是 skipped）；连源宽高都拿不到（没跑 probe 且没 crop）才 skipped |
+| **F3** | 水印残留 | watermark 与可见区几何相交（没写 crop 时可见区 = 源整帧） | 同上：没声明才 skipped，声明了但非法是 fail |
 | **F4** | 音画等长 | 视频与音频时长差 ≤ 0.05s | 读不到流时长；**成片不存在也是 fail**（不是 skipped） |
 | **F5** | 素材溯源 | 每个源有 license_note + 有 credit.text | 不会 skipped（缺就是 fail） |
-| **F6** | 旁白/原声比例 | **本镜窗口内**旁白 RMS 比无旁白窗口（lead/hold/tail）RMS 高 ≥12 dB；无旁白窗口要 **≥0.25 s** 才计入（`tail` 调小到 0.2 s 以下时该镜不计） | 整片没有任何 ≥0.25 s 的无旁白窗口（每镜 lead/hold/tail 太小）；音轨短于 1 s |
+| **F6** | 旁白/原声比例 | 素材线现在有旁白侧链（`audio.voice_duck_db`，默认 6 dB）：人声段自动压低配乐与环境层，间隙恢复。`music_gain` 默认已降到 0.05，两者一起保证这条判据能过 | **本镜窗口内**旁白 RMS 比无旁白窗口（lead/hold/tail）RMS 高 ≥12 dB；无旁白窗口要 **≥0.25 s** 才计入（`tail` 调小到 0.2 s 以下时该镜不计） | 整片没有任何 ≥0.25 s 的无旁白窗口（每镜 lead/hold/tail 太小）；音轨短于 1 s |
 | **F7** | 人工签核 | 联系表存在 + 签核指纹匹配（指纹含 lines/shot/treatment/subtitle/audio/credit/pacing/licensing/sources/video/EDL——改配乐音量、`licensing.allow_sparse_sources` 或片尾出处卡同样失效） | 未签核 / 内容已变 |
 | **F8** | 素材多样性 | `distinct < 硬下限` fail；`< 推荐` pass + warning；单源连续 ≥3 镜 / 重复取景窗 >0 warning | 写了 `licensing.allow_sparse_sources`（需带 `why`）；没有时间轴 |
 | **F9** | 字幕排版 | 每条 ≤2 行、每行 ≤ 安全宽（`w - margin_l - margin_r`，与写入端同口径）、`MarginV + 行数×1.2×字号` 不越画布底 | 没有 sub.ass / sub.ass 里没有 Dialogue 行 / 剧本无字幕 / 没有 filmkit（量不了像素宽） |

@@ -446,7 +446,15 @@ def st_compose(footage, work, out, spec, args):
     for i, ly in enumerate(layers, start=1):
         span = ly["end"] - ly["start"]
         fade = min(ly["fade"], span / 2.0)
-        sub = ["format=rgba", "trim=0:%.3f" % span,
+        # 图层定位：单帧 PNG 先 loop 成长流，再在**图层自己的绝对时间轴**上 trim 出
+        # [start, end)，最后整体平移到 start。三种写法里只有这一种在大偏移上还活着：
+        # 旧的 "trim=0:span,setpts=PTS-STARTPTS+start/TB"（先把 PTS 直接推到 start）
+        # 在 concat 出来的底片上，偏移 ≥ 约 289s 的图层会被 ffmpeg **静默丢弃**
+        # （实测 285s 还在、289s 消失，日志照样写"N 层已叠"、审计 0 error）。
+        # fade 用平移后的绝对时间，与 overlay 的 enable 同一时间基准。
+        sub = ["format=rgba",
+               "loop=loop=-1:size=1:start=0",
+               "trim=start=%.3f:end=%.3f" % (ly["start"], ly["end"]),
                "setpts=PTS-STARTPTS+%.3f/TB" % ly["start"]]
         if fade > 0:
             sub.append("fade=t=in:st=%.3f:d=%.3f:alpha=1" % (ly["start"], fade))
@@ -481,7 +489,11 @@ def st_compose(footage, work, out, spec, args):
     cmd += ["-filter_complex", ";".join(chain),
             "-map", "[vout]", "-map", "%d:a" % audio_idx,
             "-c:v", "libx264", "-crf", str(args.crf), "-preset", args.preset,
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            # 输出端钉 CFR：底片是 concat 出来的，帧间隔并非严格 1/fps（实测 avg 29.898），
+            # 不钉就会交付"标称 30fps、实际 29.9"的片子。
+            "-r", "%g" % fps, "-fps_mode", "cfr",
+            "-c:a", "aac", "-b:a", "192k",
             "-ar", "48000", "-ac", "2", "-t", "%.3f" % ad,
             "-movflags", "+faststart", str(out)]
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -495,15 +507,26 @@ def st_compose(footage, work, out, spec, args):
 
 
 def st_qa(out, work, args):
-    """调 qa_frames 做帧级深检；素材线硬切用 --shots 传切点，避免误报闪烁。"""
+    """调 qa_frames 做帧级深检；素材线硬切用 --shots 传切点，避免误报闪烁。
+
+    两处口径必须对齐（都是实测踩出来的）：
+      · 切点取 shot_start（画面真正切的时间），不是 start（旁白起）。两者差一个 lead，
+        默认 0.30s，而 qa_frames 的白名单窗口只有 ±0.12s —— 取 start 会让**每一个**
+        硬切都落在窗外、降级机制等于不存在（实测 190/190 未命中）。
+      · work/cues.json 存在就透传：作者登记的视觉事件（闪白/震屏）要靠它解释，
+        不传的话"声明过的设计事件"照样记 error。
+    """
     work = Path(work)
     tl = _load_json(work / "timeline.json") or {}
     rows = tl.get("lines") or []
-    shots = [round(float(r["start"]), 3) for r in rows[1:]]
+    shots = [round(float(r.get("shot_start", r["start"])), 3) for r in rows[1:]]
     shots_json = work / "shot_cuts.json"
     _write_json(shots_json, shots)
     cmd = [sys.executable, os.path.join(HERE, "qa_frames.py"), str(Path(out).resolve()),
            "--shots", str(shots_json), "--out", str(work / "qa" / "deep.json")]
+    cues_json = work / "cues.json"
+    if cues_json.exists():
+        cmd += ["--cues", str(cues_json)]
     # 必须显式 utf-8：子进程输出是 UTF-8，Windows 默认按 GBK 解码会出乱码
     p = subprocess.run(cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="replace")

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -271,6 +272,37 @@ def st_assemble(foot, work, args):
     return {"out": out, "silent": silent, "ass": ass}
 
 
+def _run_deep_check(work, out, tl):
+    """跑 qa_frames 帧级深检（只读成片），返回 {ok, summary, errors, report}。
+
+    失败不阻断 F 门禁的既有结论（flicker/空窗只是补充证据），但要如实写进 payload，
+    并让 --strict-qa 把它一起判死 —— "没跑"和"跑了但有 error"必须能分开。
+    """
+    import subprocess as _sp
+    shots = [round(float(r.get("shot_start", r["start"])), 3)
+             for r in (tl.get("lines") or [])[1:]]
+    shots_json = Path(work) / "qa" / "shot_cuts.json"
+    shots_json.parent.mkdir(parents=True, exist_ok=True)
+    shots_json.write_text(json.dumps(shots), encoding="utf-8")
+    report = Path(work) / "qa" / "deep.json"
+    cmd = [sys.executable, str(Path(__file__).with_name("qa_frames.py")), str(Path(out).resolve()),
+           "--shots", str(shots_json), "--out", str(report)]
+    cues = Path(work) / "cues.json"
+    if cues.exists():
+        cmd += ["--cues", str(cues)]
+    p = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if p.returncode != 0:
+        return {"ok": False, "error": (p.stderr or p.stdout or "")[-400:].strip()}
+    data = _load_json(report) if report.exists() else {}
+    errs = data.get("errors") or []
+    blacks = data.get("black_windows") or []
+    fl = data.get("flicker") or []
+    return {"ok": not errs, "report": str(report),
+            "summary": "闪烁 %d（已解释 %d）/ 空窗 %d / error %d"
+                       % (len(fl), sum(1 for f in fl if f.get("expected")), len(blacks), len(errs)),
+            "errors": errs[:5]}
+
+
 def st_qa(foot, work, args):
     log("== qa 质检")
     import footageqa
@@ -279,7 +311,15 @@ def st_qa(foot, work, args):
         raise SystemExit("找不到成片：先跑 --stage assemble")
     tl = _load_json(work / "timeline.json") if (work / "timeline.json").exists() else {"lines": []}
     edl = _load_json(work / "edl.json") if (work / "edl.json").exists() else {"shots": []}
-    return footageqa.run_all(foot, work, out, tl, edl, strict=args.strict_qa)
+    payload = footageqa.run_all(foot, work, out, tl, edl, strict=args.strict_qa)
+    # 素材线原来只跑 F1..F9 + 容器级质检，**没有帧级深检**（闪烁/空窗/同步），
+    # 而 SKILL.md 说这一步会自动继承深检 —— 报告就"看起来查过了"。这里补上：
+    # 复用 qa_frames，切点用 shot_start（真硬切位置），cues.json 存在就带上。
+    if os.environ.get("FOOTAGE_SKIP_DEEP") != "1":
+        deep = _run_deep_check(work, out, tl)
+        payload["deep"] = deep
+        log("  [deep] %s" % (deep.get("summary") or deep.get("error") or ""))
+    return payload
 
 
 STAGES = {
